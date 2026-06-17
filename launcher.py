@@ -11,6 +11,7 @@
 import json
 import os
 import queue
+import random
 import subprocess
 import sys
 import threading
@@ -156,6 +157,35 @@ class Launcher:
                foreground=[('selected', t['accent_fg'])])
         st.configure('TProgressbar', background=t['accent'], troughcolor=t['tree_bg'])
 
+    def _build_starfield(self, parent):
+        """Процедурная «космическая» шапка на Canvas (без внешних картинок)."""
+        t = self.theme
+        h = int(t.get('header_height', 96))
+        cv = tk.Canvas(parent, height=h, bg=t['bg'], highlightthickness=0, bd=0)
+        cv.pack(fill=tk.X)
+        self._starfield_canvas = cv
+
+        def draw(_=None):
+            cv.delete('all')
+            w = cv.winfo_width() or 1000
+            rnd = random.Random(42)            # фикс. сид — стабильный узор
+            for _i in range(int(w / 6)):
+                x = rnd.randint(0, w); y = rnd.randint(0, h)
+                r = rnd.choice([0, 0, 0, 1, 1, 2])
+                col = rnd.choice([t['muted'], t['fg'], t['accent'], t['tree_sel']])
+                cv.create_oval(x - r, y - r, x + r, y + r, fill=col, outline='')
+            # лёгкая «туманность» — полупрозрачность tkinter не умеет, делаем линией
+            cv.create_line(0, h - 1, w, h - 1, fill=t['accent'])
+            title = t.get('title', '◆ SPACE RANGERS · MODS LAUNCHER')
+            cv.create_text(20, h // 2 - 8, anchor=tk.W, text=title, fill=t['accent'],
+                           font=(t['font_family'], int(t['font_size']) + 9, 'bold'))
+            sub = t.get('subtitle', 'агрегатор модов · сборка по рецепту')
+            cv.create_text(22, h // 2 + 18, anchor=tk.W, text=sub, fill=t['muted'],
+                           font=(t['font_family'], int(t['font_size']) - 1))
+
+        cv.bind('<Configure>', draw)
+        self.root.after(50, draw)
+
     # ---------- UI ----------
     def _build_ui(self):
         root = ttk.Frame(self.root, style='TFrame')
@@ -172,7 +202,9 @@ class Launcher:
                 tk.Label(head, image=self.banner_img, bg=self.theme['bg']).pack(anchor=tk.W)
             except Exception:
                 pass
-        if self.banner_img is None:
+        if self.banner_img is None and self.theme.get('header_style') == 'starfield':
+            self._build_starfield(head)
+        elif self.banner_img is None:
             ttk.Label(head, text='◆ SR MODS LAUNCHER', style='Title.TLabel').pack(anchor=tk.W)
 
         # settings row
