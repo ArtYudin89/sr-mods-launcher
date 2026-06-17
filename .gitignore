@@ -1,0 +1,18 @@
+# PyInstaller
+/build/
+/dist/
+*.spec
+
+# Python
+__pycache__/
+*.pyc
+
+# Runtime-данные лаунчера (создаются при запуске)
+/profiles/
+launcher_config.json
+
+# Локальная папка модов (если запускают из каталога лаунчера)
+/Mods/
+_dl.zip
+_chunk_*
+_*_code.zip

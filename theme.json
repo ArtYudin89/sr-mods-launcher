@@ -1,0 +1,15 @@
+{
+  "name": "Space Dark",
+  "bg": "#0b0e17",
+  "panel": "#141a26",
+  "fg": "#d6e1ff",
+  "muted": "#7f8db0",
+  "accent": "#3a6df0",
+  "accent_fg": "#ffffff",
+  "tree_bg": "#0f1521",
+  "tree_sel": "#1f3a6e",
+  "font_family": "Segoe UI",
+  "font_size": 10,
+  "mono_family": "Consolas",
+  "banner": ""
+}
