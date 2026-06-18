@@ -237,17 +237,26 @@ def reconstruct_unit(repo, camp, unit, mods_dir, token, progress_cb=None,
     if dry_run:
         return stats
 
-    # 4) Скачать каждый нужный чанк и извлечь нужные блобы
+    # 4) Скачать каждый нужный чанк и извлечь нужные блобы.
+    #    Источник чанка определяется индексом: 'url' (HF/любой хост) или
+    #    'release_tag' (старый GitHub-формат).
     for chunk, shamap in need.items():
-        tag = index['chunks'][chunk]['release_tag']
-        crel = release_by_tag(repo, tag, token)
-        casset = next((a for a in crel.get('assets', []) if a['name'] == chunk), None)
-        if not casset:
-            log(f'[warn] чанк {chunk} не найден в релизе {tag}')
-            continue
+        meta = index['chunks'].get(chunk, {})
         cpath = tmp / f'_chunk_{chunk}'
         log(f'Скачивание чанка {chunk} ({len(shamap)} блобов нужно) ...')
-        download_asset(casset, token, cpath, progress_cb)
+        url = meta.get('url')
+        if url:                                  # HF public / любой прямой URL
+            # для публичного HF токен GitHub не нужен (и мешает); шлём только для github-store
+            ctoken = token if meta.get('store') == 'github' else None
+            download_url(url, ctoken, cpath, progress_cb)
+        else:                                    # back-compat: GitHub release по тегу
+            tag = meta.get('release_tag')
+            crel = release_by_tag(repo, tag, token)
+            casset = next((a for a in crel.get('assets', []) if a['name'] == chunk), None)
+            if not casset:
+                log(f'[warn] чанк {chunk} не найден (url/release)')
+                continue
+            download_asset(casset, token, cpath, progress_cb)
         with zipfile.ZipFile(cpath) as z:
             for sh, relpath in shamap.items():
                 target = mods_dir / install_relpath(relpath)
