@@ -301,9 +301,13 @@ class Launcher:
             self.tree.delete(i)
         for idx, m in enumerate(self.profile.get('mods', [])):
             dl = m.get('last_downloaded')
+            name = m.get('name', '?')
+            if m.get('type') == 'unit' and m.get('mod'):
+                name = f'{name} · {m["mod"]}'
             self.tree.insert('', tk.END, iid=str(idx), values=(
-                m.get('name', '?'),
-                m.get('type', 'zip'),
+                name,
+                ('мод' if m.get('mod') else m.get('type', 'zip')) if m.get('type') == 'unit'
+                else m.get('type', 'zip'),
                 '✅' if dl else '⏳',
                 fmt_date(m.get('last_updated')),
                 fmt_date(dl) if dl else 'никогда',
@@ -361,7 +365,7 @@ class Launcher:
 
     # ---------- mods ----------
     def _add_mod(self):
-        AddModDialog(self.root, self.theme, self._on_mod_added)
+        AddModDialog(self.root, self.theme, self._on_mod_added, self._token())
 
     def _on_mod_added(self, mod):
         self.profile.setdefault('mods', []).append(mod)
@@ -445,7 +449,7 @@ class Launcher:
                     if m.get('type') == 'unit':
                         st = core.reconstruct_unit(m['repo'], m['camp'], m['unit'],
                                                    mods_dir, tok, self._progress, self.log,
-                                                   tmp_dir=HERE)
+                                                   tmp_dir=HERE, mod=m.get('mod') or None)
                         m['last_updated'] = st.get('updated') or m.get('last_updated')
                     else:
                         up = core.install_zip(m['url'], mods_dir, tok, self._progress,
@@ -523,11 +527,13 @@ def _ask(parent, title, prompt):
 
 
 class AddModDialog:
-    """Диалог добавления мода: тип zip (URL) или unit (агрегатор)."""
-    def __init__(self, parent, theme, on_ok):
+    """Диалог добавления мода: тип zip (URL) или unit (агрегатор).
+    Для unit можно указать один мод (mod_key) — пусто = весь юнит."""
+    def __init__(self, parent, theme, on_ok, token=''):
         self.on_ok = on_ok
+        self.token = token
         self.dlg = d = tk.Toplevel(parent)
-        d.title('Добавить мод'); d.transient(parent); d.grab_set(); d.geometry('520x300')
+        d.title('Добавить мод'); d.transient(parent); d.grab_set(); d.geometry('560x340')
         self.type_var = tk.StringVar(value='unit')
         tf = ttk.Frame(d); tf.pack(fill=tk.X, padx=14, pady=(14, 4))
         ttk.Label(tf, text='Тип:').pack(side=tk.LEFT)
@@ -537,12 +543,13 @@ class AddModDialog:
                         value='zip', command=self._switch).pack(side=tk.LEFT)
         self.body = ttk.Frame(d); self.body.pack(fill=tk.BOTH, expand=True, padx=14, pady=6)
         self.vars = {k: tk.StringVar() for k in
-                     ('name', 'url', 'repo', 'camp', 'unit')}
+                     ('name', 'url', 'repo', 'camp', 'unit', 'mod')}
         self.vars['repo'].set('ArtYudin89/sr-mods-aggregator')
+        self.mod_combo = None
         bf = ttk.Frame(d); bf.pack(pady=10)
         ttk.Button(bf, text='Добавить', style='Accent.TButton',
                    command=self._ok).pack(side=tk.LEFT, padx=4)
-        ttk.Button(bf, text='Отмена', command=d.destroy).pack(side=tk.LEFT)
+        ttk.Button(bf, text='Отмена', command=self.dlg.destroy).pack(side=tk.LEFT)
         self._switch()
 
     def _row(self, label, key):
@@ -550,9 +557,39 @@ class AddModDialog:
         ttk.Label(r, text=label, width=16).pack(side=tk.LEFT)
         ttk.Entry(r, textvariable=self.vars[key]).pack(side=tk.LEFT, fill=tk.X, expand=True)
 
+    def _mod_row(self):
+        r = ttk.Frame(self.body); r.pack(fill=tk.X, pady=4)
+        ttk.Label(r, text='Мод (пусто=весь):', width=16).pack(side=tk.LEFT)
+        self.mod_combo = ttk.Combobox(r, textvariable=self.vars['mod'])
+        self.mod_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(r, text='⟳ Список', width=9, command=self._load_mods).pack(side=tk.LEFT, padx=4)
+
+    def _load_mods(self):
+        repo = self.vars['repo'].get().strip()
+        camp = self.vars['camp'].get().strip()
+        unit = self.vars['unit'].get().strip()
+        if not (repo and camp and unit):
+            messagebox.showinfo('Список модов', 'Сначала укажите repo/camp/unit'); return
+        tok = self.token or os.environ.get('GH_TOKEN', '')
+
+        def work():
+            try:
+                mods = core.list_unit_mods(repo, camp, unit, tok)
+            except Exception as e:
+                self.dlg.after(0, lambda: messagebox.showerror('Список модов', str(e)))
+                return
+            def apply():
+                if self.mod_combo is not None:
+                    self.mod_combo['values'] = mods
+                messagebox.showinfo('Список модов',
+                                    f'Найдено модов: {len(mods)}\n(пусто = весь юнит)')
+            self.dlg.after(0, apply)
+        threading.Thread(target=work, daemon=True).start()
+
     def _switch(self):
         for w in self.body.winfo_children():
             w.destroy()
+        self.mod_combo = None
         self._row('Название:', 'name')
         if self.type_var.get() == 'zip':
             self._row('Ссылка Release:', 'url')
@@ -560,6 +597,7 @@ class AddModDialog:
             self._row('Репозиторий:', 'repo')
             self._row('Лагерь (camp):', 'camp')
             self._row('Юнит (unit):', 'unit')
+            self._mod_row()
 
     def _ok(self):
         t = self.type_var.get()
@@ -575,7 +613,7 @@ class AddModDialog:
             if not (v['repo'] and v['camp'] and v['unit']):
                 messagebox.showerror('Ошибка', 'Заполните repo/camp/unit'); return
             mod = {'type': 'unit', 'name': v['name'], 'repo': v['repo'],
-                   'camp': v['camp'], 'unit': v['unit'],
+                   'camp': v['camp'], 'unit': v['unit'], 'mod': v['mod'],
                    'last_downloaded': None, 'last_updated': None}
         self.dlg.destroy()
         self.on_ok(mod)

@@ -175,78 +175,98 @@ def _extract_zip_to(zip_path, mods_dir):
 
 
 # ---------------------------------------------------------------------------
-# Aggregator unit (сборка по рецепту)
+# Aggregator unit (сборка по рецепту) — код И ассеты раздаются с HF
+# по content-addressed чанкам (asset_index). Поддержка установки одного мода.
 # ---------------------------------------------------------------------------
 
+def mod_key(relpath):
+    """Идентичность мода по пути: каталог мода после последнего 'Mods'.
+    'Mods/<Кат>/<Имя>/DATA|CFG/...' -> 'Кат/Имя'; файл прямо в корне мода
+    ('Mods/<Кат>/<Имя>/ModuleInfo.txt') -> тоже 'Кат/Имя' (имя файла отбрасывается);
+    вне Mods/ -> '_base'."""
+    parts = relpath.replace('\\', '/').split('/')
+    idxs = [i for i, p in enumerate(parts) if p.lower() == 'mods']
+    if not idxs:
+        return '_base'
+    key = []
+    for seg in parts[idxs[-1] + 1:-1]:        # без последнего сегмента (имя файла)
+        if seg.lower() in ('data', 'cfg'):
+            break
+        key.append(seg)
+    return '/'.join(key) if key else '_base'
+
+
+def _load_manifest(repo, path, token):
+    """Манифест {files:{relpath:{sha256,size}}} из репо; {} если файла нет."""
+    try:
+        return json.loads(repo_file_bytes(repo, path, token)).get('files', {})
+    except requests.HTTPError:
+        return {}
+
+
+def list_unit_mods(repo, camp, unit, token):
+    """Список mod_key, доступных в юните (по code+asset манифестам), для выбора в GUI.
+    '_base' (общие файлы игры) идёт первым, если есть."""
+    mods = set()
+    for kind in ('code', 'assets'):
+        man = _load_manifest(repo, f'mods/{camp}/{unit}/{kind}.manifest.json', token)
+        for relpath in man:
+            mods.add(mod_key(relpath))
+    base = ['_base'] if '_base' in mods else []
+    return base + sorted(m for m in mods if m != '_base')
+
+
 def reconstruct_unit(repo, camp, unit, mods_dir, token, progress_cb=None,
-                     log=print, tmp_dir=None, dry_run=False):
-    """Собрать установку юнита в mods_dir: код-трек + нужные ассет-чанки.
-    dry_run: всё посчитать и проверить, но не качать чанки/не писать ассеты.
-    Возвращает dict со статистикой."""
+                     log=print, tmp_dir=None, dry_run=False, mod=None):
+    """Собрать юнит (или один мод mod=mod_key) из HF: код И ассеты берутся из
+    content-addressed чанков asset_index по code.manifest + assets.manifest.
+    mod=None -> весь юнит; mod='Кат/Имя' или '_base' -> только этот мод.
+    dry_run: посчитать и проверить без скачивания/записи. Возвращает stats."""
     mods_dir = Path(mods_dir)
     tmp = Path(tmp_dir or mods_dir.parent)
     tmp.mkdir(parents=True, exist_ok=True)
     stats = {'code_files': 0, 'asset_files': 0, 'chunks': [], 'missing': 0,
-             'updated': None}
+             'mod': mod, 'updated': None}
 
-    # 1) Код-трек: последний релиз <camp>-code-*
-    log(f'Поиск код-трека {camp}-code-* ...')
-    rel = latest_release_with_prefix(repo, token, f'{camp}-code-')
-    if not rel:
-        raise RuntimeError(f'нет релиза {camp}-code-* в {repo}')
-    asset = _zip_asset(rel)
-    if not asset:
-        raise RuntimeError(f'в релизе {rel["tag_name"]} нет zip')
-    stats['updated'] = rel.get('published_at')
-    if not dry_run:
-        code_zip = tmp / f'_{camp}_{unit}_code.zip'
-        log(f'Скачивание код-трека {rel["tag_name"]} ...')
-        download_asset(asset, token, code_zip, progress_cb)
-        prefix = f'{camp}/{unit}/code/'
-        with zipfile.ZipFile(code_zip) as z:
-            for n in z.namelist():
-                if not n.startswith(prefix) or n.endswith('/'):
-                    continue
-                inner = n[len(prefix):]
-                target = mods_dir / install_relpath(inner)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with z.open(n) as src, open(target, 'wb') as out:
-                    shutil.copyfileobj(src, out)
-                stats['code_files'] += 1
-        code_zip.unlink(missing_ok=True)
-        log(f'Код-трек: {stats["code_files"]} файлов')
-
-    # 2) Манифест ассетов + индекс
-    man = json.loads(repo_file_bytes(repo, f'mods/{camp}/{unit}/assets.manifest.json', token))
     index = json.loads(repo_file_bytes(repo, 'state/asset_index.json', token))
-    files = man.get('files', {})
+    code_man = _load_manifest(repo, f'mods/{camp}/{unit}/code.manifest.json', token)
+    asset_man = _load_manifest(repo, f'mods/{camp}/{unit}/assets.manifest.json', token)
+    if not code_man and not asset_man:
+        raise RuntimeError(f'нет манифестов для {camp}/{unit} в {repo}')
 
-    # 3) Сгруппировать нужные блобы по чанкам
-    need = {}   # chunk -> {sha256: relpath}
-    for relpath, meta in files.items():
-        sh = meta['sha256']
-        b = index['blobs'].get(sh)
-        if not b:
-            stats['missing'] += 1
-            continue
-        need.setdefault(b['chunk'], {})[sh] = relpath
+    # Сгруппировать нужные блобы по чанкам. Один sha может вести к нескольким
+    # путям (дубли) и из обоих манифестов — храним список (relpath, kind).
+    need = {}    # chunk -> {sha256: [(relpath, kind), ...]}
+    for kind, man in (('code', code_man), ('asset', asset_man)):
+        for relpath, meta in man.items():
+            if mod is not None and mod_key(relpath) != mod:
+                continue
+            sh = meta['sha256']
+            b = index['blobs'].get(sh)
+            if not b:
+                stats['missing'] += 1
+                continue
+            need.setdefault(b['chunk'], {}).setdefault(sh, []).append((relpath, kind))
+
     stats['chunks'] = list(need.keys())
-    stats['asset_files'] = sum(len(v) for v in need.values())
-    log(f'Ассеты: {stats["asset_files"]} файлов в {len(need)} чанках'
+    for shamap in need.values():
+        for targets in shamap.values():
+            for _relpath, kind in targets:
+                stats[f'{kind}_files'] += 1
+    scope = f'мод {mod}' if mod else 'весь юнит'
+    log(f'{scope}: {stats["code_files"]} код + {stats["asset_files"]} ассетов '
+        f'в {len(need)} чанках'
         + (f', НЕ найдено блобов: {stats["missing"]}' if stats['missing'] else ''))
     if dry_run:
         return stats
 
-    # 4) Скачать каждый нужный чанк и извлечь нужные блобы.
-    #    Источник чанка определяется индексом: 'url' (HF/любой хост) или
-    #    'release_tag' (старый GitHub-формат).
+    # Скачать каждый нужный чанк и извлечь блобы во все целевые пути.
     for chunk, shamap in need.items():
         meta = index['chunks'].get(chunk, {})
         cpath = tmp / f'_chunk_{chunk}'
-        log(f'Скачивание чанка {chunk} ({len(shamap)} блобов нужно) ...')
+        log(f'Скачивание чанка {chunk} ({len(shamap)} блобов) ...')
         url = meta.get('url')
         if url:                                  # HF public / любой прямой URL
-            # для публичного HF токен GitHub не нужен (и мешает); шлём только для github-store
             ctoken = token if meta.get('store') == 'github' else None
             download_url(url, ctoken, cpath, progress_cb)
         else:                                    # back-compat: GitHub release по тегу
@@ -258,17 +278,24 @@ def reconstruct_unit(repo, camp, unit, mods_dir, token, progress_cb=None,
                 continue
             download_asset(casset, token, cpath, progress_cb)
         with zipfile.ZipFile(cpath) as z:
-            for sh, relpath in shamap.items():
-                target = mods_dir / install_relpath(relpath)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with z.open(sh) as src, open(target, 'wb') as out:
-                    shutil.copyfileobj(src, out)
+            for sh, targets in shamap.items():
+                data = z.read(sh)
+                for relpath, _kind in targets:
+                    target = mods_dir / install_relpath(relpath)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(data)
         cpath.unlink(missing_ok=True)
     log(f'Готово: {stats["code_files"]} код + {stats["asset_files"]} ассетов в {mods_dir}')
     return stats
 
 
 def unit_remote_updated(repo, camp, token):
-    """Дата обновления (published_at) последнего код-трек релиза лагеря."""
-    rel = latest_release_with_prefix(repo, token, f'{camp}-code-')
-    return rel.get('published_at') if rel else None
+    """Дата последнего коммита репо (отражает обновление кода/ассетов/индекса).
+    Код больше не в релизах — staleness считаем по последнему коммиту ветки."""
+    try:
+        commits = gh_json(f'{API}/repos/{repo}/commits', token, {'per_page': 1})
+        if commits:
+            return commits[0]['commit']['committer']['date']
+    except requests.HTTPError:
+        pass
+    return None
