@@ -299,3 +299,204 @@ def unit_remote_updated(repo, camp, token):
     except requests.HTTPError:
         pass
     return None
+
+
+# ---------------------------------------------------------------------------
+# Фаза 1: моды-дескрипторы (мод = самоописываемый пакет по URL).
+# Дескриптор: {id, source, version, name, depends[], conflicts[], chunk_index_url,
+#              files:{code:{relpath:{sha256,size}}, assets:{...}}}.
+# Каталог descriptors/catalog.json группирует id -> {variants:[...], default_source}.
+# Источник дескриптора может быть: http(s)-URL (форк где угодно), путь в репо
+# (descriptors/<camp>/<unit>/<id>.json), или локальный файл.
+# ---------------------------------------------------------------------------
+
+def _fetch_json(ref, repo=None, token=None):
+    """JSON из http(s)-URL / локального файла / пути в репозитории."""
+    if ref.startswith('http://') or ref.startswith('https://'):
+        r = requests.get(ref, headers=_headers(token, '*/*'), timeout=30)
+        r.raise_for_status()
+        return r.json()
+    p = Path(ref)
+    if p.exists():
+        return json.loads(p.read_text(encoding='utf-8'))
+    if repo:
+        return json.loads(repo_file_bytes(repo, ref, token))
+    raise FileNotFoundError(ref)
+
+
+def load_catalog(ref='descriptors/catalog.json', repo=None, token=None):
+    """Каталог модов: {mod_id: {name, author, default_source, versions_differ, variants}}."""
+    return _fetch_json(ref, repo, token).get('mods', {})
+
+
+def load_descriptor(ref, repo=None, token=None):
+    """Дескриптор одного мода-варианта."""
+    return _fetch_json(ref, repo, token)
+
+
+def _variant_path(catalog, mod_id, source=None):
+    """Путь дескриптора для mod_id (конкретный source или дефолтный)."""
+    ent = catalog.get(mod_id)
+    if not ent:
+        return None
+    vs = ent['variants']
+    if source:
+        for v in vs:
+            if v['source'] == source:
+                return v['path']
+    default = ent.get('default_source')
+    for v in vs:
+        if v['source'] == default:
+            return v['path']
+    return vs[0]['path'] if vs else None
+
+
+def _build_leaf_index(catalog):
+    """Индекс короткое-имя(лист id) -> [полные id]. depends/conflicts в ModuleInfo
+    ссылаются по короткому имени мода, а id каталога = 'Категория/Имя'."""
+    idx = {}
+    for mid in catalog:
+        idx.setdefault(mid.split('/')[-1], []).append(mid)
+    return idx
+
+
+def _resolve_ref_ids(catalog, leaf_index, ref):
+    """ref (полный id или короткое имя) -> список полных id из каталога."""
+    if ref in catalog:
+        return [ref]
+    return list(leaf_index.get(ref, []))
+
+
+def resolve_set(selections, catalog, repo=None, token=None):
+    """Разрешить НАБОР модов: подтянуть зависимости (замыкание по depends через
+    дефолтные варианты каталога) и найти конфликты (ТОЛЬКО показать — не снимаем).
+    depends/conflicts в ModuleInfo ссылаются по короткому имени -> матчим через
+    индекс лист-имя -> id.
+    selections: список выбора, каждый — либо mod_id (str), либо dict
+      {'id':..., 'source':...} (конкретный вариант), либо {'url':...} (форк по URL).
+    Возвращает план: {'mods': {id: descriptor}, 'order': [...], 'requested': set,
+      'added_deps': [...], 'missing_deps': [...], 'conflicts': [(a,b), ...]}."""
+    leaf_index = _build_leaf_index(catalog)
+    mods = {}            # id -> descriptor
+    requested = set()
+    added_deps = []
+    missing_deps = []
+    queue = [(sel if isinstance(sel, dict) else {'id': sel}, False) for sel in selections]
+
+    while queue:
+        sel, is_dep = queue.pop(0)
+        if sel.get('url'):
+            desc = load_descriptor(sel['url'], repo, token)
+        else:
+            ref = sel['id']
+            ids = _resolve_ref_ids(catalog, leaf_index, ref)
+            if not ids:
+                missing_deps.append(ref)
+                continue
+            mid0 = ids[0]                      # при неоднозначности берём первый
+            if mid0 in mods:
+                if not is_dep:
+                    requested.add(mid0)
+                continue
+            desc = load_descriptor(_variant_path(catalog, mid0, sel.get('source')),
+                                   repo, token)
+        mid = desc['id']
+        if not is_dep:
+            requested.add(mid)
+        if mid in mods:
+            continue
+        mods[mid] = desc
+        if is_dep:
+            added_deps.append(mid)
+        for dep in desc.get('depends', []):
+            queue.append(({'id': dep}, True))
+
+    # конфликты внутри набора (по короткому имени, двунаправленно)
+    present_leaf = {}     # лист-имя -> id (для обратного мэппинга)
+    for mid in mods:
+        present_leaf[mid.split('/')[-1]] = mid
+    conflicts = []
+    seen_pairs = set()
+    for mid, desc in mods.items():
+        for c in desc.get('conflicts', []):
+            other = present_leaf.get(c) or (c if c in mods else None)
+            if other and other != mid:
+                pair = tuple(sorted((mid, other)))
+                if pair not in seen_pairs:
+                    seen_pairs.add(pair)
+                    conflicts.append(pair)
+
+    order = sorted(mods)
+    return {'mods': mods, 'order': order, 'requested': requested,
+            'added_deps': sorted(set(added_deps) - requested),
+            'missing_deps': sorted(set(missing_deps)), 'conflicts': conflicts}
+
+
+def load_chunk_index(desc=None, url=None, repo=None, token=None):
+    """Загрузить индекс чанков (blobs/chunks). Источник: chunk_index_url из дескриптора
+    (HF public) с фолбэком на state/asset_index.json в репозитории."""
+    src = url or (desc or {}).get('chunk_index_url')
+    if src:
+        try:
+            return _fetch_json(src, repo, token)
+        except Exception:
+            pass
+    return json.loads(repo_file_bytes(repo, 'state/asset_index.json', token))
+
+
+def install_descriptor(desc, mods_dir, index, token=None, progress_cb=None,
+                       log=print, tmp_dir=None, dry_run=False):
+    """Установить мод из дескриптора: блобы (code+assets) резолвятся по sha через index
+    -> чанки -> извлечение -> запись в mods_dir/install_relpath(relpath)."""
+    mods_dir = Path(mods_dir)
+    tmp = Path(tmp_dir or mods_dir.parent)
+    tmp.mkdir(parents=True, exist_ok=True)
+    files = desc.get('files', {})
+    stats = {'id': desc.get('id'), 'code_files': 0, 'asset_files': 0,
+             'chunks': [], 'missing': 0}
+    need = {}    # chunk -> {sha256: [(relpath, kind)]}
+    for kind in ('code', 'assets'):
+        for relpath, meta in files.get(kind, {}).items():
+            sh = meta['sha256']
+            b = index['blobs'].get(sh)
+            if not b:
+                stats['missing'] += 1
+                continue
+            need.setdefault(b['chunk'], {}).setdefault(sh, []).append((relpath, kind))
+    stats['chunks'] = list(need.keys())
+    for shamap in need.values():
+        for targets in shamap.values():
+            for _rel, kind in targets:
+                stats[('code_files' if kind == 'code' else 'asset_files')] += 1
+    log(f'{desc.get("id")}: {stats["code_files"]} код + {stats["asset_files"]} ассетов '
+        f'в {len(need)} чанках'
+        + (f', НЕ найдено блобов: {stats["missing"]}' if stats['missing'] else ''))
+    if dry_run:
+        return stats
+    for chunk, shamap in need.items():
+        meta = index['chunks'].get(chunk, {})
+        cpath = tmp / f'_chunk_{chunk}'
+        log(f'Скачивание чанка {chunk} ({len(shamap)} блобов) ...')
+        url = meta.get('url')
+        ctoken = token if meta.get('store') == 'github' else None
+        download_url(url, ctoken, cpath, progress_cb)
+        with zipfile.ZipFile(cpath) as z:
+            for sh, targets in shamap.items():
+                data = z.read(sh)
+                for relpath, _kind in targets:
+                    target = mods_dir / install_relpath(relpath)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(data)
+        cpath.unlink(missing_ok=True)
+    log(f'Готово: {desc.get("id")} -> {mods_dir}')
+    return stats
+
+
+def install_set(plan, mods_dir, index, token=None, log=print, tmp_dir=None, dry_run=False):
+    """Установить весь разрешённый набор (resolve_set -> план). Ставит все mods плана."""
+    results = {}
+    for mid in plan['order']:
+        results[mid] = install_descriptor(plan['mods'][mid], mods_dir, index,
+                                          token=token, log=log, tmp_dir=tmp_dir,
+                                          dry_run=dry_run)
+    return results

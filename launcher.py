@@ -266,6 +266,8 @@ class Launcher:
                    command=lambda: self._install(False)).pack(fill=tk.X, pady=2)
         ttk.Button(act, text='⬇  Установить все',
                    command=lambda: self._install(True)).pack(fill=tk.X, pady=2)
+        ttk.Button(act, text='🧩 Установить набор (с зависим.)', style='Accent.TButton',
+                   command=lambda: self._install(True)).pack(fill=tk.X, pady=2)
         ttk.Button(act, text='🗑  Очистить Mods', command=self._clear_mods).pack(fill=tk.X, pady=2)
         ttk.Label(right, text='Прогресс:').pack(anchor=tk.W, pady=(10, 0))
         ttk.Progressbar(right, variable=self.progress_var, maximum=100).pack(fill=tk.X)
@@ -301,14 +303,22 @@ class Launcher:
             self.tree.delete(i)
         for idx, m in enumerate(self.profile.get('mods', [])):
             dl = m.get('last_downloaded')
+            typ = m.get('type', 'zip')
             name = m.get('name', '?')
-            if m.get('type') == 'unit' and m.get('mod'):
+            if typ == 'unit' and m.get('mod'):
                 name = f'{name} · {m["mod"]}'
+            elif typ == 'desc':
+                name = f'{name} · {m.get("id", m.get("url", ""))}'
+            type_label = {'unit': ('мод' if m.get('mod') else 'юнит'),
+                          'desc': 'деск.', 'zip': 'zip'}.get(typ, typ)
+            if m.get('update_available'):
+                status = '⬆ обн.'
+            elif dl:
+                status = '✅'
+            else:
+                status = '⏳'
             self.tree.insert('', tk.END, iid=str(idx), values=(
-                name,
-                ('мод' if m.get('mod') else m.get('type', 'zip')) if m.get('type') == 'unit'
-                else m.get('type', 'zip'),
-                '✅' if dl else '⏳',
+                name, type_label, status,
                 fmt_date(m.get('last_updated')),
                 fmt_date(dl) if dl else 'никогда',
             ))
@@ -406,14 +416,34 @@ class Launcher:
 
     def _refresh_remote_worker(self):
         tok = self._token()
+        cat_cache = {}
         for i, m in enumerate(self.profile.get('mods', [])):
             try:
-                if m.get('type') == 'unit':
+                if m.get('type') == 'desc':
+                    repo = m.get('repo', 'ArtYudin89/sr-mods-aggregator')
+                    cat_ref = m.get('catalog', 'descriptors/catalog.json')
+                    key = (repo, cat_ref)
+                    if key not in cat_cache:
+                        cat_cache[key] = core.load_catalog(cat_ref, repo, tok)
+                    cat = cat_cache[key]
+                    ent = cat.get(m.get('id'))
+                    if ent:
+                        src = m.get('source') or ent.get('default_source')
+                        ver = next((v['version'] for v in ent['variants']
+                                    if v['source'] == src), None) \
+                            or (ent['variants'][0]['version'] if ent['variants'] else None)
+                        m['latest_version'] = ver
+                        m['update_available'] = bool(
+                            m.get('installed_version') and ver
+                            and m['installed_version'] != ver)
+                elif m.get('type') == 'unit':
                     up = core.unit_remote_updated(m['repo'], m['camp'], tok)
+                    if up:
+                        m['last_updated'] = up
                 else:
                     up = core.resolve_zip(m['url'], tok).get('updated')
-                if up:
-                    m['last_updated'] = up
+                    if up:
+                        m['last_updated'] = up
             except Exception as e:
                 self.log(f'{m["name"]}: ошибка обновления ({e})')
         self._post(self._save_profile)
@@ -442,7 +472,9 @@ class Launcher:
         tok = self._token()
         mods_dir = self._mods_dir()
         try:
-            for i in targets:
+            desc_idx = [i for i in targets if self.profile['mods'][i].get('type') == 'desc']
+            other_idx = [i for i in targets if self.profile['mods'][i].get('type') != 'desc']
+            for i in other_idx:
                 m = self.profile['mods'][i]
                 self.log(f'=== {m["name"]} ===')
                 try:
@@ -460,10 +492,64 @@ class Launcher:
                     self._post(self._refresh_list)
                 except Exception as e:
                     self.log(f'ОШИБКА {m["name"]}: {e}')
+            if desc_idx:
+                self._install_desc_set(desc_idx, mods_dir, tok)
         finally:
             self.busy = False
             self._post(self.progress_var.set, 0)
             self.log('Готово')
+
+    def _desc_sel(self, m):
+        if m.get('url'):
+            return {'url': m['url']}
+        sel = {'id': m['id']}
+        if m.get('source'):
+            sel['source'] = m['source']
+        return sel
+
+    def _install_desc_set(self, desc_idx, mods_dir, tok):
+        """Разрешить набор дескрипторов (зависимости+конфликты) и установить."""
+        mods = self.profile['mods']
+        repo = mods[desc_idx[0]].get('repo', 'ArtYudin89/sr-mods-aggregator')
+        cat_ref = mods[desc_idx[0]].get('catalog', 'descriptors/catalog.json')
+        self.log(f'=== Набор: {len(desc_idx)} мод(ов) — разрешаю зависимости ===')
+        try:
+            cat = core.load_catalog(cat_ref, repo, tok)
+            sels = [self._desc_sel(mods[i]) for i in desc_idx]
+            plan = core.resolve_set(sels, cat, repo, tok)
+        except Exception as e:
+            self.log(f'ОШИБКА разрешения набора: {e}')
+            return
+        if plan['added_deps']:
+            self.log(f'➕ подтянуты зависимости: {", ".join(plan["added_deps"])}')
+        if plan['missing_deps']:
+            self.log(f'⚠ НЕ найдены зависимости: {", ".join(plan["missing_deps"])}')
+        if plan['conflicts']:
+            for a, b in plan['conflicts']:
+                self.log(f'⚠ КОНФЛИКТ: {a} ⟷ {b}')
+            self.log('(конфликты показаны; устанавливаю как просили — решение за вами)')
+        self.log(f'Набор: {len(plan["order"])} модов к установке')
+        try:
+            idx_url = next((d.get('chunk_index_url') for d in plan['mods'].values()
+                            if d.get('chunk_index_url')), None)
+            index = core.load_chunk_index(url=idx_url, repo=repo, token=tok)
+            results = core.install_set(plan, mods_dir, index, token=tok,
+                                       log=self.log, tmp_dir=HERE)
+        except Exception as e:
+            self.log(f'ОШИБКА установки набора: {e}')
+            return
+        # обновить установленные версии у запрошенных модов профиля
+        now = datetime.now().isoformat()
+        for i in desc_idx:
+            m = mods[i]
+            mid = m.get('id')
+            if mid and mid in plan['mods']:
+                m['installed_version'] = plan['mods'][mid].get('version')
+                m['last_updated'] = m['installed_version']
+            m['last_downloaded'] = now
+        self._post(self._save_profile)
+        self._post(self._refresh_list)
+        self.log(f'Набор установлен: {len(results)} модов')
 
     def _clear_mods(self):
         d = self._mods_dir()
@@ -533,19 +619,23 @@ class AddModDialog:
         self.on_ok = on_ok
         self.token = token
         self.dlg = d = tk.Toplevel(parent)
-        d.title('Добавить мод'); d.transient(parent); d.grab_set(); d.geometry('560x340')
-        self.type_var = tk.StringVar(value='unit')
+        d.title('Добавить мод'); d.transient(parent); d.grab_set(); d.geometry('600x380')
+        self.type_var = tk.StringVar(value='desc')
         tf = ttk.Frame(d); tf.pack(fill=tk.X, padx=14, pady=(14, 4))
         ttk.Label(tf, text='Тип:').pack(side=tk.LEFT)
+        ttk.Radiobutton(tf, text='Мод (дескриптор)', variable=self.type_var,
+                        value='desc', command=self._switch).pack(side=tk.LEFT, padx=8)
         ttk.Radiobutton(tf, text='Юнит агрегатора', variable=self.type_var,
                         value='unit', command=self._switch).pack(side=tk.LEFT, padx=8)
         ttk.Radiobutton(tf, text='Generic ZIP', variable=self.type_var,
                         value='zip', command=self._switch).pack(side=tk.LEFT)
         self.body = ttk.Frame(d); self.body.pack(fill=tk.BOTH, expand=True, padx=14, pady=6)
         self.vars = {k: tk.StringVar() for k in
-                     ('name', 'url', 'repo', 'camp', 'unit', 'mod')}
+                     ('name', 'url', 'repo', 'camp', 'unit', 'mod', 'id', 'source', 'fork_url')}
         self.vars['repo'].set('ArtYudin89/sr-mods-aggregator')
         self.mod_combo = None
+        self.cat_combo = None
+        self._catalog = {}
         bf = ttk.Frame(d); bf.pack(pady=10)
         ttk.Button(bf, text='Добавить', style='Accent.TButton',
                    command=self._ok).pack(side=tk.LEFT, padx=4)
@@ -586,13 +676,56 @@ class AddModDialog:
             self.dlg.after(0, apply)
         threading.Thread(target=work, daemon=True).start()
 
+    def _cat_row(self):
+        r = ttk.Frame(self.body); r.pack(fill=tk.X, pady=4)
+        ttk.Label(r, text='Мод из каталога:', width=16).pack(side=tk.LEFT)
+        self.cat_combo = ttk.Combobox(r, textvariable=self.vars['id'])
+        self.cat_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.cat_combo.bind('<<ComboboxSelected>>', self._on_cat_pick)
+        ttk.Button(r, text='⟳ Каталог', width=10,
+                   command=self._load_catalog).pack(side=tk.LEFT, padx=4)
+
+    def _on_cat_pick(self, _e=None):
+        mid = self.vars['id'].get().strip()
+        ent = self._catalog.get(mid)
+        if ent and not self.vars['name'].get().strip():
+            self.vars['name'].set(ent.get('name') or mid.split('/')[-1])
+
+    def _load_catalog(self):
+        repo = self.vars['repo'].get().strip()
+        cat_ref = 'descriptors/catalog.json'
+        tok = self.token or os.environ.get('GH_TOKEN', '')
+
+        def work():
+            try:
+                cat = core.load_catalog(cat_ref, repo, tok)
+            except Exception as e:
+                self.dlg.after(0, lambda: messagebox.showerror('Каталог', str(e)))
+                return
+
+            def apply():
+                self._catalog = cat
+                if self.cat_combo is not None:
+                    self.cat_combo['values'] = sorted(cat)
+                messagebox.showinfo('Каталог', f'Загружено модов: {len(cat)}\n'
+                                    'Выберите мод (зависимости подтянутся при установке).')
+            self.dlg.after(0, apply)
+        threading.Thread(target=work, daemon=True).start()
+
     def _switch(self):
         for w in self.body.winfo_children():
             w.destroy()
         self.mod_combo = None
+        self.cat_combo = None
         self._row('Название:', 'name')
-        if self.type_var.get() == 'zip':
+        t = self.type_var.get()
+        if t == 'zip':
             self._row('Ссылка Release:', 'url')
+        elif t == 'desc':
+            self._row('Репозиторий:', 'repo')
+            self._cat_row()
+            self._row('Источник (опц.):', 'source')
+            self._row('URL форка (опц.):', 'fork_url')
         else:
             self._row('Репозиторий:', 'repo')
             self._row('Лагерь (camp):', 'camp')
@@ -602,6 +735,17 @@ class AddModDialog:
     def _ok(self):
         t = self.type_var.get()
         v = {k: self.vars[k].get().strip() for k in self.vars}
+        if t == 'desc':
+            if not (v['id'] or v['fork_url']):
+                messagebox.showerror('Ошибка', 'Выберите мод из каталога или укажите URL форка')
+                return
+            name = v['name'] or (v['id'].split('/')[-1] if v['id'] else 'форк')
+            mod = {'type': 'desc', 'name': name,
+                   'repo': v['repo'] or 'ArtYudin89/sr-mods-aggregator',
+                   'catalog': 'descriptors/catalog.json',
+                   'id': v['id'], 'source': v['source'], 'url': v['fork_url'],
+                   'installed_version': None, 'last_downloaded': None, 'last_updated': None}
+            self.dlg.destroy(); self.on_ok(mod); return
         if not v['name']:
             messagebox.showerror('Ошибка', 'Укажите название'); return
         if t == 'zip':
