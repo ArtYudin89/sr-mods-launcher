@@ -436,12 +436,17 @@ def load_chunk_index(desc=None, url=None, repo=None, token=None):
     """Загрузить индекс чанков (blobs/chunks). Источник: chunk_index_url из дескриптора
     (HF public) с фолбэком на state/asset_index.json в репозитории."""
     src = url or (desc or {}).get('chunk_index_url')
+    last_err = None
     if src:
         try:
             return _fetch_json(src, repo, token)
-        except Exception:
-            pass
-    return json.loads(repo_file_bytes(repo, 'state/asset_index.json', token))
+        except Exception as e:
+            last_err = e
+    if repo:
+        return json.loads(repo_file_bytes(repo, 'state/asset_index.json', token))
+    if last_err:
+        raise last_err
+    raise ValueError('load_chunk_index: не указан ни url/chunk_index_url, ни repo')
 
 
 def install_descriptor(desc, mods_dir, index, token=None, progress_cb=None,
