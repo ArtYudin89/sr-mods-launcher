@@ -56,6 +56,16 @@ pyinstaller --onefile --windowed --name SRModsLauncher --add-data "theme.json;."
 
 Результат: `dist\SRModsLauncher.exe` — самодостаточный файл (Python и библиотеки внутри).
 
+**Антивирус (ложное срабатывание):** `--onefile` exe часто помечается Chrome/Defender как
+«вирус» (эвристика на самораспаковку PyInstaller). Это ложь, но мешает скачиванию. Решение —
+собирать **`--onedir`** и отдавать zip:
+```
+pyinstaller --onedir --windowed --name SRModsLauncher --add-data "theme.json;." launcher.py
+# затем запаковать папку dist\SRModsLauncher в zip и приложить к релизу
+```
+Папочная сборка флагуется заметно реже; в Releases есть `SRModsLauncher-folder.zip`. Радикально
+проблему решает подпись сертификатом (платно).
+
 Замечания по сборке:
 - `--windowed` — без консольного окна (GUI-приложение).
 - `theme.json` встроен в exe как тема по умолчанию. Чтобы переопределить оформление,
