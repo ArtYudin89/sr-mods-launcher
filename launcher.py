@@ -286,12 +286,12 @@ class Launcher:
                          ('⟳', self._refresh_remote)]:
             ttk.Button(bf, text=txt, width=3, command=cmd).pack(side=tk.LEFT, padx=1)
 
-        cols = ('status', 'updated', 'downloaded')
+        cols = ('kind', 'status', 'installed')
         self.tree = ttk.Treeview(left, columns=cols, show='tree headings', height=18)
         self.tree.heading('#0', text='Лагерь / Пак / Мод')
-        self.tree.column('#0', width=340, anchor=tk.W)
-        for c, txt, w in [('status', 'Статус', 80), ('updated', 'Обновлён', 120),
-                          ('downloaded', 'Скачан', 120)]:
+        self.tree.column('#0', width=320, anchor=tk.W)
+        for c, txt, w in [('kind', 'Тип', 70), ('status', 'Статус', 110),
+                          ('installed', 'Установлен', 130)]:
             self.tree.heading(c, text=txt)
             self.tree.column(c, width=w, anchor=tk.CENTER)
         sb = ttk.Scrollbar(left, orient=tk.VERTICAL, command=self.tree.yview)
@@ -338,67 +338,109 @@ class Launcher:
     def _progress(self, done, total):
         self._post(self.progress_var.set, (done / total * 100) if total else 0)
 
-    # ---------- list (дерево) ----------
-    def _status_of(self, m):
-        if m.get('update_available'):
-            return '⬆ обн.'
-        return '✅' if m.get('last_downloaded') else '⏳'
+    # ---------- list (единое дерево: Лагерь→Пак→Мод; колонка «Установлен» = есть на диске) ----------
+    def _disk_mods(self):
+        """{mod_id: дата(isoformat) по mtime папки} — что физически лежит в Mods."""
+        import os
+        mods_dir = self._mods_dir()
+        out = {}
+        try:
+            for mid in core.scan_installed_mods(mods_dir):
+                try:
+                    p = mods_dir / mid.replace('/', os.sep)
+                    out[mid] = datetime.fromtimestamp(p.stat().st_mtime).isoformat()
+                except Exception:
+                    out[mid] = ''
+        except Exception:
+            pass
+        return out
+
+    def _camp_of(self, mid):
+        cat = getattr(self, '_catalog_cache', None) or {}
+        ent = cat.get(mid)
+        if ent and ent.get('variants'):
+            src = ent.get('default_source') or ent['variants'][0]['source']
+            return src.split('/')[0]
+        return mid.split('/')[0] if '/' in mid else 'прочее'   # фолбэк: категория
 
     def _refresh_list(self):
         for i in self.tree.get_children():
             self.tree.delete(i)
+        disk = self._disk_mods()
 
-        # 1) Набор (профиль): Лагерь -> Пак -> Мод
-        root_set = self.tree.insert('', tk.END, text='📋 Набор (профиль)', open=True)
-        camp_nodes = {}
+        def st_of(m, on_disk):
+            if m.get('update_available'):
+                return '⬆ обновление'
+            return '✅ установлен' if on_disk else '➕ добавлен'
 
-        def camp_node(camp):
-            camp = camp or 'прочее'
-            if camp not in camp_nodes:
-                camp_nodes[camp] = self.tree.insert(root_set, tk.END,
-                                                    text=f'🗂 {camp}', open=True)
-            return camp_nodes[camp]
-
+        items = []          # (camp, pack, kind, label, status, date, iid)
+        seen = set()
         for idx, m in enumerate(self.profile.get('mods', [])):
-            iid = f'p{idx}'
-            typ = m.get('type', 'zip')
-            st = self._status_of(m)
-            upd = fmt_date(m.get('last_updated'))
-            dl = fmt_date(m.get('last_downloaded')) if m.get('last_downloaded') else 'никогда'
-            vals = (st, upd, dl)
-            if typ == 'camp':
-                self.tree.insert(camp_node(m.get('camp')), tk.END, iid=iid,
-                                 text='★ весь лагерь', values=vals)
+            typ = m.get('type'); iid = f'p{idx}'
+            if typ == 'unit' and m.get('mod'):
+                mid = m['mod']; seen.add(mid)
+                on = (mid in disk) or bool(m.get('last_downloaded'))
+                date = m.get('last_downloaded') or disk.get(mid, '')
+                items.append((m.get('camp', 'прочее'), m.get('unit'), 'мод',
+                              mid.split('/')[-1], st_of(m, on), date if on else '', iid))
             elif typ == 'unit':
-                label = m.get('name', m.get('unit', '?'))
-                if m.get('mod'):
-                    label = f'• {m["mod"]}'
-                else:
-                    label = f'■ {label} (пак)'
-                self.tree.insert(camp_node(m.get('camp')), tk.END, iid=iid,
-                                 text=label, values=vals)
-            else:  # desc / zip / форк
-                host = self.tree.insert(root_set, tk.END, text='🔗 по ссылке/прочее') \
-                    if 'misc' not in camp_nodes else camp_nodes['misc']
-                camp_nodes['misc'] = host
-                nm = m.get('name') or m.get('id') or m.get('url', '?')
-                self.tree.insert(host, tk.END, iid=iid, text=f'• {nm}', values=vals)
+                on = bool(m.get('last_downloaded'))
+                items.append((m.get('camp', 'прочее'), m.get('unit'), 'пак',
+                              m.get('name', m.get('unit')), st_of(m, on),
+                              m.get('last_downloaded', '') if on else '', iid))
+            elif typ == 'camp':
+                on = bool(m.get('last_downloaded'))
+                items.append((m.get('camp', 'прочее'), None, 'лагерь', '★ весь лагерь',
+                              st_of(m, on), m.get('last_downloaded', '') if on else '', iid))
+            else:
+                on = bool(m.get('last_downloaded'))
+                items.append(('прочее', None, 'форк' if typ == 'desc' else 'zip',
+                              m.get('name') or m.get('id') or m.get('url', ''),
+                              st_of(m, on), m.get('last_downloaded', '') if on else '', iid))
+        for mid, ts in sorted(disk.items()):     # на диске, но не в наборе
+            if mid in seen:
+                continue
+            items.append((self._camp_of(mid), None, 'мод', mid.split('/')[-1],
+                          '✅ установлен', ts, None))
 
-        # 2) Установлено в игре (скан папки Mods, оффлайн, группировка по категории)
-        try:
-            installed = core.scan_installed_mods(self._mods_dir())
-        except Exception:
-            installed = []
-        if installed:
-            root_inst = self.tree.insert('', tk.END,
-                                         text=f'💾 Установлено в игре ({len(installed)})', open=False)
-            cat_nodes = {}
-            for mid in installed:
-                cat = mid.split('/')[0] if '/' in mid else '(корень)'
-                if cat not in cat_nodes:
-                    cat_nodes[cat] = self.tree.insert(root_inst, tk.END, text=f'🗂 {cat}')
-                leaf = mid.split('/', 1)[1] if '/' in mid else mid
-                self.tree.insert(cat_nodes[cat], tk.END, text=f'• {leaf}', values=('на диске', '', ''))
+        camp_nodes, pack_nodes = {}, {}
+
+        def camp_node(c):
+            c = c or 'прочее'
+            if c not in camp_nodes:
+                camp_nodes[c] = self.tree.insert('', tk.END, text=f'🗂 {c}', open=True)
+            return camp_nodes[c]
+
+        def pack_node(c, pk):
+            key = (c, pk)
+            if key not in pack_nodes:
+                pack_nodes[key] = self.tree.insert(camp_node(c), tk.END,
+                                                   text=f'■ {pk}', open=True)
+            return pack_nodes[key]
+
+        for camp, pack, kind, label, status, date, iid in sorted(items, key=lambda x: (
+                x[0], x[1] or '', x[3])):
+            parent = pack_node(camp, pack) if (pack and kind == 'мод') else camp_node(camp)
+            vals = (kind, status, fmt_date(date) if date else '')
+            if iid:
+                self.tree.insert(parent, tk.END, iid=iid, text=label, values=vals)
+            else:
+                self.tree.insert(parent, tk.END, text=label, values=vals)
+
+        # лениво подгрузить каталог (для группировки дисковых модов по лагерю), один раз
+        if getattr(self, '_catalog_cache', None) is None and not getattr(self, '_cat_loading', False):
+            self._cat_loading = True
+
+            def bg():
+                try:
+                    self._catalog_cache = core.load_catalog(
+                        'descriptors/catalog.json', self._repo(), self._token()) or {}
+                except Exception:
+                    self._catalog_cache = {}
+                self._cat_loading = False
+                if self._catalog_cache:
+                    self._post(self._refresh_list)
+            threading.Thread(target=bg, daemon=True).start()
 
     def _selected(self):
         """Индекс записи профиля для выбранного листа дерева (или None для групп)."""
