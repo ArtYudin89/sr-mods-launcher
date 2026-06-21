@@ -440,6 +440,38 @@ def load_packs(ref='state/packs.json', repo=None, token=None):
         return {}
 
 
+def camp_packs(packs):
+    """{лагерь: [{'key':'camp/unit','unit':..,'name':..,'tier':..}]} для выпадающих списков.
+    Сортировка по load_order."""
+    out = {}
+    for key, p in packs.items():
+        out.setdefault(p['camp'], []).append({
+            'key': key, 'unit': p['name'], 'tier': p['tier'],
+            'name': p.get('display_name', p['name']),
+            'load_order': p.get('load_order', 999),
+        })
+    for camp in out:
+        out[camp].sort(key=lambda x: (x['load_order'], x['unit']))
+    return out
+
+
+def scan_installed_mods(mods_dir):
+    """Найти физически установленные моды в папке Mods игры — каталоги с ModuleInfo.txt.
+    Возвращает список mod_id (путь после последнего 'Mods/' до папки мода, напр.
+    'OtherMods/DrKlesMod'). Без сети — читает только файловую систему."""
+    import os
+    root = Path(mods_dir)
+    if not root.is_dir():
+        return []
+    found = set()
+    for dirpath, _dirs, files in os.walk(root):
+        if any(f.lower() == 'moduleinfo.txt' for f in files):
+            rel = os.path.relpath(dirpath, root).replace(os.sep, '/')
+            if rel and rel != '.':
+                found.add(rel)
+    return sorted(found)
+
+
 def check_pack_compatibility(selected_units, packs, installed_base=None):
     """Структурная совместимость НАБОРА на уровне паков (Фаза 2). Только показывает.
     selected_units: список ключей 'camp/unit'. packs: из load_packs.

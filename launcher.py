@@ -72,7 +72,8 @@ class Launcher:
         self.root.geometry('1040x720')
         self.theme = self._load_json(THEME_FILE, DEFAULT_THEME)
         self.config = self._load_json(CONFIG_FILE, {
-            'last_profile': 'default', 'profiles': ['default'], 'github_token': ''})
+            'last_profile': 'default', 'profiles': ['default'], 'github_token': '',
+            'repo': 'ArtYudin89/sr-mods-aggregator'})
         PROFILES_DIR.mkdir(exist_ok=True)
         self.current_profile = self.config.get('last_profile', 'default')
         self.profile = self._load_profile(self.current_profile)
@@ -110,17 +111,49 @@ class Launcher:
         if self.profile['name'] not in self.config['profiles']:
             self.config['profiles'].append(self.profile['name'])
         self.config['github_token'] = self.token_var.get().strip()
+        if hasattr(self, 'repo_var'):
+            self.config['repo'] = self.repo_var.get().strip()
         self._save_config()
 
     def _token(self):
         return self.token_var.get().strip() or os.environ.get('GH_TOKEN', '')
 
+    def _repo(self):
+        return (self.repo_var.get().strip() if hasattr(self, 'repo_var')
+                else self.config.get('repo', 'ArtYudin89/sr-mods-aggregator'))
+
+    def _game_root(self):
+        """Корень игры из game_path (поддерживает и папку, и путь к Rangers.exe)."""
+        gp = self.game_path_var.get().strip()
+        if not gp:
+            return None
+        p = Path(gp)
+        if p.is_file():
+            return p.parent
+        if p.is_dir():
+            return p
+        return None
+
     def _mods_dir(self):
-        gp = self.game_path_var.get()
-        base = Path(gp).parent if gp and Path(gp).exists() else HERE
-        d = base / 'Mods'
+        root = self._game_root() or HERE
+        d = root / 'Mods'
         d.mkdir(parents=True, exist_ok=True)
         return d
+
+    def _autofind_game(self):
+        """Поиск папки игры по типовым путям Steam, если путь не задан."""
+        cands = []
+        for drive in ('C:', 'D:', 'E:', 'F:'):
+            cands += [
+                Path(f'{drive}/Program Files (x86)/Steam/steamapps/common/Space Rangers HD A War Apart'),
+                Path(f'{drive}/Program Files/Steam/steamapps/common/Space Rangers HD A War Apart'),
+                Path(f'{drive}/SteamLibrary/steamapps/common/Space Rangers HD A War Apart'),
+                Path(f'{drive}/Games/Space Rangers HD A War Apart'),
+            ]
+        for c in cands:
+            if (c / 'Rangers.exe').exists():
+                return str(c)
+        return ''
 
     # ---------- theming ----------
     def _apply_theme(self):
@@ -221,8 +254,9 @@ class Launcher:
                          ('Удалить', self._del_profile)]:
             ttk.Button(r1, text=txt, command=cmd).pack(side=tk.LEFT, padx=2)
         ttk.Separator(r1, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=10)
-        ttk.Label(r1, text='Игра:', background=self.theme['panel']).pack(side=tk.LEFT)
-        self.game_path_var = tk.StringVar(value=self.profile.get('game_path', ''))
+        ttk.Label(r1, text='Папка игры:', background=self.theme['panel']).pack(side=tk.LEFT)
+        gp0 = self.profile.get('game_path', '') or self._autofind_game()
+        self.game_path_var = tk.StringVar(value=gp0)
         ttk.Entry(r1, textvariable=self.game_path_var).pack(side=tk.LEFT, fill=tk.X,
                                                             expand=True, padx=6)
         ttk.Button(r1, text='Обзор', command=self._browse_game).pack(side=tk.LEFT)
@@ -231,10 +265,14 @@ class Launcher:
         ttk.Button(r2, text='▶  Запустить игру', style='Accent.TButton',
                    command=self._launch).pack(side=tk.LEFT)
         ttk.Button(r2, text='📂 Папка модов', command=self._open_mods).pack(side=tk.LEFT, padx=8)
-        ttk.Label(r2, text='GitHub token (для приватных/агрегатора):',
-                  background=self.theme['panel']).pack(side=tk.LEFT, padx=(14, 4))
+        ttk.Label(r2, text='Репозиторий:', background=self.theme['panel']).pack(side=tk.LEFT,
+                                                                                padx=(14, 4))
+        self.repo_var = tk.StringVar(value=self.config.get('repo', 'ArtYudin89/sr-mods-aggregator'))
+        ttk.Entry(r2, textvariable=self.repo_var, width=26).pack(side=tk.LEFT)
+        ttk.Label(r2, text='GitHub token:', background=self.theme['panel']).pack(side=tk.LEFT,
+                                                                                 padx=(14, 4))
         self.token_var = tk.StringVar(value=self.config.get('github_token', ''))
-        ttk.Entry(r2, textvariable=self.token_var, width=24, show='•').pack(side=tk.LEFT)
+        ttk.Entry(r2, textvariable=self.token_var, width=22, show='•').pack(side=tk.LEFT)
 
         # main split
         main = ttk.Frame(root, style='TFrame'); main.pack(fill=tk.BOTH, expand=True)
@@ -248,13 +286,14 @@ class Launcher:
                          ('⟳', self._refresh_remote)]:
             ttk.Button(bf, text=txt, width=3, command=cmd).pack(side=tk.LEFT, padx=1)
 
-        cols = ('name', 'type', 'status', 'updated', 'downloaded')
-        self.tree = ttk.Treeview(left, columns=cols, show='headings', height=16)
-        for c, txt, w in [('name', 'Название', 230), ('type', 'Тип', 70),
-                          ('status', 'Статус', 70), ('updated', 'Обновлён', 130),
-                          ('downloaded', 'Скачан', 130)]:
+        cols = ('status', 'updated', 'downloaded')
+        self.tree = ttk.Treeview(left, columns=cols, show='tree headings', height=18)
+        self.tree.heading('#0', text='Лагерь / Пак / Мод')
+        self.tree.column('#0', width=340, anchor=tk.W)
+        for c, txt, w in [('status', 'Статус', 80), ('updated', 'Обновлён', 120),
+                          ('downloaded', 'Скачан', 120)]:
             self.tree.heading(c, text=txt)
-            self.tree.column(c, width=w, anchor=tk.W if c == 'name' else tk.CENTER)
+            self.tree.column(c, width=w, anchor=tk.CENTER)
         sb = ttk.Scrollbar(left, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscrollcommand=sb.set)
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -299,35 +338,77 @@ class Launcher:
     def _progress(self, done, total):
         self._post(self.progress_var.set, (done / total * 100) if total else 0)
 
-    # ---------- list ----------
+    # ---------- list (дерево) ----------
+    def _status_of(self, m):
+        if m.get('update_available'):
+            return '⬆ обн.'
+        return '✅' if m.get('last_downloaded') else '⏳'
+
     def _refresh_list(self):
         for i in self.tree.get_children():
             self.tree.delete(i)
+
+        # 1) Набор (профиль): Лагерь -> Пак -> Мод
+        root_set = self.tree.insert('', tk.END, text='📋 Набор (профиль)', open=True)
+        camp_nodes = {}
+
+        def camp_node(camp):
+            camp = camp or 'прочее'
+            if camp not in camp_nodes:
+                camp_nodes[camp] = self.tree.insert(root_set, tk.END,
+                                                    text=f'🗂 {camp}', open=True)
+            return camp_nodes[camp]
+
         for idx, m in enumerate(self.profile.get('mods', [])):
-            dl = m.get('last_downloaded')
+            iid = f'p{idx}'
             typ = m.get('type', 'zip')
-            name = m.get('name', '?')
-            if typ == 'unit' and m.get('mod'):
-                name = f'{name} · {m["mod"]}'
-            elif typ == 'desc':
-                name = f'{name} · {m.get("id", m.get("url", ""))}'
-            type_label = {'unit': ('мод' if m.get('mod') else 'юнит'),
-                          'desc': 'деск.', 'zip': 'zip'}.get(typ, typ)
-            if m.get('update_available'):
-                status = '⬆ обн.'
-            elif dl:
-                status = '✅'
-            else:
-                status = '⏳'
-            self.tree.insert('', tk.END, iid=str(idx), values=(
-                name, type_label, status,
-                fmt_date(m.get('last_updated')),
-                fmt_date(dl) if dl else 'никогда',
-            ))
+            st = self._status_of(m)
+            upd = fmt_date(m.get('last_updated'))
+            dl = fmt_date(m.get('last_downloaded')) if m.get('last_downloaded') else 'никогда'
+            vals = (st, upd, dl)
+            if typ == 'camp':
+                self.tree.insert(camp_node(m.get('camp')), tk.END, iid=iid,
+                                 text='★ весь лагерь', values=vals)
+            elif typ == 'unit':
+                label = m.get('name', m.get('unit', '?'))
+                if m.get('mod'):
+                    label = f'• {m["mod"]}'
+                else:
+                    label = f'■ {label} (пак)'
+                self.tree.insert(camp_node(m.get('camp')), tk.END, iid=iid,
+                                 text=label, values=vals)
+            else:  # desc / zip / форк
+                host = self.tree.insert(root_set, tk.END, text='🔗 по ссылке/прочее') \
+                    if 'misc' not in camp_nodes else camp_nodes['misc']
+                camp_nodes['misc'] = host
+                nm = m.get('name') or m.get('id') or m.get('url', '?')
+                self.tree.insert(host, tk.END, iid=iid, text=f'• {nm}', values=vals)
+
+        # 2) Установлено в игре (скан папки Mods, оффлайн, группировка по категории)
+        try:
+            installed = core.scan_installed_mods(self._mods_dir())
+        except Exception:
+            installed = []
+        if installed:
+            root_inst = self.tree.insert('', tk.END,
+                                         text=f'💾 Установлено в игре ({len(installed)})', open=False)
+            cat_nodes = {}
+            for mid in installed:
+                cat = mid.split('/')[0] if '/' in mid else '(корень)'
+                if cat not in cat_nodes:
+                    cat_nodes[cat] = self.tree.insert(root_inst, tk.END, text=f'🗂 {cat}')
+                leaf = mid.split('/', 1)[1] if '/' in mid else mid
+                self.tree.insert(cat_nodes[cat], tk.END, text=f'• {leaf}', values=('на диске', '', ''))
 
     def _selected(self):
+        """Индекс записи профиля для выбранного листа дерева (или None для групп)."""
         s = self.tree.selection()
-        return int(s[0]) if s else None
+        if not s:
+            return None
+        iid = s[0]
+        if iid.startswith('p') and iid[1:].isdigit():
+            return int(iid[1:])
+        return None
 
     # ---------- profiles ----------
     def _on_profile_change(self, e=None):
@@ -377,7 +458,7 @@ class Launcher:
 
     # ---------- mods ----------
     def _add_mod(self):
-        AddModDialog(self.root, self.theme, self._on_mod_added, self._token())
+        AddModDialog(self.root, self.theme, self._on_mod_added, self._token(), self._repo())
 
     def _on_mod_added(self, mod):
         self.profile.setdefault('mods', []).append(mod)
@@ -469,7 +550,8 @@ class Launcher:
             m = self.profile['mods']
             m[i - 1], m[i] = m[i], m[i - 1]
             self._save_profile(); self._refresh_list()
-            self.tree.selection_set(str(i - 1))
+            try: self.tree.selection_set(f'p{i - 1}')
+            except Exception: pass
 
     def _move_down(self):
         i = self._selected()
@@ -477,7 +559,8 @@ class Launcher:
             m = self.profile['mods']
             m[i + 1], m[i] = m[i], m[i + 1]
             self._save_profile(); self._refresh_list()
-            self.tree.selection_set(str(i + 1))
+            try: self.tree.selection_set(f'p{i + 1}')
+            except Exception: pass
 
     def _refresh_remote(self):
         if self.busy:
@@ -548,6 +631,25 @@ class Launcher:
                 m = self.profile['mods'][i]
                 self.log(f'=== {m["name"]} ===')
                 try:
+                    if m.get('type') == 'camp':
+                        packs = self._get_packs(tok)
+                        units = sorted([p for p in packs.values() if p['camp'] == m['camp']],
+                                       key=lambda p: p.get('load_order', 999))
+                        if not units:
+                            self.log(f'  нет паков для лагеря {m["camp"]}')
+                        for p in units:
+                            self.log(f'--- {p["name"]} ({p["tier"]}) ---')
+                            try:
+                                core.reconstruct_unit(m['repo'], p['camp'], p['name'],
+                                                      mods_dir, tok, self._progress, self.log,
+                                                      tmp_dir=HERE)
+                                if p.get('tier') == 'base':
+                                    self.profile['installed_base'] = p['name']
+                            except Exception as e:
+                                self.log(f'ОШИБКА {p["name"]}: {e}')
+                        m['last_downloaded'] = datetime.now().isoformat()
+                        self._post(self._save_profile); self._post(self._refresh_list)
+                        continue
                     if m.get('type') == 'unit':
                         st = core.reconstruct_unit(m['repo'], m['camp'], m['unit'],
                                                    mods_dir, tok, self._progress, self.log,
@@ -643,19 +745,21 @@ class Launcher:
 
     # ---------- game ----------
     def _browse_game(self):
-        p = filedialog.askopenfilename(title='exe игры',
-                                       filetypes=[('exe', '*.exe'), ('Все', '*.*')])
+        p = filedialog.askdirectory(title='Папка игры (где лежит Rangers.exe)')
         if p:
             self.game_path_var.set(p)
+            self._refresh_list()
 
     def _launch(self):
-        gp = self.game_path_var.get()
-        if not gp or not Path(gp).exists():
-            messagebox.showerror('Ошибка', 'Укажите корректный путь к игре')
-            return
+        root = self._game_root()
+        if not root:
+            messagebox.showerror('Ошибка', 'Укажите папку игры'); return
+        exe = root / 'Rangers.exe'
+        if not exe.exists():
+            messagebox.showerror('Ошибка', f'Rangers.exe не найден в {root}'); return
         try:
-            subprocess.Popen([os.path.basename(gp)], cwd=os.path.dirname(gp), shell=True)
-            self.log(f'Запуск: {os.path.basename(gp)}')
+            subprocess.Popen(['Rangers.exe'], cwd=str(root), shell=True)
+            self.log(f'Запуск: {exe}')
         except Exception as e:
             messagebox.showerror('Ошибка', str(e))
 
@@ -687,152 +791,146 @@ def _ask(parent, title, prompt):
 
 
 class AddModDialog:
-    """Диалог добавления мода: тип zip (URL) или unit (агрегатор).
-    Для unit можно указать один мод (mod_key) — пусто = весь юнит."""
-    def __init__(self, parent, theme, on_ok, token=''):
+    """Добавление по выбору из списков: Лагерь целиком / Пак / Конкретный мод / По ссылке (форк).
+    Данные тянутся из packs.json (лагеря, паки) и каталога (моды) репозитория."""
+    def __init__(self, parent, theme, on_ok, token='', repo='ArtYudin89/sr-mods-aggregator'):
         self.on_ok = on_ok
         self.token = token
+        self.repo = repo
+        self.cp = {}             # {camp: [pack dict]}
+        self.pack_map = {}       # label -> pack dict (для текущего лагеря)
+        self.mod_map = {}        # label -> mod_id (для текущего пака)
         self.dlg = d = tk.Toplevel(parent)
-        d.title('Добавить мод'); d.transient(parent); d.grab_set(); d.geometry('600x380')
-        self.type_var = tk.StringVar(value='desc')
+        d.title('Добавить'); d.transient(parent); d.grab_set(); d.geometry('560x320')
+
+        self.level = tk.StringVar(value='mod')
         tf = ttk.Frame(d); tf.pack(fill=tk.X, padx=14, pady=(14, 4))
-        ttk.Label(tf, text='Тип:').pack(side=tk.LEFT)
-        ttk.Radiobutton(tf, text='Мод (дескриптор)', variable=self.type_var,
-                        value='desc', command=self._switch).pack(side=tk.LEFT, padx=8)
-        ttk.Radiobutton(tf, text='Юнит агрегатора', variable=self.type_var,
-                        value='unit', command=self._switch).pack(side=tk.LEFT, padx=8)
-        ttk.Radiobutton(tf, text='Generic ZIP', variable=self.type_var,
-                        value='zip', command=self._switch).pack(side=tk.LEFT)
-        self.body = ttk.Frame(d); self.body.pack(fill=tk.BOTH, expand=True, padx=14, pady=6)
-        self.vars = {k: tk.StringVar() for k in
-                     ('name', 'url', 'repo', 'camp', 'unit', 'mod', 'id', 'source', 'fork_url')}
-        self.vars['repo'].set('ArtYudin89/sr-mods-aggregator')
-        self.mod_combo = None
-        self.cat_combo = None
-        self._catalog = {}
+        ttk.Label(tf, text='Что добавить:').pack(side=tk.LEFT)
+        for txt, val in [('Лагерь целиком', 'camp'), ('Пак', 'pack'),
+                         ('Мод', 'mod'), ('По ссылке (форк)', 'fork')]:
+            ttk.Radiobutton(tf, text=txt, variable=self.level, value=val,
+                            command=self._switch).pack(side=tk.LEFT, padx=6)
+
+        self.body = ttk.Frame(d); self.body.pack(fill=tk.BOTH, expand=True, padx=14, pady=8)
+        self.camp_var = tk.StringVar(); self.pack_var = tk.StringVar()
+        self.mod_var = tk.StringVar(); self.url_var = tk.StringVar()
+
+        self.status = ttk.Label(d, text='Загрузка списка паков…')
+        self.status.pack(anchor=tk.W, padx=14)
         bf = ttk.Frame(d); bf.pack(pady=10)
         ttk.Button(bf, text='Добавить', style='Accent.TButton',
                    command=self._ok).pack(side=tk.LEFT, padx=4)
         ttk.Button(bf, text='Отмена', command=self.dlg.destroy).pack(side=tk.LEFT)
         self._switch()
+        threading.Thread(target=self._load_packs, daemon=True).start()
 
-    def _row(self, label, key):
-        r = ttk.Frame(self.body); r.pack(fill=tk.X, pady=4)
-        ttk.Label(r, text=label, width=16).pack(side=tk.LEFT)
-        ttk.Entry(r, textvariable=self.vars[key]).pack(side=tk.LEFT, fill=tk.X, expand=True)
+    # --- данные ---
+    def _load_packs(self):
+        try:
+            packs = core.load_packs('state/packs.json', self.repo, self.token)
+            cp = core.camp_packs(packs)
+        except Exception as e:
+            self.dlg.after(0, lambda: self.status.config(text=f'Ошибка загрузки паков: {e}'))
+            return
+        def apply():
+            self.cp = cp
+            self.status.config(text=f'Лагерей: {len(cp)} · паков: {sum(len(v) for v in cp.values())}')
+            if hasattr(self, 'camp_combo'):
+                self.camp_combo['values'] = sorted(cp)
+        self.dlg.after(0, apply)
 
-    def _mod_row(self):
-        r = ttk.Frame(self.body); r.pack(fill=tk.X, pady=4)
-        ttk.Label(r, text='Мод (пусто=весь):', width=16).pack(side=tk.LEFT)
-        self.mod_combo = ttk.Combobox(r, textvariable=self.vars['mod'])
-        self.mod_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(r, text='⟳ Список', width=9, command=self._load_mods).pack(side=tk.LEFT, padx=4)
+    def _on_camp(self, _e=None):
+        camp = self.camp_var.get()
+        packs = self.cp.get(camp, [])
+        self.pack_map = {f"{p['name']}  [{p['unit']}]": p for p in packs}
+        if hasattr(self, 'pack_combo'):
+            self.pack_combo['values'] = list(self.pack_map)
+        self.pack_var.set(''); self.mod_var.set('')
+        if hasattr(self, 'mod_combo'):
+            self.mod_combo['values'] = []
 
-    def _load_mods(self):
-        repo = self.vars['repo'].get().strip()
-        camp = self.vars['camp'].get().strip()
-        unit = self.vars['unit'].get().strip()
-        if not (repo and camp and unit):
-            messagebox.showinfo('Список модов', 'Сначала укажите repo/camp/unit'); return
-        tok = self.token or os.environ.get('GH_TOKEN', '')
+    def _on_pack(self, _e=None):
+        if self.level.get() != 'mod':
+            return
+        p = self.pack_map.get(self.pack_var.get())
+        if not p:
+            return
+        self.status.config(text='Загрузка модов пака…')
 
         def work():
             try:
-                mods = core.list_unit_mods(repo, camp, unit, tok)
+                mods = core.list_unit_mods(self.repo, p['camp'], p['unit'], self.token)
             except Exception as e:
-                self.dlg.after(0, lambda: messagebox.showerror('Список модов', str(e)))
+                self.dlg.after(0, lambda: self.status.config(text=f'Ошибка: {e}'))
                 return
             def apply():
-                if self.mod_combo is not None:
+                self.mod_map = {m: m for m in mods}
+                if hasattr(self, 'mod_combo'):
                     self.mod_combo['values'] = mods
-                messagebox.showinfo('Список модов',
-                                    f'Найдено модов: {len(mods)}\n(пусто = весь юнит)')
+                self.status.config(text=f'Модов в паке: {len(mods)}')
             self.dlg.after(0, apply)
         threading.Thread(target=work, daemon=True).start()
 
-    def _cat_row(self):
-        r = ttk.Frame(self.body); r.pack(fill=tk.X, pady=4)
-        ttk.Label(r, text='Мод из каталога:', width=16).pack(side=tk.LEFT)
-        self.cat_combo = ttk.Combobox(r, textvariable=self.vars['id'])
-        self.cat_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        self.cat_combo.bind('<<ComboboxSelected>>', self._on_cat_pick)
-        ttk.Button(r, text='⟳ Каталог', width=10,
-                   command=self._load_catalog).pack(side=tk.LEFT, padx=4)
-
-    def _on_cat_pick(self, _e=None):
-        mid = self.vars['id'].get().strip()
-        ent = self._catalog.get(mid)
-        if ent and not self.vars['name'].get().strip():
-            self.vars['name'].set(ent.get('name') or mid.split('/')[-1])
-
-    def _load_catalog(self):
-        repo = self.vars['repo'].get().strip()
-        cat_ref = 'descriptors/catalog.json'
-        tok = self.token or os.environ.get('GH_TOKEN', '')
-
-        def work():
-            try:
-                cat = core.load_catalog(cat_ref, repo, tok)
-            except Exception as e:
-                self.dlg.after(0, lambda: messagebox.showerror('Каталог', str(e)))
-                return
-
-            def apply():
-                self._catalog = cat
-                if self.cat_combo is not None:
-                    self.cat_combo['values'] = sorted(cat)
-                messagebox.showinfo('Каталог', f'Загружено модов: {len(cat)}\n'
-                                    'Выберите мод (зависимости подтянутся при установке).')
-            self.dlg.after(0, apply)
-        threading.Thread(target=work, daemon=True).start()
+    # --- разметка ---
+    def _combo(self, label, var, on_pick=None):
+        r = ttk.Frame(self.body); r.pack(fill=tk.X, pady=5)
+        ttk.Label(r, text=label, width=14).pack(side=tk.LEFT)
+        cb = ttk.Combobox(r, textvariable=var, state='readonly')
+        cb.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        if on_pick:
+            cb.bind('<<ComboboxSelected>>', on_pick)
+        return cb
 
     def _switch(self):
         for w in self.body.winfo_children():
             w.destroy()
-        self.mod_combo = None
-        self.cat_combo = None
-        self._row('Название:', 'name')
-        t = self.type_var.get()
-        if t == 'zip':
-            self._row('Ссылка Release:', 'url')
-        elif t == 'desc':
-            self._row('Репозиторий:', 'repo')
-            self._cat_row()
-            self._row('Источник (опц.):', 'source')
-            self._row('URL форка (опц.):', 'fork_url')
-        else:
-            self._row('Репозиторий:', 'repo')
-            self._row('Лагерь (camp):', 'camp')
-            self._row('Юнит (unit):', 'unit')
-            self._mod_row()
+        lv = self.level.get()
+        if lv == 'fork':
+            r = ttk.Frame(self.body); r.pack(fill=tk.X, pady=5)
+            ttk.Label(r, text='URL дескриптора:', width=14).pack(side=tk.LEFT)
+            ttk.Entry(r, textvariable=self.url_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
+            ttk.Label(self.body, text='Прямая ссылка на <id>.json форка мода.').pack(anchor=tk.W)
+            return
+        self.camp_combo = self._combo('Лагерь:', self.camp_var, self._on_camp)
+        self.camp_combo['values'] = sorted(self.cp)
+        if lv in ('pack', 'mod'):
+            self.pack_combo = self._combo('Пак:', self.pack_var, self._on_pack)
+        if lv == 'mod':
+            self.mod_combo = self._combo('Мод:', self.mod_var)
 
     def _ok(self):
-        t = self.type_var.get()
-        v = {k: self.vars[k].get().strip() for k in self.vars}
-        if t == 'desc':
-            if not (v['id'] or v['fork_url']):
-                messagebox.showerror('Ошибка', 'Выберите мод из каталога или укажите URL форка')
-                return
-            name = v['name'] or (v['id'].split('/')[-1] if v['id'] else 'форк')
-            mod = {'type': 'desc', 'name': name,
-                   'repo': v['repo'] or 'ArtYudin89/sr-mods-aggregator',
-                   'catalog': 'descriptors/catalog.json',
-                   'id': v['id'], 'source': v['source'], 'url': v['fork_url'],
-                   'installed_version': None, 'last_downloaded': None, 'last_updated': None}
-            self.dlg.destroy(); self.on_ok(mod); return
-        if not v['name']:
-            messagebox.showerror('Ошибка', 'Укажите название'); return
-        if t == 'zip':
-            if not v['url']:
-                messagebox.showerror('Ошибка', 'Укажите ссылку'); return
-            mod = {'type': 'zip', 'name': v['name'], 'url': v['url'],
+        lv = self.level.get()
+        if lv == 'fork':
+            url = self.url_var.get().strip()
+            if not url:
+                messagebox.showerror('Ошибка', 'Укажите URL дескриптора'); return
+            nm = url.rsplit('/', 1)[-1].replace('.json', '') or 'форк'
+            self.dlg.destroy()
+            self.on_ok({'type': 'desc', 'name': nm, 'repo': self.repo,
+                        'catalog': 'descriptors/catalog.json', 'id': '', 'source': '',
+                        'url': url, 'installed_version': None,
+                        'last_downloaded': None, 'last_updated': None}); return
+
+        camp = self.camp_var.get().strip()
+        if not camp:
+            messagebox.showerror('Ошибка', 'Выберите лагерь'); return
+        if lv == 'camp':
+            mod = {'type': 'camp', 'camp': camp, 'repo': self.repo,
+                   'name': f'{camp} — весь лагерь',
                    'last_downloaded': None, 'last_updated': None}
         else:
-            if not (v['repo'] and v['camp'] and v['unit']):
-                messagebox.showerror('Ошибка', 'Заполните repo/camp/unit'); return
-            mod = {'type': 'unit', 'name': v['name'], 'repo': v['repo'],
-                   'camp': v['camp'], 'unit': v['unit'], 'mod': v['mod'],
+            p = self.pack_map.get(self.pack_var.get())
+            if not p:
+                messagebox.showerror('Ошибка', 'Выберите пак'); return
+            mod = {'type': 'unit', 'repo': self.repo, 'camp': p['camp'], 'unit': p['unit'],
+                   'name': p['name'], 'mod': '',
                    'last_downloaded': None, 'last_updated': None}
+            if lv == 'mod':
+                mid = self.mod_var.get().strip()
+                if not mid:
+                    messagebox.showerror('Ошибка', 'Выберите мод'); return
+                mod['mod'] = mid
+                mod['name'] = mid
         self.dlg.destroy()
         self.on_ok(mod)
 
