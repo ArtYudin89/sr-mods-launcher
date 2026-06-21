@@ -154,7 +154,7 @@ class Launcher:
                      foreground=t['fg'], font=f, rowheight=int(t['font_size'] * 2.4))
         st.configure('Treeview.Heading', background=t['panel'], foreground=t['muted'], font=fb)
         st.map('Treeview', background=[('selected', t['tree_sel'])],
-               foreground=[('selected', t['accent_fg'])])
+               foreground=[('selected', t['fg'])])
         st.configure('TProgressbar', background=t['accent'], troughcolor=t['tree_bg'])
 
     def _build_starfield(self, parent):
