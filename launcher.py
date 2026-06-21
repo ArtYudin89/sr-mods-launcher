@@ -800,6 +800,7 @@ class AddModDialog:
         self.cp = {}             # {camp: [pack dict]}
         self.pack_map = {}       # label -> pack dict (для текущего лагеря)
         self.mod_map = {}        # label -> mod_id (для текущего пака)
+        self.camp_combo = self.pack_combo = self.mod_combo = None
         self.dlg = d = tk.Toplevel(parent)
         d.title('Добавить'); d.transient(parent); d.grab_set(); d.geometry('560x320')
 
@@ -835,7 +836,7 @@ class AddModDialog:
         def apply():
             self.cp = cp
             self.status.config(text=f'Лагерей: {len(cp)} · паков: {sum(len(v) for v in cp.values())}')
-            if hasattr(self, 'camp_combo'):
+            if self.camp_combo is not None and self.camp_combo.winfo_exists():
                 self.camp_combo['values'] = sorted(cp)
         self.dlg.after(0, apply)
 
@@ -843,10 +844,10 @@ class AddModDialog:
         camp = self.camp_var.get()
         packs = self.cp.get(camp, [])
         self.pack_map = {f"{p['name']}  [{p['unit']}]": p for p in packs}
-        if hasattr(self, 'pack_combo'):
-            self.pack_combo['values'] = list(self.pack_map)
         self.pack_var.set(''); self.mod_var.set('')
-        if hasattr(self, 'mod_combo'):
+        if self.pack_combo is not None and self.pack_combo.winfo_exists():
+            self.pack_combo['values'] = list(self.pack_map)
+        if self.mod_combo is not None and self.mod_combo.winfo_exists():
             self.mod_combo['values'] = []
 
     def _on_pack(self, _e=None):
@@ -865,7 +866,7 @@ class AddModDialog:
                 return
             def apply():
                 self.mod_map = {m: m for m in mods}
-                if hasattr(self, 'mod_combo'):
+                if self.mod_combo is not None and self.mod_combo.winfo_exists():
                     self.mod_combo['values'] = mods
                 self.status.config(text=f'Модов в паке: {len(mods)}')
             self.dlg.after(0, apply)
@@ -884,6 +885,7 @@ class AddModDialog:
     def _switch(self):
         for w in self.body.winfo_children():
             w.destroy()
+        self.camp_combo = self.pack_combo = self.mod_combo = None
         lv = self.level.get()
         if lv == 'fork':
             r = ttk.Frame(self.body); r.pack(fill=tk.X, pady=5)

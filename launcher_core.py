@@ -446,7 +446,7 @@ def camp_packs(packs):
     out = {}
     for key, p in packs.items():
         out.setdefault(p['camp'], []).append({
-            'key': key, 'unit': p['name'], 'tier': p['tier'],
+            'key': key, 'camp': p['camp'], 'unit': p['name'], 'tier': p['tier'],
             'name': p.get('display_name', p['name']),
             'load_order': p.get('load_order', 999),
         })
