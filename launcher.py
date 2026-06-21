@@ -268,6 +268,8 @@ class Launcher:
                    command=lambda: self._install(True)).pack(fill=tk.X, pady=2)
         ttk.Button(act, text='🧩 Установить набор (с зависим.)', style='Accent.TButton',
                    command=lambda: self._install(True)).pack(fill=tk.X, pady=2)
+        ttk.Button(act, text='🛡 Проверить совместимость',
+                   command=self._check_compat).pack(fill=tk.X, pady=2)
         ttk.Button(act, text='🗑  Очистить Mods', command=self._clear_mods).pack(fill=tk.X, pady=2)
         ttk.Label(right, text='Прогресс:').pack(anchor=tk.W, pady=(10, 0))
         ttk.Progressbar(right, variable=self.progress_var, maximum=100).pack(fill=tk.X)
@@ -383,6 +385,74 @@ class Launcher:
         self._refresh_list()
         self.log(f'Добавлен мод: {mod["name"]}')
 
+    def _get_packs(self, tok):
+        """packs.json (тиры юнитов) с кэшем в рамках сессии."""
+        if getattr(self, '_packs_cache', None) is None:
+            repo = next((m.get('repo') for m in self.profile.get('mods', [])
+                         if m.get('type') == 'unit' and m.get('repo')),
+                        'ArtYudin89/sr-mods-aggregator')
+            self._packs_cache = core.load_packs('state/packs.json', repo, tok)
+        return self._packs_cache or {}
+
+    def _check_compat(self):
+        """Проверка совместимости набора (Фаза 2): база/фиксы/сейвы/конфликты модов."""
+        if self.busy:
+            return
+        units = [f'{m["camp"]}/{m["unit"]}' for m in self.profile.get('mods', [])
+                 if m.get('type') == 'unit' and m.get('camp') and m.get('unit')]
+        if not units:
+            messagebox.showinfo('Совместимость',
+                                'В наборе нет юнитов-паков для проверки.')
+            return
+        self.log('Проверка совместимости…')
+        threading.Thread(target=self._check_compat_worker, args=(units,),
+                         daemon=True).start()
+
+    def _check_compat_worker(self, units):
+        tok = self._token()
+        try:
+            packs = self._get_packs(tok)
+            if not packs:
+                self._post(messagebox.showwarning, 'Совместимость',
+                           'Не удалось загрузить packs.json из репозитория.')
+                return
+            info = core.check_pack_compatibility(
+                units, packs, installed_base=self.profile.get('installed_base'))
+        except Exception as e:
+            self._post(messagebox.showerror, 'Совместимость', f'Ошибка: {e}')
+            return
+
+        problems, notes = [], []
+        bnames = [packs[b]['name'] for b in info['bases']]
+        if info['base_conflict']:
+            problems.append('⛔ В наборе НЕСКОЛЬКО базовых паков: ' + ', '.join(bnames) +
+                            '.\n   Нельзя смешивать базы — оставь ровно одну.')
+        elif info['missing_base']:
+            problems.append('⚠ В наборе НЕТ базового пака (с Rangers.exe).\n'
+                            '   Модам/фиксам нужна база — добавь одну (redux/original/universe…).')
+        elif bnames:
+            notes.append('✅ Базовый пак: ' + bnames[0])
+        for fix, parent in info['fix_orphans']:
+            problems.append(f'⚠ Фикс «{packs[fix]["name"]}» требует родительский пак '
+                            f'«{parent}», которого нет в наборе.')
+        if info['save_warning']:
+            problems.append('💾 ' + info['save_warning'])
+        if info['mandatory']:
+            mand = ', '.join(packs[u]['name'] for u in info['mandatory'])
+            notes.append('❗ Базовые/фикс-паки (обновление обязательно при выходе апдейта):\n   '
+                         + mand)
+        notes.append('ℹ Смена базового пака делает несовместимыми сейвы текущей партии '
+                     '(новую партию начать можно).')
+
+        title = 'Совместимость: проблемы' if problems else 'Совместимость: ок'
+        body = ''
+        if problems:
+            body += 'НАЙДЕНЫ ВОПРОСЫ:\n\n' + '\n\n'.join(problems) + '\n\n'
+        body += '— — —\n' + '\n'.join(notes)
+        self.log('Совместимость: ' + ('проблемы' if problems else 'ок'))
+        show = messagebox.showwarning if problems else messagebox.showinfo
+        self._post(show, title, body)
+
     def _remove_mod(self):
         i = self._selected()
         if i is None:
@@ -488,6 +558,10 @@ class Launcher:
                                               self.log, tmp_dir=HERE)
                         m['last_updated'] = up or m.get('last_updated')
                     m['last_downloaded'] = datetime.now().isoformat()
+                    if m.get('type') == 'unit':            # запомнить установленную базу
+                        pk = self._get_packs(tok).get(f'{m["camp"]}/{m["unit"]}', {})
+                        if pk.get('tier') == 'base':
+                            self.profile['installed_base'] = pk['name']
                     self._post(self._save_profile)
                     self._post(self._refresh_list)
                 except Exception as e:

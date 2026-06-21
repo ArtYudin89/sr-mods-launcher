@@ -432,6 +432,55 @@ def resolve_set(selections, catalog, repo=None, token=None):
             'missing_deps': sorted(set(missing_deps)), 'conflicts': conflicts}
 
 
+def load_packs(ref='state/packs.json', repo=None, token=None):
+    """Загрузить packs.json (тиры юнитов: base/fix/mod/assets + fix_parent)."""
+    try:
+        return (_fetch_json(ref, repo, token) or {}).get('packs', {})
+    except Exception:
+        return {}
+
+
+def check_pack_compatibility(selected_units, packs, installed_base=None):
+    """Структурная совместимость НАБОРА на уровне паков (Фаза 2). Только показывает.
+    selected_units: список ключей 'camp/unit'. packs: из load_packs.
+    installed_base: имя базового юнита текущей установки (для предупреждения о сейвах).
+    Возвращает: bases (выбранные базы), fixes, fix_orphans [(fix, нужный_родитель)],
+      base_conflict (>1 базы), missing_base, save_warning, mandatory (base/fix к обновлению)."""
+    present_names = {packs[u]['name'] for u in selected_units if u in packs}
+    bases, fixes, fix_orphans, mandatory = [], [], [], []
+    has_playable = False           # есть ли в наборе моды/фиксы (им нужна база)
+    for u in selected_units:
+        p = packs.get(u)
+        if not p:
+            continue
+        tier = p['tier']
+        if tier == 'base':
+            bases.append(u)
+        elif tier == 'fix':
+            fixes.append(u)
+            has_playable = True
+            parent = p.get('fix_parent')
+            if parent and parent not in present_names:
+                fix_orphans.append((u, parent))
+        elif tier == 'mod':
+            has_playable = True
+        if p.get('update_required'):
+            mandatory.append(u)
+
+    base_names = [packs[b]['name'] for b in bases]
+    save_warning = None
+    if installed_base and base_names and installed_base not in base_names:
+        save_warning = (f'Смена базового пака ({installed_base} → {base_names[0]}): '
+                        f'сейвы текущей партии НЕСОВМЕСТИМЫ. Новую партию начать можно.')
+    return {
+        'bases': bases, 'fixes': fixes, 'fix_orphans': fix_orphans,
+        'base_conflict': len(bases) > 1,
+        'missing_base': len(bases) == 0 and has_playable,
+        'save_warning': save_warning,
+        'mandatory': mandatory,
+    }
+
+
 def load_chunk_index(desc=None, url=None, repo=None, token=None):
     """Загрузить индекс чанков (blobs/chunks). Источник: chunk_index_url из дескриптора
     (HF public) с фолбэком на state/asset_index.json в репозитории."""
