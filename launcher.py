@@ -397,11 +397,14 @@ class Launcher:
                 items.append(('прочее', None, 'форк' if typ == 'desc' else 'zip',
                               m.get('name') or m.get('id') or m.get('url', ''),
                               st_of(m, on), m.get('last_downloaded', '') if on else '', iid))
+        camp_upd = getattr(self, '_camp_updated', {})
         for mid, ts in sorted(disk.items()):     # на диске, но не в наборе
             if mid in seen:
                 continue
-            items.append((self._camp_of(mid), None, 'мод', mid.split('/')[-1],
-                          '✅ установлен', ts, None))
+            camp = self._camp_of(mid)
+            cu = camp_upd.get(camp)
+            stt = '⬆ обновление?' if (cu and ts and ts < cu) else '✅ установлен'
+            items.append((camp, None, 'мод', mid.split('/')[-1], stt, ts, None))
 
         camp_nodes, pack_nodes = {}, {}
 
@@ -437,8 +440,15 @@ class Launcher:
                         'descriptors/catalog.json', self._repo(), self._token()) or {}
                 except Exception:
                     self._catalog_cache = {}
+                cu = {}                       # дата апдейта лагеря в репо (для дисковых модов)
+                for c in ('redux', 'universe', 'shared'):
+                    try:
+                        cu[c] = core.unit_remote_updated(self._repo(), c, self._token())
+                    except Exception:
+                        pass
+                self._camp_updated = cu
                 self._cat_loading = False
-                if self._catalog_cache:
+                if self._catalog_cache or cu:
                     self._post(self._refresh_list)
             threading.Thread(target=bg, daemon=True).start()
 
