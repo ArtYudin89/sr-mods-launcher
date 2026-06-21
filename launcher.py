@@ -475,6 +475,12 @@ class Launcher:
             self._packs_cache = core.load_packs('state/packs.json', repo, tok)
         return self._packs_cache or {}
 
+    def _get_catalog(self, repo, tok):
+        """Каталог модов с кэшем в рамках сессии."""
+        if getattr(self, '_catalog_cache', None) is None:
+            self._catalog_cache = core.load_catalog('descriptors/catalog.json', repo, tok)
+        return self._catalog_cache or {}
+
     def _check_compat(self):
         """Проверка совместимости набора (Фаза 2): база/фиксы/сейвы/конфликты модов."""
         if self.busy:
@@ -567,38 +573,57 @@ class Launcher:
             return
         threading.Thread(target=self._refresh_remote_worker, daemon=True).start()
 
+    def _latest_version(self, cat, mod_id, source):
+        """Версия мода из каталога для конкретного источника (или дефолтного)."""
+        ent = cat.get(mod_id)
+        if not ent:
+            return None
+        src = source or ent.get('default_source')
+        return next((v['version'] for v in ent['variants'] if v['source'] == src), None) \
+            or (ent['variants'][0]['version'] if ent['variants'] else None)
+
     def _refresh_remote_worker(self):
         tok = self._token()
         cat_cache = {}
-        for i, m in enumerate(self.profile.get('mods', [])):
+
+        def catalog(repo, ref='descriptors/catalog.json'):
+            key = (repo, ref)
+            if key not in cat_cache:
+                cat_cache[key] = core.load_catalog(ref, repo, tok)
+            return cat_cache[key]
+
+        for m in self.profile.get('mods', []):
             try:
-                if m.get('type') == 'desc':
-                    repo = m.get('repo', 'ArtYudin89/sr-mods-aggregator')
-                    cat_ref = m.get('catalog', 'descriptors/catalog.json')
-                    key = (repo, cat_ref)
-                    if key not in cat_cache:
-                        cat_cache[key] = core.load_catalog(cat_ref, repo, tok)
-                    cat = cat_cache[key]
-                    ent = cat.get(m.get('id'))
-                    if ent:
-                        src = m.get('source') or ent.get('default_source')
-                        ver = next((v['version'] for v in ent['variants']
-                                    if v['source'] == src), None) \
-                            or (ent['variants'][0]['version'] if ent['variants'] else None)
-                        m['latest_version'] = ver
-                        m['update_available'] = bool(
-                            m.get('installed_version') and ver
-                            and m['installed_version'] != ver)
-                elif m.get('type') == 'unit':
-                    up = core.unit_remote_updated(m['repo'], m['camp'], tok)
+                typ = m.get('type')
+                repo = m.get('repo', self._repo())
+                # есть резолвимый id каталога (desc по id, или unit с конкретным модом)
+                cat_id = m.get('id') if typ == 'desc' else (
+                    m.get('mod') if typ == 'unit' and m.get('mod') else None)
+                if cat_id:
+                    src = m.get('source') or (f"{m['camp']}/{m['unit']}"
+                                              if typ == 'unit' else None)
+                    ver = self._latest_version(catalog(repo), cat_id, src)
+                    m['latest_version'] = ver
+                    m['update_available'] = bool(m.get('installed_version') and ver
+                                                 and m['installed_version'] != ver)
+                elif typ == 'unit':                 # пак целиком — по дате обновления
+                    up = core.unit_remote_updated(repo, m['camp'], tok)
                     if up:
                         m['last_updated'] = up
-                else:
+                        m['update_available'] = bool(m.get('last_downloaded')
+                                                     and up > m['last_downloaded'])
+                elif typ == 'camp':
+                    up = core.unit_remote_updated(repo, m['camp'], tok)
+                    if up:
+                        m['last_updated'] = up
+                        m['update_available'] = bool(m.get('last_downloaded')
+                                                     and up > m['last_downloaded'])
+                elif typ == 'zip':
                     up = core.resolve_zip(m['url'], tok).get('updated')
                     if up:
                         m['last_updated'] = up
             except Exception as e:
-                self.log(f'{m["name"]}: ошибка обновления ({e})')
+                self.log(f'{m.get("name","?")}: ошибка обновления ({e})')
         self._post(self._save_profile)
         self._post(self._refresh_list)
         self.log('Информация об обновлениях получена')
@@ -660,10 +685,18 @@ class Launcher:
                                               self.log, tmp_dir=HERE)
                         m['last_updated'] = up or m.get('last_updated')
                     m['last_downloaded'] = datetime.now().isoformat()
+                    m['update_available'] = False
                     if m.get('type') == 'unit':            # запомнить установленную базу
                         pk = self._get_packs(tok).get(f'{m["camp"]}/{m["unit"]}', {})
                         if pk.get('tier') == 'base':
                             self.profile['installed_base'] = pk['name']
+                        if m.get('mod'):                   # версия мода для детекции обновлений
+                            try:
+                                cat = self._get_catalog(m.get('repo', self._repo()), tok)
+                                m['installed_version'] = self._latest_version(
+                                    cat, m['mod'], f"{m['camp']}/{m['unit']}")
+                            except Exception:
+                                pass
                     self._post(self._save_profile)
                     self._post(self._refresh_list)
                 except Exception as e:
