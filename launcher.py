@@ -268,11 +268,15 @@ class Launcher:
         ttk.Label(r2, text='Репозиторий:', background=self.theme['panel']).pack(side=tk.LEFT,
                                                                                 padx=(14, 4))
         self.repo_var = tk.StringVar(value=self.config.get('repo', 'ArtYudin89/sr-mods-aggregator'))
-        ttk.Entry(r2, textvariable=self.repo_var, width=26).pack(side=tk.LEFT)
+        e_repo = ttk.Entry(r2, textvariable=self.repo_var, width=26); e_repo.pack(side=tk.LEFT)
         ttk.Label(r2, text='GitHub token:', background=self.theme['panel']).pack(side=tk.LEFT,
                                                                                  padx=(14, 4))
         self.token_var = tk.StringVar(value=self.config.get('github_token', ''))
-        ttk.Entry(r2, textvariable=self.token_var, width=22, show='•').pack(side=tk.LEFT)
+        e_tok = ttk.Entry(r2, textvariable=self.token_var, width=22, show='•'); e_tok.pack(side=tk.LEFT)
+        # при изменении токена/репо — сбросить кэш каталога и перечитать (камп подтянется)
+        for e in (e_repo, e_tok):
+            e.bind('<FocusOut>', self._on_creds_change)
+            e.bind('<Return>', self._on_creds_change)
 
         # main split
         main = ttk.Frame(root, style='TFrame'); main.pack(fill=tk.BOTH, expand=True)
@@ -533,6 +537,17 @@ class Launcher:
             self._catalog_cache = core.load_catalog('descriptors/catalog.json', repo, tok)
         return self._catalog_cache or {}
 
+    def _invalidate_remote_cache(self):
+        """Сбросить кэши каталога/паков/дат — чтобы перечитать с новым токеном/репо."""
+        self._catalog_cache = None
+        self._packs_cache = None
+        self._camp_updated = {}
+        self._cat_loading = False
+
+    def _on_creds_change(self, _e=None):
+        self._invalidate_remote_cache()
+        self._refresh_list()
+
     def _check_compat(self):
         """Проверка совместимости набора (Фаза 2): база/фиксы/сейвы/конфликты модов."""
         if self.busy:
@@ -623,6 +638,7 @@ class Launcher:
     def _refresh_remote(self):
         if self.busy:
             return
+        self._invalidate_remote_cache()        # ⟳ форсит свежий каталог (камп подтянется)
         threading.Thread(target=self._refresh_remote_worker, daemon=True).start()
 
     def _latest_version(self, cat, mod_id, source):
