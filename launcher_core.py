@@ -455,6 +455,31 @@ def camp_packs(packs):
     return out
 
 
+BASE_MARKERS = [
+    # (базовый юнит, лагерь, маркеры — папки/моды уникальные для этой базы в Mods/)
+    ('redux_base_installer', 'redux', ['Den', 'Solyanka', 'FairansVision', 'AnotherMods']),
+    ('universe_community', 'universe',
+     ['Tweaks/CheatsOff', 'Evolution/EvoFreeInflation', 'PlanetaryBattles/PBHelpFromAbove']),
+    ('original_installer', 'redux',
+     ['Tweaks/SR2Balance', 'Revolution/RevBomber', 'Tweaks/UIRecolor_ShuKlissan']),
+]
+
+
+def detect_installed_base(mods_dir):
+    """Определить установленную базу по уникальным маркерам в папке Mods.
+    Возвращает {'base': юнит, 'camp': лагерь} или None. Порядок маркеров важен
+    (redux самый отличимый — проверяется первым)."""
+    import os
+    root = Path(mods_dir)
+    if not root.is_dir():
+        return None
+    for base, camp, markers in BASE_MARKERS:
+        for mk in markers:
+            if (root / mk.replace('/', os.sep)).exists():
+                return {'base': base, 'camp': camp}
+    return None
+
+
 def scan_installed_mods(mods_dir):
     """Найти физически установленные моды в папке Mods игры — каталоги с ModuleInfo.txt.
     Возвращает список mod_id (путь после последнего 'Mods/' до папки мода, напр.
@@ -507,7 +532,9 @@ def check_pack_compatibility(selected_units, packs, installed_base=None):
     return {
         'bases': bases, 'fixes': fixes, 'fix_orphans': fix_orphans,
         'base_conflict': len(bases) > 1,
-        'missing_base': len(bases) == 0 and has_playable,
+        # «нет базы» — только если её нет ни в наборе, ни уже установленной на диске
+        'missing_base': len(bases) == 0 and not installed_base and has_playable,
+        'installed_base': installed_base,
         'save_warning': save_warning,
         'mandatory': mandatory,
     }

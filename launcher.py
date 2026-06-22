@@ -359,17 +359,37 @@ class Launcher:
             pass
         return out
 
-    def _camp_of(self, mid):
+    def _get_installed_base(self):
+        return getattr(self, '_inst_base', None)
+
+    def _disk_place(self, mid):
+        """(лагерь, пак) для установленного мода. Лагерь = определённая база (shared —
+        если мод общий); пак = юнит из каталога в этом лагере. Фолбэк — категория."""
         cat = getattr(self, '_catalog_cache', None) or {}
+        ib = self._get_installed_base()
+        base_camp = ib['camp'] if ib else None
         ent = cat.get(mid)
         if ent and ent.get('variants'):
-            src = ent.get('default_source') or ent['variants'][0]['source']
-            return src.split('/')[0]
-        return mid.split('/')[0] if '/' in mid else 'прочее'   # фолбэк: категория
+            srcs = [v['source'] for v in ent['variants']]
+            camps = {s.split('/')[0] for s in srcs}
+            if 'shared' in camps:
+                camp = 'shared'
+            elif base_camp and base_camp in camps:
+                camp = base_camp
+            else:
+                camp = (ent.get('default_source') or srcs[0]).split('/')[0]
+            pack = next((s.split('/', 1)[1] for s in srcs if s.split('/')[0] == camp), None)
+            return camp, pack
+        # нет в каталоге: к определённой базе (или категория)
+        return (base_camp or (mid.split('/')[0] if '/' in mid else 'прочее')), None
 
     def _refresh_list(self):
         for i in self.tree.get_children():
             self.tree.delete(i)
+        try:
+            self._inst_base = core.detect_installed_base(self._mods_dir())
+        except Exception:
+            self._inst_base = None
         disk = self._disk_mods()
 
         def st_of(m, on_disk):
@@ -401,14 +421,11 @@ class Launcher:
                 items.append(('прочее', None, 'форк' if typ == 'desc' else 'zip',
                               m.get('name') or m.get('id') or m.get('url', ''),
                               st_of(m, on), m.get('last_downloaded', '') if on else '', iid))
-        camp_upd = getattr(self, '_camp_updated', {})
         for mid, ts in sorted(disk.items()):     # на диске, но не в наборе
             if mid in seen:
                 continue
-            camp = self._camp_of(mid)
-            cu = camp_upd.get(camp)
-            stt = '⬆ обновление?' if (cu and ts and ts < cu) else '✅ установлен'
-            items.append((camp, None, 'мод', mid.split('/')[-1], stt, ts, None))
+            camp, pack = self._disk_place(mid)
+            items.append((camp, pack, 'мод', mid.split('/')[-1], '✅ установлен', ts, None))
 
         camp_nodes, pack_nodes = {}, {}
 
@@ -444,15 +461,8 @@ class Launcher:
                         'descriptors/catalog.json', self._repo(), self._token()) or {}
                 except Exception:
                     self._catalog_cache = {}
-                cu = {}                       # дата апдейта лагеря в репо (для дисковых модов)
-                for c in ('redux', 'universe', 'shared'):
-                    try:
-                        cu[c] = core.unit_remote_updated(self._repo(), c, self._token())
-                    except Exception:
-                        pass
-                self._camp_updated = cu
                 self._cat_loading = False
-                if self._catalog_cache or cu:
+                if self._catalog_cache:
                     self._post(self._refresh_list)
             threading.Thread(target=bg, daemon=True).start()
 
@@ -570,8 +580,9 @@ class Launcher:
                 self._post(messagebox.showwarning, 'Совместимость',
                            'Не удалось загрузить packs.json из репозитория.')
                 return
-            info = core.check_pack_compatibility(
-                units, packs, installed_base=self.profile.get('installed_base'))
+            ib = core.detect_installed_base(self._mods_dir())
+            installed_base = (ib['base'] if ib else None) or self.profile.get('installed_base')
+            info = core.check_pack_compatibility(units, packs, installed_base=installed_base)
         except Exception as e:
             self._post(messagebox.showerror, 'Совместимость', f'Ошибка: {e}')
             return
@@ -585,7 +596,9 @@ class Launcher:
             problems.append('⚠ В наборе НЕТ базового пака (с Rangers.exe).\n'
                             '   Модам/фиксам нужна база — добавь одну (redux/original/universe…).')
         elif bnames:
-            notes.append('✅ Базовый пак: ' + bnames[0])
+            notes.append('✅ Базовый пак (в наборе): ' + bnames[0])
+        elif info.get('installed_base'):
+            notes.append('✅ Базовый пак уже установлен: ' + info['installed_base'])
         for fix, parent in info['fix_orphans']:
             problems.append(f'⚠ Фикс «{packs[fix]["name"]}» требует родительский пак '
                             f'«{parent}», которого нет в наборе.')
