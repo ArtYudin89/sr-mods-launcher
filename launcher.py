@@ -405,7 +405,7 @@ class Launcher:
         camp = ib['camp'] if ib else 'прочее'
         folder = mid.split('/')[0] if '/' in mid else None
         if self._tree_mode() == 'section':
-            group = self._section_of(mid) or folder
+            group = self._section_of(mid) or 'Не указан'
         else:
             group = folder
         return camp, group
