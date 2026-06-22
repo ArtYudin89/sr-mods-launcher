@@ -927,16 +927,28 @@ class AddModDialog:
         threading.Thread(target=self._load_packs, daemon=True).start()
 
     # --- данные ---
+    def _alive(self):
+        try:
+            return bool(self.dlg.winfo_exists())
+        except Exception:
+            return False
+
+    def _set_status(self, text):
+        if self._alive() and self.status.winfo_exists():
+            self.status.config(text=text)
+
     def _load_packs(self):
         try:
             packs = core.load_packs('state/packs.json', self.repo, self.token)
             cp = core.camp_packs(packs)
         except Exception as e:
-            self.dlg.after(0, lambda: self.status.config(text=f'Ошибка загрузки паков: {e}'))
+            self.dlg.after(0, lambda: self._set_status(f'Ошибка загрузки паков: {e}'))
             return
         def apply():
+            if not self._alive():
+                return
             self.cp = cp
-            self.status.config(text=f'Лагерей: {len(cp)} · паков: {sum(len(v) for v in cp.values())}')
+            self._set_status(f'Лагерей: {len(cp)} · паков: {sum(len(v) for v in cp.values())}')
             if self.camp_combo is not None and self.camp_combo.winfo_exists():
                 self.camp_combo['values'] = sorted(cp)
         self.dlg.after(0, apply)
@@ -957,19 +969,21 @@ class AddModDialog:
         p = self.pack_map.get(self.pack_var.get())
         if not p:
             return
-        self.status.config(text='Загрузка модов пака…')
+        self._set_status('Загрузка модов пака…')
 
         def work():
             try:
                 mods = core.list_unit_mods(self.repo, p['camp'], p['unit'], self.token)
             except Exception as e:
-                self.dlg.after(0, lambda: self.status.config(text=f'Ошибка: {e}'))
+                self.dlg.after(0, lambda: self._set_status(f'Ошибка: {e}'))
                 return
             def apply():
+                if not self._alive():
+                    return
                 self.mod_map = {m: m for m in mods}
                 if self.mod_combo is not None and self.mod_combo.winfo_exists():
                     self.mod_combo['values'] = mods
-                self.status.config(text=f'Модов в паке: {len(mods)}')
+                self._set_status(f'Модов в паке: {len(mods)}')
             self.dlg.after(0, apply)
         threading.Thread(target=work, daemon=True).start()
 
