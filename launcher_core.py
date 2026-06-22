@@ -484,8 +484,14 @@ def read_module_section(modinfo_path):
     """Прочитать поле Section из ModuleInfo.txt (cp1251 или UTF-16 с BOM). '' если нет."""
     try:
         b = open(modinfo_path, 'rb').read()
-        enc = 'utf-16' if b[:2] in (b'\xff\xfe', b'\xfe\xff') else 'cp1251'
-        for line in b.decode(enc, 'replace').splitlines():
+        if b[:2] in (b'\xff\xfe', b'\xfe\xff'):
+            txt = b.decode('utf-16', 'replace')
+        else:
+            try:
+                txt = b.decode('utf-8')          # без BOM, но валидный UTF-8
+            except UnicodeDecodeError:
+                txt = b.decode('cp1251', 'replace')
+        for line in txt.splitlines():
             if '=' in line:
                 k, v = line.split('=', 1)
                 if k.strip().lower() == 'section':

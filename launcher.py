@@ -294,6 +294,11 @@ class Launcher:
         mode_cb.pack(side=tk.LEFT, padx=4)
         mode_cb.bind('<<ComboboxSelected>>', self._on_tree_mode)
         _Tooltip(mode_cb, 'Группировка установленных модов: по папкам Mods или по разделу из ModuleInfo')
+        self.attention_var = tk.BooleanVar(value=False)
+        att = ttk.Checkbutton(hdr, text='Только требующие внимания',
+                              variable=self.attention_var, command=self._refresh_list)
+        att.pack(side=tk.LEFT, padx=10)
+        _Tooltip(att, 'Скрыть «✅ установлен» — оставить обновления, добавленные и прочее')
         bf = ttk.Frame(hdr, style='TFrame'); bf.pack(side=tk.RIGHT)
         for txt, cmd, tip in [('＋', self._add_mod, 'Добавить мод/пак/лагерь'),
                               ('－', self._remove_mod, 'Убрать выбранное из набора'),
@@ -474,8 +479,11 @@ class Launcher:
                                                    text=f'■ {pk}', open=True)
             return pack_nodes[key]
 
+        only_attn = getattr(self, 'attention_var', None) and self.attention_var.get()
         for camp, pack, kind, label, status, date, iid in sorted(items, key=lambda x: (
                 x[0], x[1] or '', x[3])):
+            if only_attn and status.startswith('✅'):     # скрыть просто установленные
+                continue
             parent = pack_node(camp, pack) if (pack and kind == 'мод') else camp_node(camp)
             vals = (kind, status, fmt_date(date) if date else '')
             if iid:
@@ -1012,40 +1020,71 @@ def _ask(parent, title, prompt):
     return out.get('v')
 
 
+ALL_CAMP = '— весь лагерь —'
+ALL_PACK = '— весь пак —'
+
+
 class AddModDialog:
-    """Добавление по выбору из списков: Лагерь целиком / Пак / Конкретный мод / По ссылке (форк).
-    Данные тянутся из packs.json (лагеря, паки) и каталога (моды) репозитория."""
+    """Добавление каскадом Лагерь → Пак → Мод (с «весь лагерь/весь пак» по умолчанию),
+    либо по ссылке на форк. Данные — packs.json (лагеря/паки) и каталог (моды)."""
     def __init__(self, parent, theme, on_ok, token='', repo='ArtYudin89/sr-mods-aggregator'):
         self.on_ok = on_ok
         self.token = token
         self.repo = repo
         self.cp = {}             # {camp: [pack dict]}
         self.pack_map = {}       # label -> pack dict (для текущего лагеря)
-        self.mod_map = {}        # label -> mod_id (для текущего пака)
-        self.camp_combo = self.pack_combo = self.mod_combo = None
         self.dlg = d = tk.Toplevel(parent)
-        d.title('Добавить'); d.transient(parent); d.grab_set(); d.geometry('560x320')
+        d.title('Добавить'); d.transient(parent); d.grab_set(); d.geometry('560x300')
 
-        self.level = tk.StringVar(value='mod')
-        tf = ttk.Frame(d); tf.pack(fill=tk.X, padx=14, pady=(14, 4))
-        ttk.Label(tf, text='Что добавить:').pack(side=tk.LEFT)
-        for txt, val in [('Лагерь целиком', 'camp'), ('Пак', 'pack'),
-                         ('Мод', 'mod'), ('По ссылке (форк)', 'fork')]:
-            ttk.Radiobutton(tf, text=txt, variable=self.level, value=val,
-                            command=self._switch).pack(side=tk.LEFT, padx=6)
+        self.mode = tk.StringVar(value='src')
+        tf = ttk.Frame(d); tf.pack(fill=tk.X, padx=14, pady=(14, 6))
+        ttk.Label(tf, text='Источник:').pack(side=tk.LEFT)
+        ttk.Radiobutton(tf, text='Из репозитория', variable=self.mode, value='src',
+                        command=self._switch).pack(side=tk.LEFT, padx=8)
+        ttk.Radiobutton(tf, text='По ссылке (форк)', variable=self.mode, value='fork',
+                        command=self._switch).pack(side=tk.LEFT, padx=8)
 
-        self.body = ttk.Frame(d); self.body.pack(fill=tk.BOTH, expand=True, padx=14, pady=8)
         self.camp_var = tk.StringVar(); self.pack_var = tk.StringVar()
         self.mod_var = tk.StringVar(); self.url_var = tk.StringVar()
 
+        # --- блок «из репозитория»: три каскадных поля ---
+        self.src = ttk.Frame(d)
+        self.camp_combo = self._combo(self.src, 'Лагерь:', self.camp_var, self._on_camp)
+        self.pack_combo = self._combo(self.src, 'Пак:', self.pack_var, self._on_pack)
+        self.mod_combo = self._combo(self.src, 'Мод:', self.mod_var, None)
+        self.pack_combo.configure(state='disabled')
+        self.mod_combo.configure(state='disabled')
+        # --- блок «по ссылке» ---
+        self.fork = ttk.Frame(d)
+        r = ttk.Frame(self.fork); r.pack(fill=tk.X, pady=5)
+        ttk.Label(r, text='URL дескриптора:', width=14).pack(side=tk.LEFT)
+        ttk.Entry(r, textvariable=self.url_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Label(self.fork, text='Прямая ссылка на <id>.json форка мода.').pack(anchor=tk.W)
+
         self.status = ttk.Label(d, text='Загрузка списка паков…')
-        self.status.pack(anchor=tk.W, padx=14)
-        bf = ttk.Frame(d); bf.pack(pady=10)
+        self.status.pack(side=tk.BOTTOM, anchor=tk.W, padx=14, pady=(0, 6))
+        bf = ttk.Frame(d); bf.pack(side=tk.BOTTOM, pady=8)
         ttk.Button(bf, text='Добавить', style='Accent.TButton',
                    command=self._ok).pack(side=tk.LEFT, padx=4)
         ttk.Button(bf, text='Отмена', command=self.dlg.destroy).pack(side=tk.LEFT)
         self._switch()
         threading.Thread(target=self._load_packs, daemon=True).start()
+
+    def _combo(self, parent, label, var, on_pick):
+        r = ttk.Frame(parent); r.pack(fill=tk.X, pady=5)
+        ttk.Label(r, text=label, width=14).pack(side=tk.LEFT)
+        cb = ttk.Combobox(r, textvariable=var, state='readonly')
+        cb.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        if on_pick:
+            cb.bind('<<ComboboxSelected>>', on_pick)
+        return cb
+
+    def _switch(self):
+        self.src.pack_forget(); self.fork.pack_forget()
+        if self.mode.get() == 'fork':
+            self.fork.pack(fill=tk.BOTH, expand=True, padx=14, pady=8)
+        else:
+            self.src.pack(fill=tk.BOTH, expand=True, padx=14, pady=8)
 
     # --- данные ---
     def _alive(self):
@@ -1060,8 +1099,7 @@ class AddModDialog:
 
     def _load_packs(self):
         try:
-            packs = core.load_packs('state/packs.json', self.repo, self.token)
-            cp = core.camp_packs(packs)
+            cp = core.camp_packs(core.load_packs('state/packs.json', self.repo, self.token))
         except Exception as e:
             self.dlg.after(0, lambda: self._set_status(f'Ошибка загрузки паков: {e}'))
             return
@@ -1070,22 +1108,23 @@ class AddModDialog:
                 return
             self.cp = cp
             self._set_status(f'Лагерей: {len(cp)} · паков: {sum(len(v) for v in cp.values())}')
-            if self.camp_combo is not None and self.camp_combo.winfo_exists():
-                self.camp_combo['values'] = sorted(cp)
+            self.camp_combo['values'] = sorted(cp)
         self.dlg.after(0, apply)
 
     def _on_camp(self, _e=None):
         camp = self.camp_var.get()
         packs = self.cp.get(camp, [])
         self.pack_map = {f"{p['name']}  [{p['unit']}]": p for p in packs}
-        self.pack_var.set(''); self.mod_var.set('')
-        if self.pack_combo is not None and self.pack_combo.winfo_exists():
-            self.pack_combo['values'] = list(self.pack_map)
-        if self.mod_combo is not None and self.mod_combo.winfo_exists():
-            self.mod_combo['values'] = []
+        self.pack_combo.configure(state='readonly')
+        self.pack_combo['values'] = [ALL_CAMP] + list(self.pack_map)
+        self.pack_var.set(ALL_CAMP)
+        self.mod_var.set('')
+        self.mod_combo.configure(state='disabled')   # пак=весь лагерь -> мод недоступен
 
     def _on_pack(self, _e=None):
-        if self.level.get() != 'mod':
+        self.mod_var.set('')
+        if self.pack_var.get() == ALL_CAMP:
+            self.mod_combo.configure(state='disabled')
             return
         p = self.pack_map.get(self.pack_var.get())
         if not p:
@@ -1101,44 +1140,15 @@ class AddModDialog:
             def apply():
                 if not self._alive():
                     return
-                self.mod_map = {m: m for m in mods}
-                if self.mod_combo is not None and self.mod_combo.winfo_exists():
-                    self.mod_combo['values'] = mods
+                self.mod_combo.configure(state='readonly')
+                self.mod_combo['values'] = [ALL_PACK] + mods
+                self.mod_var.set(ALL_PACK)
                 self._set_status(f'Модов в паке: {len(mods)}')
             self.dlg.after(0, apply)
         threading.Thread(target=work, daemon=True).start()
 
-    # --- разметка ---
-    def _combo(self, label, var, on_pick=None):
-        r = ttk.Frame(self.body); r.pack(fill=tk.X, pady=5)
-        ttk.Label(r, text=label, width=14).pack(side=tk.LEFT)
-        cb = ttk.Combobox(r, textvariable=var, state='readonly')
-        cb.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        if on_pick:
-            cb.bind('<<ComboboxSelected>>', on_pick)
-        return cb
-
-    def _switch(self):
-        for w in self.body.winfo_children():
-            w.destroy()
-        self.camp_combo = self.pack_combo = self.mod_combo = None
-        lv = self.level.get()
-        if lv == 'fork':
-            r = ttk.Frame(self.body); r.pack(fill=tk.X, pady=5)
-            ttk.Label(r, text='URL дескриптора:', width=14).pack(side=tk.LEFT)
-            ttk.Entry(r, textvariable=self.url_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
-            ttk.Label(self.body, text='Прямая ссылка на <id>.json форка мода.').pack(anchor=tk.W)
-            return
-        self.camp_combo = self._combo('Лагерь:', self.camp_var, self._on_camp)
-        self.camp_combo['values'] = sorted(self.cp)
-        if lv in ('pack', 'mod'):
-            self.pack_combo = self._combo('Пак:', self.pack_var, self._on_pack)
-        if lv == 'mod':
-            self.mod_combo = self._combo('Мод:', self.mod_var)
-
     def _ok(self):
-        lv = self.level.get()
-        if lv == 'fork':
+        if self.mode.get() == 'fork':
             url = self.url_var.get().strip()
             if not url:
                 messagebox.showerror('Ошибка', 'Укажите URL дескриптора'); return
@@ -1152,23 +1162,21 @@ class AddModDialog:
         camp = self.camp_var.get().strip()
         if not camp:
             messagebox.showerror('Ошибка', 'Выберите лагерь'); return
-        if lv == 'camp':
-            mod = {'type': 'camp', 'camp': camp, 'repo': self.repo,
-                   'name': f'{camp} — весь лагерь',
-                   'last_downloaded': None, 'last_updated': None}
-        else:
-            p = self.pack_map.get(self.pack_var.get())
-            if not p:
-                messagebox.showerror('Ошибка', 'Выберите пак'); return
-            mod = {'type': 'unit', 'repo': self.repo, 'camp': p['camp'], 'unit': p['unit'],
-                   'name': p['name'], 'mod': '',
-                   'last_downloaded': None, 'last_updated': None}
-            if lv == 'mod':
-                mid = self.mod_var.get().strip()
-                if not mid:
-                    messagebox.showerror('Ошибка', 'Выберите мод'); return
-                mod['mod'] = mid
-                mod['name'] = mid
+        pack_sel = self.pack_var.get()
+        if not pack_sel or pack_sel == ALL_CAMP:          # весь лагерь
+            self.dlg.destroy()
+            self.on_ok({'type': 'camp', 'camp': camp, 'repo': self.repo,
+                        'name': f'{camp} — весь лагерь',
+                        'last_downloaded': None, 'last_updated': None}); return
+        p = self.pack_map.get(pack_sel)
+        if not p:
+            messagebox.showerror('Ошибка', 'Выберите пак'); return
+        mod = {'type': 'unit', 'repo': self.repo, 'camp': p['camp'], 'unit': p['unit'],
+               'name': p['name'], 'mod': '', 'last_downloaded': None, 'last_updated': None}
+        mod_sel = self.mod_var.get()
+        if mod_sel and mod_sel != ALL_PACK:               # конкретный мод
+            mod['mod'] = mod_sel
+            mod['name'] = mod_sel
         self.dlg.destroy()
         self.on_ok(mod)
 
