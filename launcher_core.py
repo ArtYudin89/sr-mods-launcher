@@ -480,6 +480,21 @@ def detect_installed_base(mods_dir):
     return None
 
 
+def read_module_section(modinfo_path):
+    """Прочитать поле Section из ModuleInfo.txt (cp1251 или UTF-16 с BOM). '' если нет."""
+    try:
+        b = open(modinfo_path, 'rb').read()
+        enc = 'utf-16' if b[:2] in (b'\xff\xfe', b'\xfe\xff') else 'cp1251'
+        for line in b.decode(enc, 'replace').splitlines():
+            if '=' in line:
+                k, v = line.split('=', 1)
+                if k.strip().lower() == 'section':
+                    return v.strip()
+    except Exception:
+        pass
+    return ''
+
+
 def scan_installed_mods(mods_dir):
     """Найти физически установленные моды в папке Mods игры — каталоги с ModuleInfo.txt.
     Возвращает список mod_id (путь после последнего 'Mods/' до папки мода, напр.

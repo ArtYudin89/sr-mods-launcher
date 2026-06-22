@@ -73,11 +73,12 @@ class Launcher:
         self.theme = self._load_json(THEME_FILE, DEFAULT_THEME)
         self.config = self._load_json(CONFIG_FILE, {
             'last_profile': 'default', 'profiles': ['default'], 'github_token': '',
-            'repo': 'ArtYudin89/sr-mods-aggregator'})
+            'repo': 'ArtYudin89/sr-mods-aggregator', 'tree_mode': 'folder'})
         PROFILES_DIR.mkdir(exist_ok=True)
         self.current_profile = self.config.get('last_profile', 'default')
         self.profile = self._load_profile(self.current_profile)
         self.busy = False
+        self._sections = {}              # кэш Section из ModuleInfo: mid -> раздел
         self.progress_var = tk.DoubleVar(value=0)
         self._apply_theme()
         self._build_ui()
@@ -284,11 +285,25 @@ class Launcher:
                                                           expand=True, padx=(0, 6))
         hdr = ttk.Frame(left, style='TFrame'); hdr.pack(fill=tk.X)
         ttk.Label(hdr, text='Моды', style='Head.TLabel').pack(side=tk.LEFT)
+        ttk.Label(hdr, text='  Вид:', background=self.theme['bg']).pack(side=tk.LEFT)
+        self.tree_mode_var = tk.StringVar(
+            value={'folder': 'По папкам', 'section': 'По разделу'}.get(
+                self.config.get('tree_mode', 'folder'), 'По папкам'))
+        mode_cb = ttk.Combobox(hdr, textvariable=self.tree_mode_var, width=12, state='readonly',
+                               values=['По папкам', 'По разделу'])
+        mode_cb.pack(side=tk.LEFT, padx=4)
+        mode_cb.bind('<<ComboboxSelected>>', self._on_tree_mode)
+        _Tooltip(mode_cb, 'Группировка установленных модов: по папкам Mods или по разделу из ModuleInfo')
         bf = ttk.Frame(hdr, style='TFrame'); bf.pack(side=tk.RIGHT)
-        for txt, cmd in [('＋', self._add_mod), ('－', self._remove_mod),
-                         ('↑', self._move_up), ('↓', self._move_down),
-                         ('⟳', self._refresh_remote)]:
-            ttk.Button(bf, text=txt, width=3, command=cmd).pack(side=tk.LEFT, padx=1)
+        for txt, cmd, tip in [('＋', self._add_mod, 'Добавить мод/пак/лагерь'),
+                              ('－', self._remove_mod, 'Убрать выбранное из набора'),
+                              ('↑', self._move_up, 'Выше в порядке загрузки'),
+                              ('↓', self._move_down, 'Ниже в порядке загрузки'),
+                              ('⊞', self._expand_all, 'Развернуть всё'),
+                              ('⊟', self._collapse_all, 'Свернуть всё'),
+                              ('⟳', self._refresh_remote, 'Проверить обновления (перечитать каталог)')]:
+            b = ttk.Button(bf, text=txt, width=3, command=cmd); b.pack(side=tk.LEFT, padx=1)
+            _Tooltip(b, tip)
 
         cols = ('kind', 'status', 'installed')
         self.tree = ttk.Treeview(left, columns=cols, show='tree headings', height=18)
@@ -302,18 +317,23 @@ class Launcher:
         self.tree.configure(yscrollcommand=sb.set)
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.tree.bind('<Button-3>', self._tree_menu)        # ПКМ — контекстное меню
 
         right = ttk.Frame(main, style='TFrame'); right.pack(side=tk.RIGHT, fill=tk.BOTH)
         act = ttk.LabelFrame(right, text='Действия', padding=10); act.pack(fill=tk.X)
-        ttk.Button(act, text='⬇  Установить выбранный', style='Accent.TButton',
-                   command=lambda: self._install(False)).pack(fill=tk.X, pady=2)
-        ttk.Button(act, text='⬇  Установить все',
-                   command=lambda: self._install(True)).pack(fill=tk.X, pady=2)
-        ttk.Button(act, text='🧩 Установить набор (с зависим.)', style='Accent.TButton',
-                   command=lambda: self._install(True)).pack(fill=tk.X, pady=2)
-        ttk.Button(act, text='🛡 Проверить совместимость',
-                   command=self._check_compat).pack(fill=tk.X, pady=2)
-        ttk.Button(act, text='🗑  Очистить Mods', command=self._clear_mods).pack(fill=tk.X, pady=2)
+        for txt, cmd, style, tip in [
+                ('⬇  Установить выбранный', lambda: self._install(False), 'Accent.TButton',
+                 'Поставить выделенный мод/пак'),
+                ('⬇  Установить все', lambda: self._install(True), 'TButton',
+                 'Поставить все элементы набора'),
+                ('🧩 Установить набор (с зависим.)', lambda: self._install(True), 'Accent.TButton',
+                 'Поставить набор и подтянуть зависимости'),
+                ('🛡 Проверить совместимость', self._check_compat, 'TButton',
+                 'База/фиксы/сейвы/конфликты'),
+                ('🗑  Очистить Mods', self._clear_mods, 'TButton',
+                 'Очистить папку Mods игры')]:
+            b = ttk.Button(act, text=txt, style=style, command=cmd); b.pack(fill=tk.X, pady=2)
+            _Tooltip(b, tip)
         ttk.Label(right, text='Прогресс:').pack(anchor=tk.W, pady=(10, 0))
         ttk.Progressbar(right, variable=self.progress_var, maximum=100).pack(fill=tk.X)
         lf = ttk.LabelFrame(right, text='Лог', padding=6); lf.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
@@ -362,26 +382,38 @@ class Launcher:
     def _get_installed_base(self):
         return getattr(self, '_inst_base', None)
 
+    def _pack_group(self, unit):
+        """Юнит-пак для группировки: фикс-пак сворачивается в родительский (фикс — не
+        самостоятельный пак, а частые мелкие обновления того же пака)."""
+        return (getattr(self, '_fixparent', {}) or {}).get(unit, unit)
+
+    def _tree_mode(self):
+        return 'section' if self.tree_mode_var.get() == 'По разделу' else 'folder'
+
+    def _section_of(self, mid):
+        """Section из ModuleInfo мода (с кэшем)."""
+        if mid not in self._sections:
+            p = self._mods_dir() / mid.replace('/', os.sep) / 'ModuleInfo.txt'
+            self._sections[mid] = core.read_module_section(p) if p.exists() else ''
+        return self._sections[mid]
+
     def _disk_place(self, mid):
-        """(лагерь, пак) для установленного мода. Лагерь = определённая база (shared —
-        если мод общий); пак = юнит из каталога в этом лагере. Фолбэк — категория."""
-        cat = getattr(self, '_catalog_cache', None) or {}
+        """(лагерь, группа) для установленного мода — ТОЛЬКО по данным с диска.
+        Лагерь = установленная база. Группа: 'folder' → папка-категория из пути;
+        'section' → раздел из ModuleInfo (фолбэк на папку)."""
         ib = self._get_installed_base()
-        base_camp = ib['camp'] if ib else None
-        ent = cat.get(mid)
-        if ent and ent.get('variants'):
-            srcs = [v['source'] for v in ent['variants']]
-            camps = {s.split('/')[0] for s in srcs}
-            if 'shared' in camps:
-                camp = 'shared'
-            elif base_camp and base_camp in camps:
-                camp = base_camp
-            else:
-                camp = (ent.get('default_source') or srcs[0]).split('/')[0]
-            pack = next((s.split('/', 1)[1] for s in srcs if s.split('/')[0] == camp), None)
-            return camp, pack
-        # нет в каталоге: к определённой базе (или категория)
-        return (base_camp or (mid.split('/')[0] if '/' in mid else 'прочее')), None
+        camp = ib['camp'] if ib else 'прочее'
+        folder = mid.split('/')[0] if '/' in mid else None
+        if self._tree_mode() == 'section':
+            group = self._section_of(mid) or folder
+        else:
+            group = folder
+        return camp, group
+
+    def _on_tree_mode(self, _e=None):
+        self.config['tree_mode'] = self._tree_mode()
+        self._save_config()
+        self._refresh_list()
 
     def _refresh_list(self):
         for i in self.tree.get_children():
@@ -405,11 +437,11 @@ class Launcher:
                 mid = m['mod']; seen.add(mid)
                 on = (mid in disk) or bool(m.get('last_downloaded'))
                 date = m.get('last_downloaded') or disk.get(mid, '')
-                items.append((m.get('camp', 'прочее'), m.get('unit'), 'мод',
+                items.append((m.get('camp', 'прочее'), self._pack_group(m.get('unit')), 'мод',
                               mid.split('/')[-1], st_of(m, on), date if on else '', iid))
             elif typ == 'unit':
                 on = bool(m.get('last_downloaded'))
-                items.append((m.get('camp', 'прочее'), m.get('unit'), 'пак',
+                items.append((m.get('camp', 'прочее'), self._pack_group(m.get('unit')), 'пак',
                               m.get('name', m.get('unit')), st_of(m, on),
                               m.get('last_downloaded', '') if on else '', iid))
             elif typ == 'camp':
@@ -425,7 +457,7 @@ class Launcher:
             if mid in seen:
                 continue
             camp, pack = self._disk_place(mid)
-            items.append((camp, pack, 'мод', mid.split('/')[-1], '✅ установлен', ts, None))
+            items.append((camp, pack, 'мод', mid.split('/')[-1], '✅ установлен', ts, 'd:' + mid))
 
         camp_nodes, pack_nodes = {}, {}
 
@@ -461,6 +493,12 @@ class Launcher:
                         'descriptors/catalog.json', self._repo(), self._token()) or {}
                 except Exception:
                     self._catalog_cache = {}
+                try:                          # карта фикс→родитель для группировки
+                    pk = core.load_packs('state/packs.json', self._repo(), self._token())
+                    self._fixparent = {p['name']: p['fix_parent']
+                                       for p in pk.values() if p.get('fix_parent')}
+                except Exception:
+                    self._fixparent = {}
                 self._cat_loading = False
                 if self._catalog_cache:
                     self._post(self._refresh_list)
@@ -862,6 +900,7 @@ class Launcher:
         p = filedialog.askdirectory(title='Папка игры (где лежит Rangers.exe)')
         if p:
             self.game_path_var.set(p)
+            self._sections = {}
             self._refresh_list()
 
     def _launch(self):
@@ -881,6 +920,52 @@ class Launcher:
         d = self._mods_dir()
         os.startfile(d) if sys.platform == 'win32' else subprocess.Popen(['xdg-open', str(d)])
 
+    # ---------- дерево: раскрытие / контекстное меню ----------
+    def _set_open_all(self, opened):
+        def walk(it):
+            for c in self.tree.get_children(it):
+                self.tree.item(c, open=opened); walk(c)
+        walk('')
+
+    def _expand_all(self):
+        self._set_open_all(True)
+
+    def _collapse_all(self):
+        self._set_open_all(False)
+
+    def _path_for_iid(self, iid):
+        """Относительный путь мода под Mods для строки дерева (или None)."""
+        if iid.startswith('d:'):
+            return iid[2:]
+        if iid.startswith('p') and iid[1:].isdigit():
+            m = self.profile['mods'][int(iid[1:])]
+            if m.get('type') == 'unit' and m.get('mod'):
+                return m['mod']
+        return None
+
+    def _tree_menu(self, event):
+        iid = self.tree.identify_row(event.y)
+        if not iid:
+            return
+        self.tree.selection_set(iid)
+        path = self._path_for_iid(iid)
+        menu = tk.Menu(self.root, tearoff=0)
+        if path:
+            menu.add_command(label='📂 Открыть папку мода',
+                             command=lambda: self._open_mod_folder(path))
+        menu.add_command(label='📂 Открыть папку Mods', command=self._open_mods)
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _open_mod_folder(self, relpath):
+        d = self._mods_dir() / relpath.replace('/', os.sep)
+        if not d.exists():
+            messagebox.showinfo('Папка мода', f'Не найдена на диске:\n{relpath}')
+            return
+        os.startfile(d) if sys.platform == 'win32' else subprocess.Popen(['xdg-open', str(d)])
+
     def _on_close(self):
         self.config['last_profile'] = self.current_profile
         self._save_profile()
@@ -888,6 +973,29 @@ class Launcher:
 
     def run(self):
         self.root.mainloop()
+
+
+class _Tooltip:
+    """Простая всплывающая подсказка при наведении на виджет."""
+    def __init__(self, widget, text):
+        self.w = widget; self.text = text; self.tip = None
+        widget.bind('<Enter>', self._show)
+        widget.bind('<Leave>', self._hide)
+
+    def _show(self, _=None):
+        if self.tip or not self.text:
+            return
+        x = self.w.winfo_rootx() + 18
+        y = self.w.winfo_rooty() + self.w.winfo_height() + 2
+        self.tip = tk.Toplevel(self.w)
+        self.tip.wm_overrideredirect(True)
+        self.tip.wm_geometry(f'+{x}+{y}')
+        tk.Label(self.tip, text=self.text, bg='#ffffe0', fg='#000', relief=tk.SOLID,
+                 borderwidth=1, font=('Segoe UI', 9), padx=5, pady=2).pack()
+
+    def _hide(self, _=None):
+        if self.tip:
+            self.tip.destroy(); self.tip = None
 
 
 def _ask(parent, title, prompt):
