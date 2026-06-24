@@ -890,14 +890,58 @@ class Launcher:
         notes.append('ℹ Смена базового пака делает несовместимыми сейвы текущей партии '
                      '(новую партию начать можно).')
 
+        # --- «Мост»: что из недостающих зависимостей реально есть в каталоге? ---
+        bridge = None
+        if dep_problems:
+            miss = sorted({d for dp in dep_problems for d in dp['missing']})
+            try:
+                cat = core.load_catalog('descriptors/catalog.json', self._repo(), tok)
+                bp = core.resolve_set([{'id': n} for n in miss], cat, self._repo(), tok)
+                if bp['order']:
+                    bridge = bp
+                    head = ', '.join(bp['order'][:20])
+                    more = f' … (+{len(bp["order"]) - 20})' if len(bp['order']) > 20 else ''
+                    problems.append('🧩 Доступно к установке из каталога: ' + head + more)
+                if bp['missing_deps']:
+                    problems.append('❓ Нет в каталоге (поставить нельзя): '
+                                    + ', '.join(bp['missing_deps'][:20]))
+            except core.OperationCancelled:
+                self.log('Проверка отменена.'); self._post(self._end_op, 'Отменено'); return
+            except Exception as e:
+                self.log(f'Мост зависимостей: не удалось разрешить ({e})')
+
         title = 'Совместимость: проблемы' if problems else 'Совместимость: ок'
         body = ''
         if problems:
             body += 'НАЙДЕНЫ ВОПРОСЫ:\n\n' + '\n\n'.join(problems) + '\n\n'
         body += '— — —\n' + '\n'.join(notes)
         self.log('Совместимость: ' + ('проблемы' if problems else 'ок'))
-        self._post(messagebox.showwarning if problems else messagebox.showinfo, title, body)
-        self._post(self._end_op, 'Готов')
+        self._post(self._compat_result, title, body, bool(problems), bridge)
+
+    def _compat_result(self, title, body, problems, bridge):
+        """Показать отчёт совместимости и, если недостающие зависимости есть в
+        каталоге, предложить «мост» — доустановить их (через тот же резолвер/инсталлер,
+        что и «🧩 Установить набор»)."""
+        (messagebox.showwarning if problems else messagebox.showinfo)(title, body)
+        if bridge and bridge.get('order'):
+            n = len(bridge['order'])
+            deps = set(bridge.get('added_deps') or [])
+            lines = ['  • ' + m + ('   (зависимость)' if m in deps else '')
+                     for m in bridge['order'][:25]]
+            if n > 25:
+                lines.append(f'  … и ещё {n - 25}')
+            extra = ('\n\n⚠ Не в каталоге (пропустим): ' + ', '.join(bridge['missing_deps'])
+                     if bridge.get('missing_deps') else '')
+            if messagebox.askyesno(
+                    'Доустановить зависимости',
+                    f'Недостающие зависимости можно поставить из каталога ({n}):\n\n'
+                    + '\n'.join(lines) + extra + '\n\nУстановить сейчас?'):
+                self.log(f'Мост зависимостей: устанавливаю {n} модов…')
+                threading.Thread(
+                    target=self._deps_install_worker,
+                    args=(bridge, self._repo(), self._token()), daemon=True).start()
+                return
+        self._end_op('Готов')
 
     def _remove_mod(self):
         i = self._selected()
