@@ -3,6 +3,9 @@
 /dist/
 *.spec
 
+# Артефакт релиза (пересобирается, кладётся в GitHub Release)
+/SRModsLauncher-source.zip
+
 # Python
 __pycache__/
 *.pyc
