@@ -14,12 +14,48 @@ import json
 import os
 import re
 import shutil
+import time
 import zipfile
+from difflib import SequenceMatcher
 from pathlib import Path
 
 import requests
 
 API = 'https://api.github.com'
+
+# Детальность лога: True — показывать построчно загрузку каждой части; False —
+# только итоги по модам. GUI переключает перед операцией.
+LOG_VERBOSE = True
+
+
+class OperationCancelled(Exception):
+    """Операция отменена пользователем (кооперативная отмена через should_cancel)."""
+
+
+def _check_cancel(should_cancel):
+    if should_cancel and should_cancel():
+        raise OperationCancelled()
+
+
+def _with_retries(fn, attempts=4, base_delay=1.5, should_cancel=None):
+    """Повторять сетевой вызов при таймаутах/обрывах/5xx (нестабильная сеть/DPI).
+    4xx (кроме 429) не повторяем. Между попытками — нарастающая пауза."""
+    last = None
+    for k in range(attempts):
+        _check_cancel(should_cancel)
+        try:
+            return fn()
+        except (requests.Timeout, requests.ConnectionError, requests.exceptions.ChunkedEncodingError) as e:
+            last = e
+        except requests.HTTPError as e:
+            sc = e.response.status_code if e.response is not None else 0
+            if sc == 429 or 500 <= sc < 600:
+                last = e
+            else:
+                raise
+        if k < attempts - 1:
+            time.sleep(base_delay * (k + 1))
+    raise last
 
 
 # ---------------------------------------------------------------------------
@@ -33,19 +69,24 @@ def _headers(token, accept='application/vnd.github+json'):
     return h
 
 
-def gh_json(url, token, params=None):
-    r = requests.get(url, headers=_headers(token), params=params, timeout=30)
-    r.raise_for_status()
-    return r.json()
+def gh_json(url, token, params=None, should_cancel=None):
+    def do():
+        r = requests.get(url, headers=_headers(token), params=params, timeout=(10, 30))
+        r.raise_for_status()
+        return r.json()
+    return _with_retries(do, should_cancel=should_cancel)
 
 
-def repo_file_bytes(repo, path, token):
-    """Сырой файл из репозитория (contents API, работает и для приватных)."""
-    r = requests.get(f'{API}/repos/{repo}/contents/{path}',
-                     headers=_headers(token, 'application/vnd.github.raw'),
-                     timeout=30)
-    r.raise_for_status()
-    return r.content
+def repo_file_bytes(repo, path, token, should_cancel=None):
+    """Сырой файл из репозитория (contents API, работает и для приватных).
+    С ретраями: нестабильная сеть/DPI рвут TLS — раньше падало по таймауту."""
+    def do():
+        r = requests.get(f'{API}/repos/{repo}/contents/{path}',
+                         headers=_headers(token, 'application/vnd.github.raw'),
+                         timeout=(10, 60))
+        r.raise_for_status()
+        return r.content
+    return _with_retries(do, should_cancel=should_cancel)
 
 
 def list_releases(repo, token):
@@ -70,37 +111,33 @@ def _zip_asset(release):
     return None
 
 
-def download_asset(asset, token, dest, progress_cb=None):
+def _stream_download(url, headers, dest, progress_cb=None, should_cancel=None):
+    """Потоковое скачивание с ретраями и кооперативной отменой."""
+    def do():
+        with requests.get(url, headers=headers, stream=True, timeout=(10, 120)) as r:
+            r.raise_for_status()
+            total = int(r.headers.get('content-length', 0))
+            done = 0
+            with open(dest, 'wb') as f:
+                for c in r.iter_content(1 << 20):
+                    _check_cancel(should_cancel)
+                    f.write(c)
+                    done += len(c)
+                    if progress_cb and total:
+                        progress_cb(done, total)
+        return dest
+    return _with_retries(do, should_cancel=should_cancel)
+
+
+def download_asset(asset, token, dest, progress_cb=None, should_cancel=None):
     """Скачать ассет релиза по api-url (Accept: octet-stream). Работает для приватных."""
-    with requests.get(asset['url'],
-                      headers=_headers(token, 'application/octet-stream'),
-                      stream=True, timeout=120) as r:
-        r.raise_for_status()
-        total = int(r.headers.get('content-length', 0))
-        done = 0
-        with open(dest, 'wb') as f:
-            for c in r.iter_content(1 << 20):
-                f.write(c)
-                done += len(c)
-                if progress_cb and total:
-                    progress_cb(done, total)
-    return dest
+    return _stream_download(asset['url'], _headers(token, 'application/octet-stream'),
+                            dest, progress_cb, should_cancel)
 
 
-def download_url(url, token, dest, progress_cb=None):
+def download_url(url, token, dest, progress_cb=None, should_cancel=None):
     """Скачать произвольный URL (для generic zip — browser_download_url)."""
-    with requests.get(url, headers=_headers(token, '*/*'),
-                      stream=True, timeout=120) as r:
-        r.raise_for_status()
-        total = int(r.headers.get('content-length', 0))
-        done = 0
-        with open(dest, 'wb') as f:
-            for c in r.iter_content(1 << 20):
-                f.write(c)
-                done += len(c)
-                if progress_cb and total:
-                    progress_cb(done, total)
-    return dest
+    return _stream_download(url, _headers(token, '*/*'), dest, progress_cb, should_cancel)
 
 
 # ---------------------------------------------------------------------------
@@ -109,14 +146,15 @@ def download_url(url, token, dest, progress_cb=None):
 
 def install_relpath(relpath):
     """Нормализовать путь к виду относительно игровой Mods/.
-    Берём всё ПОСЛЕ последнего сегмента 'Mods'. Если 'Mods' нет — путь как есть."""
+    Берём всё ПОСЛЕ последнего сегмента 'Mods'. Если 'Mods' нет, но есть '{app}'
+    (мод ставится в корень игры через Inno) — срезаем '{app}'. Иначе путь как есть."""
     parts = relpath.replace('\\', '/').split('/')
-    idx = None
-    for i, p in enumerate(parts):
-        if p.lower() == 'mods':
-            idx = i
-    if idx is not None and idx < len(parts) - 1:
-        return '/'.join(parts[idx + 1:])
+    midx = [i for i, p in enumerate(parts) if p.lower() == 'mods']
+    if midx and midx[-1] < len(parts) - 1:
+        return '/'.join(parts[midx[-1] + 1:])
+    aidx = [i for i, p in enumerate(parts) if p.lower() == '{app}']
+    if aidx and aidx[-1] < len(parts) - 1:
+        return '/'.join(parts[aidx[-1] + 1:])
     return '/'.join(parts)
 
 
@@ -141,14 +179,15 @@ def resolve_zip(url, token):
             'updated': rel.get('published_at')}
 
 
-def install_zip(url, mods_dir, token, progress_cb=None, log=print, tmp_dir=None):
+def install_zip(url, mods_dir, token, progress_cb=None, log=print, tmp_dir=None,
+                should_cancel=None):
     info = resolve_zip(url, token)
     tmp = Path(tmp_dir or mods_dir).parent / '_dl.zip'
     log('Скачивание zip...')
     if info.get('asset'):
-        download_asset(info['asset'], token, tmp, progress_cb)
+        download_asset(info['asset'], token, tmp, progress_cb, should_cancel)
     else:
-        download_url(info['download_url'], token, tmp, progress_cb)
+        download_url(info['download_url'], token, tmp, progress_cb, should_cancel)
     log('Распаковка...')
     _extract_zip_to(tmp, Path(mods_dir))
     tmp.unlink(missing_ok=True)
@@ -217,7 +256,7 @@ def list_unit_mods(repo, camp, unit, token):
 
 
 def reconstruct_unit(repo, camp, unit, mods_dir, token, progress_cb=None,
-                     log=print, tmp_dir=None, dry_run=False, mod=None):
+                     log=print, tmp_dir=None, dry_run=False, mod=None, should_cancel=None):
     """Собрать юнит (или один мод mod=mod_key) из HF: код И ассеты берутся из
     content-addressed чанков asset_index по code.manifest + assets.manifest.
     mod=None -> весь юнит; mod='Кат/Имя' или '_base' -> только этот мод.
@@ -253,30 +292,34 @@ def reconstruct_unit(repo, camp, unit, mods_dir, token, progress_cb=None,
         for targets in shamap.values():
             for _relpath, kind in targets:
                 stats[f'{kind}_files'] += 1
-    scope = f'мод {mod}' if mod else 'весь юнит'
+    scope = f'мод {mod}' if mod else 'весь пак'
     log(f'{scope}: {stats["code_files"]} код + {stats["asset_files"]} ассетов '
-        f'в {len(need)} чанках'
-        + (f', НЕ найдено блобов: {stats["missing"]}' if stats['missing'] else ''))
+        f'в {len(need)} частях'
+        + (f', НЕ найдено файлов: {stats["missing"]}' if stats['missing'] else ''))
     if dry_run:
         return stats
 
-    # Скачать каждый нужный чанк и извлечь блобы во все целевые пути.
+    # Скачать каждую нужную часть и извлечь файлы во все целевые пути.
+    done_parts = 0
     for chunk, shamap in need.items():
+        _check_cancel(should_cancel)
         meta = index['chunks'].get(chunk, {})
         cpath = tmp / f'_chunk_{chunk}'
-        log(f'Скачивание чанка {chunk} ({len(shamap)} блобов) ...')
+        done_parts += 1
+        if LOG_VERBOSE:
+            log(f'Загрузка части {done_parts}/{len(need)} ({len(shamap)} файлов)…')
         url = meta.get('url')
         if url:                                  # HF public / любой прямой URL
             ctoken = token if meta.get('store') == 'github' else None
-            download_url(url, ctoken, cpath, progress_cb)
+            download_url(url, ctoken, cpath, progress_cb, should_cancel)
         else:                                    # back-compat: GitHub release по тегу
             tag = meta.get('release_tag')
             crel = release_by_tag(repo, tag, token)
             casset = next((a for a in crel.get('assets', []) if a['name'] == chunk), None)
             if not casset:
-                log(f'[warn] чанк {chunk} не найден (url/release)')
+                log('[!] часть не найдена (нет ссылки/релиза)')
                 continue
-            download_asset(casset, token, cpath, progress_cb)
+            download_asset(casset, token, cpath, progress_cb, should_cancel)
         with zipfile.ZipFile(cpath) as z:
             for sh, targets in shamap.items():
                 data = z.read(sh)
@@ -349,6 +392,68 @@ def _variant_path(catalog, mod_id, source=None):
         if v['source'] == default:
             return v['path']
     return vs[0]['path'] if vs else None
+
+
+def descriptor_for(sel, catalog=None, repo=None, token=None):
+    """Загрузить ОДИН дескриптор по выбору: {'url':..} (форк) | {'id':..,'source':..}.
+    Для id нужен catalog (берётся вариант source или дефолтный). -> descriptor | None."""
+    if sel.get('url'):
+        return load_descriptor(sel['url'], repo, token)
+    path = _variant_path(catalog or {}, sel.get('id'), sel.get('source'))
+    if not path:
+        return None
+    return load_descriptor(path, repo, token)
+
+
+def pick_disk_variant(catalog, mod_id, mods_dir, repo=None, token=None, prefer_camp=None,
+                      log=print, should_cancel=None):
+    """Подобрать вариант мода из каталога, лучше всего совпадающий с тем, что лежит
+    на диске (для дисковых модов без снимка). Совпадение = сколько файлов варианта
+    физически есть в Mods (cover), затем сколько с тем же sha (match). prefer_camp —
+    предпочесть варианты этого лагеря при равенстве. -> (descriptor, info) | (None, None).
+    info['reason'] при неудаче: 'not_in_catalog' | 'load_failed'."""
+    catalog = catalog or {}
+    ent = catalog.get(mod_id)
+    if not ent:                                  # fallback: матч по короткому имени
+        leaf = mod_id.split('/')[-1]
+        cands = [k for k in catalog if k.split('/')[-1] == leaf]
+        if len(cands) == 1:
+            ent = catalog[cands[0]]
+        elif not cands:
+            return None, {'reason': 'not_in_catalog'}
+        else:                                    # неоднозначно — берём с тем же лагерем
+            ent = catalog[cands[0]]
+    mods_dir = Path(mods_dir)
+    best, best_desc, best_info = None, None, None
+    load_errors = 0
+    for v in ent['variants']:
+        _check_cancel(should_cancel)
+        try:
+            desc = load_descriptor(v['path'], repo, token)
+        except OperationCancelled:
+            raise
+        except Exception as e:
+            load_errors += 1
+            log(f'[warn] вариант {v["source"]}: не удалось загрузить дескриптор ({e})')
+            continue
+        flat = desc_files_flat(desc)
+        cover = match = 0
+        for rp, meta in flat.items():
+            fp = mods_dir / install_relpath(rp)
+            if fp.exists() and fp.is_file():
+                cover += 1
+                if file_sha256(fp) == meta['sha256']:
+                    match += 1
+        same_camp = bool(prefer_camp and v['source'].startswith(prefer_camp))
+        score = (cover, match, same_camp)
+        if best is None or score > best:
+            best = score
+            best_desc = desc
+            best_info = {'source': v['source'], 'cover': cover, 'match': match,
+                         'total': len(flat), 'same_camp': same_camp, 'reason': 'ok'}
+    if best_desc is None:
+        return None, {'reason': 'load_failed' if load_errors else 'not_in_catalog'}
+    return best_desc, best_info
 
 
 def _build_leaf_index(catalog):
@@ -480,25 +585,64 @@ def detect_installed_base(mods_dir):
     return None
 
 
-def read_module_section(modinfo_path):
-    """Прочитать поле Section из ModuleInfo.txt (cp1251 или UTF-16 с BOM). '' если нет."""
+def read_module_info(modinfo_path):
+    """ModuleInfo.txt -> dict 'Ключ'->'Значение' (cp1251 / UTF-16 BOM / UTF-8).
+    Повторяющиеся ключи склеиваются переводом строки. {} при ошибке."""
+    out = {}
     try:
         b = open(modinfo_path, 'rb').read()
         if b[:2] in (b'\xff\xfe', b'\xfe\xff'):
             txt = b.decode('utf-16', 'replace')
         else:
             try:
-                txt = b.decode('utf-8')          # без BOM, но валидный UTF-8
+                txt = b.decode('utf-8')
             except UnicodeDecodeError:
                 txt = b.decode('cp1251', 'replace')
         for line in txt.splitlines():
-            if '=' in line:
-                k, v = line.split('=', 1)
-                if k.strip().lower() == 'section':
-                    return v.strip()
+            if '=' not in line:
+                continue
+            k, _, v = line.partition('=')
+            k, v = k.strip(), v.strip()
+            if k:
+                out[k] = (out[k] + '\n' + v) if k in out else v
     except Exception:
         pass
-    return ''
+    return out
+
+
+def read_module_section(modinfo_path):
+    """Поле Section из ModuleInfo.txt. '' если нет."""
+    return read_module_info(modinfo_path).get('Section', '')
+
+
+def _split_modlist(val):
+    """Conflict/Dependence -> список имён модов (разделители , ; пробел)."""
+    if not val:
+        return []
+    return [x for x in re.split(r'[,;\s]+', val.strip()) if x]
+
+
+def check_disk_dependencies(mods_dir, progress_cb=None, should_cancel=None):
+    """Проверить зависимости (поле Dependence в ModuleInfo) установленных модов.
+    Возвращает список {'mod': id, 'name': имя, 'missing': [неуст. зависимости]} —
+    только для модов, у которых есть НЕустановленные зависимости. Сопоставление по
+    короткому имени (Dependence ссылается по имени мода, не по 'Кат/Имя')."""
+    mods_dir = Path(mods_dir)
+    mids = scan_installed_mods(mods_dir)
+    present = set(mids) | {m.split('/')[-1] for m in mids}
+    out = []
+    n = max(1, len(mids))
+    for i, mid in enumerate(mids):
+        _check_cancel(should_cancel)
+        mi = read_module_info(mods_dir / mid.replace('/', os.sep) / 'ModuleInfo.txt')
+        deps = _split_modlist(mi.get('Dependence', ''))
+        missing = [d for d in deps if d not in present and d.split('/')[-1] not in present]
+        if missing:
+            out.append({'mod': mid, 'name': mi.get('Name', '') or mid.split('/')[-1],
+                        'missing': missing})
+        if progress_cb:
+            progress_cb(i + 1, n)
+    return out
 
 
 def scan_installed_mods(mods_dir):
@@ -579,7 +723,8 @@ def load_chunk_index(desc=None, url=None, repo=None, token=None):
 
 
 def install_descriptor(desc, mods_dir, index, token=None, progress_cb=None,
-                       log=print, tmp_dir=None, dry_run=False):
+                       log=print, tmp_dir=None, dry_run=False, snap_dir=None,
+                       should_cancel=None):
     """Установить мод из дескриптора: блобы (code+assets) резолвятся по sha через index
     -> чанки -> извлечение -> запись в mods_dir/install_relpath(relpath)."""
     mods_dir = Path(mods_dir)
@@ -603,17 +748,21 @@ def install_descriptor(desc, mods_dir, index, token=None, progress_cb=None,
             for _rel, kind in targets:
                 stats[('code_files' if kind == 'code' else 'asset_files')] += 1
     log(f'{desc.get("id")}: {stats["code_files"]} код + {stats["asset_files"]} ассетов '
-        f'в {len(need)} чанках'
-        + (f', НЕ найдено блобов: {stats["missing"]}' if stats['missing'] else ''))
+        f'в {len(need)} частях'
+        + (f', НЕ найдено файлов: {stats["missing"]}' if stats['missing'] else ''))
     if dry_run:
         return stats
+    done_parts = 0
     for chunk, shamap in need.items():
+        _check_cancel(should_cancel)
         meta = index['chunks'].get(chunk, {})
         cpath = tmp / f'_chunk_{chunk}'
-        log(f'Скачивание чанка {chunk} ({len(shamap)} блобов) ...')
+        done_parts += 1
+        if LOG_VERBOSE:
+            log(f'Загрузка части {done_parts}/{len(need)} ({len(shamap)} файлов)…')
         url = meta.get('url')
         ctoken = token if meta.get('store') == 'github' else None
-        download_url(url, ctoken, cpath, progress_cb)
+        download_url(url, ctoken, cpath, progress_cb, should_cancel)
         with zipfile.ZipFile(cpath) as z:
             for sh, targets in shamap.items():
                 data = z.read(sh)
@@ -622,15 +771,478 @@ def install_descriptor(desc, mods_dir, index, token=None, progress_cb=None,
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_bytes(data)
         cpath.unlink(missing_ok=True)
+    # снимок установки -> база для будущего 3-way merge при обновлении (Фаза 4)
+    save_snapshot_from_desc(mods_dir, desc, snap_dir)
     log(f'Готово: {desc.get("id")} -> {mods_dir}')
     return stats
 
 
-def install_set(plan, mods_dir, index, token=None, log=print, tmp_dir=None, dry_run=False):
+def install_set(plan, mods_dir, index, token=None, log=print, tmp_dir=None, dry_run=False,
+                should_cancel=None):
     """Установить весь разрешённый набор (resolve_set -> план). Ставит все mods плана."""
     results = {}
     for mid in plan['order']:
+        _check_cancel(should_cancel)
         results[mid] = install_descriptor(plan['mods'][mid], mods_dir, index,
                                           token=token, log=log, tmp_dir=tmp_dir,
-                                          dry_run=dry_run)
+                                          dry_run=dry_run, should_cancel=should_cancel)
     return results
+
+
+# ---------------------------------------------------------------------------
+# Фаза 4: сохранение правок игрока при обновлении мода (3-way merge).
+#
+# База 3-way НЕ хранится байтами: снимок установки = манифест (relpath->sha256)
+# + version. Содержимое base-файлов при необходимости переподтягивается по sha
+# из тех же content-addressed чанков (как при установке).
+#   base   = снимок прошлой установки (то, что лаунчер положил)
+#   theirs = новая версия мода (манифест нового дескриптора)
+#   mine   = то, что сейчас на диске (правки игрока)
+# Текст мёржим diff3 (чистый Python, без git): непересекающиеся изменения
+# сливаются авто; пересекающиеся -> конфликт (решает игрок). Бинарь не мёржим.
+#
+# Снимок лежит ВНЕ папки Mods (её могут очистить целиком) — в домашнем каталоге
+# пользователя, с привязкой к конкретной инсталляции по пути Mods.
+# После применения обновления снимок := манифест новой версии (то, что отгрузил
+# мод) — он и есть общий предок для следующего 3-way; на диске при этом может
+# остаться правка игрока (это `mine` в следующий раз).
+# ---------------------------------------------------------------------------
+
+TEXT_EXTS = {
+    '.txt', '.rson', '.scr', '.cfg', '.ini', '.json', '.xml', '.lng',
+    '.csv', '.lua', '.h', '.c', '.cpp', '.md', '.log', '.script', '.def',
+    '.yml', '.yaml', '.html', '.htm', '.glsl', '.fx', '.shader',
+}
+
+
+def is_text_path(relpath):
+    """Текстовый ли файл (по расширению). ModuleInfo.txt и скрипты -> текст."""
+    return os.path.splitext(relpath)[1].lower() in TEXT_EXTS
+
+
+def file_sha256(path):
+    h = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for chunk in iter(lambda: f.read(1 << 20), b''):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _safe_id(s):
+    return re.sub(r'[^A-Za-z0-9._-]', '_', str(s))
+
+
+def _snap_dir(mods_dir, snap_dir=None):
+    """Каталог снимков для данной инсталляции. ВНЕ Mods (её могут очистить).
+    По умолчанию ~/.sr-mods-launcher/snapshots/<хэш пути Mods>/."""
+    if snap_dir is not None:
+        return Path(snap_dir)
+    key = hashlib.sha1(str(Path(mods_dir).resolve()).lower().encode('utf-8')).hexdigest()[:16]
+    return Path.home() / '.sr-mods-launcher' / 'snapshots' / key
+
+
+def snapshot_path(mods_dir, mod_id, snap_dir=None):
+    return _snap_dir(mods_dir, snap_dir) / (_safe_id(mod_id) + '.json')
+
+
+def desc_files_flat(desc):
+    """Плоский манифест дескриптора: {relpath: {'sha256':.., 'kind':..}}."""
+    out = {}
+    files = desc.get('files', {})
+    for kind in ('code', 'assets'):
+        for relpath, meta in files.get(kind, {}).items():
+            out[relpath] = {'sha256': meta['sha256'], 'kind': kind}
+    return out
+
+
+def save_install_snapshot(mods_dir, mod_id, version, files, source=None, snap_dir=None):
+    """Сохранить снимок установки (relpath->sha256) для будущего 3-way."""
+    p = snapshot_path(mods_dir, mod_id, snap_dir)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(
+        {'id': mod_id, 'source': source, 'version': version, 'files': files},
+        ensure_ascii=False, indent=2), encoding='utf-8')
+    return p
+
+
+def load_install_snapshot(mods_dir, mod_id, snap_dir=None):
+    p = snapshot_path(mods_dir, mod_id, snap_dir)
+    if p.exists():
+        return json.loads(p.read_text(encoding='utf-8'))
+    return None
+
+
+def save_snapshot_from_desc(mods_dir, desc, snap_dir=None):
+    """Снимок из дескриптора: {relpath: sha256}. Вызывается после установки/обновления."""
+    flat = {rp: m['sha256'] for rp, m in desc_files_flat(desc).items()}
+    return save_install_snapshot(mods_dir, desc.get('id'), desc.get('version'),
+                                 flat, desc.get('source'), snap_dir)
+
+
+def fetch_blobs(index, shas, token, tmp, log=print, progress_cb=None, should_cancel=None):
+    """Скачать блобы по sha256 из content-addressed чанков. -> {sha: bytes}.
+    Чанк скачивается один раз, из него извлекаются все нужные блобы."""
+    tmp = Path(tmp)
+    tmp.mkdir(parents=True, exist_ok=True)
+    need = {}    # chunk -> set(sha)
+    for sh in set(shas):
+        b = index['blobs'].get(sh)
+        if b:
+            need.setdefault(b['chunk'], set()).add(sh)
+    out = {}
+    for chunk, shaset in need.items():
+        _check_cancel(should_cancel)
+        meta = index['chunks'].get(chunk, {})
+        url = meta.get('url')
+        if not url:
+            log(f'[!] для части пропущено {len(shaset)} файлов (нет ссылки)')
+            continue
+        cpath = tmp / f'_chunk_{chunk}'
+        ctoken = token if meta.get('store') == 'github' else None
+        download_url(url, ctoken, cpath, progress_cb, should_cancel)
+        with zipfile.ZipFile(cpath) as z:
+            for sh in shaset:
+                try:
+                    out[sh] = z.read(sh)
+                except KeyError:
+                    log(f'[!] файл {sh[:12]} не найден в части')
+        cpath.unlink(missing_ok=True)
+    return out
+
+
+# --- diff3 (3-way merge) на списках строк ----------------------------------
+
+def _find_sync_regions(base, a, b):
+    """Точки синхронизации: куски, совпадающие во всех трёх. Алгоритм bzr/merge3."""
+    amatches = SequenceMatcher(None, base, a).get_matching_blocks()
+    bmatches = SequenceMatcher(None, base, b).get_matching_blocks()
+    ia = ib = 0
+    sl = []
+    while ia < len(amatches) and ib < len(bmatches):
+        abase, amatch, alen = amatches[ia]
+        bbase, bmatch, blen = bmatches[ib]
+        i = max(abase, bbase)
+        j = min(abase + alen, bbase + blen)
+        if i < j:
+            asub = amatch + (i - abase)
+            bsub = bmatch + (i - bbase)
+            sl.append((i, j, asub, asub + (j - i), bsub, bsub + (j - i)))
+        if abase + alen <= bbase + blen:
+            ia += 1
+        else:
+            ib += 1
+    n = len(base)
+    sl.append((n, n, len(a), len(a), len(b), len(b)))
+    return sl
+
+
+def merge3(base, a, b):
+    """3-way merge списков строк. -> (merged_list, conflict: bool).
+    conflict=True, если a и b правят одно и то же место (пересекающееся изменение).
+    При conflict содержимое merged_list не используется (решение — по файлу целиком)."""
+    out = []
+    conflict = False
+    iz = ia = ib = 0
+    for zmatch, zend, amatch, aend, bmatch, bend in _find_sync_regions(base, a, b):
+        a_reg = a[ia:amatch]
+        b_reg = b[ib:bmatch]
+        base_reg = base[iz:zmatch]
+        if a_reg or b_reg or base_reg:
+            if a_reg == b_reg:
+                out += a_reg                 # оба сделали одинаковую правку
+            elif a_reg == base_reg:
+                out += b_reg                 # изменил только b (новая версия)
+            elif b_reg == base_reg:
+                out += a_reg                 # изменил только a (игрок)
+            else:
+                conflict = True              # оба правят -> конфликт
+        if zend > zmatch:
+            out += base[zmatch:zend]         # стабильный кусок
+        iz, ia, ib = zend, aend, bend
+    return out, conflict
+
+
+def merge3_bytes(base_b, mine_b, theirs_b):
+    """3-way merge байтовых файлов построчно (кодировка-агностично: cp1251/UTF-16
+    переживают, т.к. строки — точные байтовые срезы оригиналов). -> (bytes, conflict)."""
+    merged, conflict = merge3(base_b.splitlines(keepends=True),
+                              mine_b.splitlines(keepends=True),
+                              theirs_b.splitlines(keepends=True))
+    return b''.join(merged), conflict
+
+
+# --- планирование и применение обновления ----------------------------------
+
+# Статусы действий: add/update/unchanged/player_only/automerge/deleted_clean —
+# применяются автоматически; conflict_* — требуют решения игрока.
+CONFLICT_STATUSES = ('conflict_text', 'conflict_binary', 'conflict_deleted')
+DECISION_DEFAULTS = {
+    'conflict_text': 'mine',      # оставить файл игрока (мод не сломается)
+    'conflict_binary': 'mine',
+    'conflict_deleted': 'keep',   # не удалять правленый игроком файл
+}
+
+
+def plan_update_merge(desc, mods_dir, index, token=None, log=print, snapshot=None,
+                      snap_dir=None, tmp_dir=None, progress_cb=None, should_cancel=None):
+    """Спланировать обновление мода с 3-way merge (НЕ пишет на диск).
+    desc — новый дескриптор; snapshot — снимок прошлой установки (или авто-загрузка).
+    Возвращает план: {id, version_old/new, has_snapshot, actions:[...], summary}."""
+    mods_dir = Path(mods_dir)
+    mod_id = desc.get('id')
+    if snapshot is None:
+        snapshot = load_install_snapshot(mods_dir, mod_id, snap_dir)
+    base = (snapshot or {}).get('files', {})            # relpath -> sha256
+    theirs = desc_files_flat(desc)                      # relpath -> {sha256,kind}
+    tmp = Path(tmp_dir or mods_dir.parent)
+
+    relpaths = set(base) | set(theirs)
+    disk = {}
+    for rp in relpaths:
+        _check_cancel(should_cancel)
+        fp = mods_dir / install_relpath(rp)
+        if fp.exists() and fp.is_file():
+            disk[rp] = file_sha256(fp)
+
+    actions = []
+    both_text = []   # relpaths, требующие diff3 (нужно скачать base+theirs)
+    for rp in sorted(relpaths):
+        bsha = base.get(rp)
+        tinfo = theirs.get(rp)
+        tsha = tinfo['sha256'] if tinfo else None
+        msha = disk.get(rp)
+        text = is_text_path(rp)
+        rec = {'relpath': rp, 'kind': (tinfo or {}).get('kind', 'code'),
+               'text': text, 'base': bsha, 'theirs': tsha, 'mine': msha}
+        if tinfo is None:                       # был в прошлой версии, в новой нет
+            if msha is None or msha == bsha:
+                rec['status'] = 'deleted_clean'    # игрок не трогал -> удалить
+            else:
+                rec['status'] = 'conflict_deleted'  # игрок правил -> спросить
+        elif msha is None:
+            rec['status'] = 'add'               # нового файла ещё нет на диске
+        elif msha == tsha:
+            rec['status'] = 'unchanged'         # уже совпадает с новой версией
+        elif bsha is None:                      # нет базы (дисковый мод без снимка):
+            rec['status'] = 'conflict_text' if text else 'conflict_binary'
+            # без базы 3-way невозможен -> всегда конфликт, diff3 не запускаем
+        elif msha == bsha:
+            rec['status'] = 'update'            # игрок не трогал, мод изменил
+        elif tsha == bsha:
+            rec['status'] = 'player_only'       # мод не менял, игрок правил -> оставить
+        else:                                   # оба меняли
+            if text:
+                rec['status'] = 'conflict_text'  # уточним diff3 ниже
+                both_text.append(rp)
+            else:
+                rec['status'] = 'conflict_binary'
+        actions.append(rec)
+
+    if both_text:
+        recmap = {r['relpath']: r for r in actions}
+        shas = set()
+        for rp in both_text:
+            r = recmap[rp]
+            for s in (r['base'], r['theirs']):
+                if s:
+                    shas.add(s)
+        blobs = fetch_blobs(index, shas, token, tmp, log, progress_cb, should_cancel)
+        for rp in both_text:
+            r = recmap[rp]
+            fp = mods_dir / install_relpath(rp)
+            mine_b = fp.read_bytes()
+            base_b = blobs.get(r['base'], b'')
+            theirs_b = blobs.get(r['theirs'], b'')
+            merged, conflict = merge3_bytes(base_b, mine_b, theirs_b)
+            if conflict:
+                r['status'] = 'conflict_text'
+            else:
+                r['status'] = 'automerge'
+                r['_merged'] = merged           # готовые байты слияния
+
+    plan = {'id': mod_id, 'source': desc.get('source'),
+            'version_old': (snapshot or {}).get('version'),
+            'version_new': desc.get('version'),
+            'has_snapshot': snapshot is not None,
+            'actions': actions}
+    plan['summary'] = summarize_plan(actions)
+    return plan
+
+
+def summarize_plan(actions):
+    s = {}
+    for r in actions:
+        s[r['status']] = s.get(r['status'], 0) + 1
+    s['conflicts'] = sum(s.get(k, 0) for k in CONFLICT_STATUSES)
+    return s
+
+
+def apply_update_plan(desc, plan, decisions, mods_dir, index, token=None, log=print,
+                      snap_dir=None, tmp_dir=None, progress_cb=None, dry_run=False,
+                      should_cancel=None):
+    """Применить план обновления. decisions: {relpath: решение} для conflict_*:
+      conflict_text/binary -> 'mine' | 'theirs' | 'both' (both: новая рядом как .srnew)
+      conflict_deleted     -> 'keep' | 'delete'
+    Снимок установки после применения := манифест новой версии (desc)."""
+    mods_dir = Path(mods_dir)
+    tmp = Path(tmp_dir or mods_dir.parent)
+    decisions = decisions or {}
+    actions = plan['actions']
+
+    need_theirs = set()
+    for r in actions:
+        st, rp, tsha = r['status'], r['relpath'], r.get('theirs')
+        dec = decisions.get(rp, DECISION_DEFAULTS.get(st))
+        if st in ('add', 'update'):
+            need_theirs.add(tsha)
+        elif st in ('conflict_text', 'conflict_binary') and dec in ('theirs', 'both'):
+            need_theirs.add(tsha)
+    need_theirs.discard(None)
+    blobs = ({} if dry_run else
+             fetch_blobs(index, need_theirs, token, tmp, log, progress_cb, should_cancel))
+
+    stats = {'written': 0, 'merged': 0, 'kept': 0, 'deleted': 0,
+             'sidecar': 0, 'conflict': 0, 'skipped': 0}
+    for r in actions:
+        st, rp, tsha = r['status'], r['relpath'], r.get('theirs')
+        fp = mods_dir / install_relpath(rp)
+        dec = decisions.get(rp, DECISION_DEFAULTS.get(st))
+
+        if st in ('add', 'update'):
+            data = blobs.get(tsha)
+            if data is None:
+                stats['skipped'] += 1
+            elif not dry_run:
+                fp.parent.mkdir(parents=True, exist_ok=True)
+                fp.write_bytes(data)
+                stats['written'] += 1
+            else:
+                stats['written'] += 1
+        elif st == 'automerge':
+            if not dry_run:
+                fp.parent.mkdir(parents=True, exist_ok=True)
+                fp.write_bytes(r['_merged'])
+            stats['merged'] += 1
+        elif st == 'deleted_clean':
+            if not dry_run and fp.exists():
+                fp.unlink()
+            stats['deleted'] += 1
+        elif st == 'conflict_deleted':
+            if dec == 'delete':
+                if not dry_run and fp.exists():
+                    fp.unlink()
+                stats['deleted'] += 1
+            else:
+                stats['kept'] += 1
+        elif st in ('conflict_text', 'conflict_binary'):
+            stats['conflict'] += 1
+            if dec == 'theirs':
+                data = blobs.get(tsha)
+                if data is not None and not dry_run:
+                    fp.parent.mkdir(parents=True, exist_ok=True)
+                    fp.write_bytes(data)
+                stats['written'] += 1
+            elif dec == 'both':
+                data = blobs.get(tsha)
+                if data is not None and not dry_run:
+                    side = fp.with_name(fp.name + '.srnew')
+                    side.parent.mkdir(parents=True, exist_ok=True)
+                    side.write_bytes(data)
+                stats['sidecar'] += 1
+            else:                              # 'mine' — оставить файл игрока
+                stats['kept'] += 1
+        else:                                  # unchanged / player_only
+            stats['kept'] += 1
+
+    if not dry_run:
+        save_snapshot_from_desc(mods_dir, desc, snap_dir)
+    return stats
+
+
+# ---------------------------------------------------------------------------
+# Индексация дисковых модов (локально, без сети). Определяет базу, знакомые/
+# незнакомые моды и «знакомые с изменениями» (version-хэш файлсета с диска не
+# совпал ни с одной версией вариантов каталога). version-хэш считается тем же
+# рецептом, что в агрегаторе: sha256(json sorted [(путь_после_Mods, sha)])[:16].
+# Инкрементально: sha файла переиспользуется, если size+mtime не изменились.
+# ---------------------------------------------------------------------------
+
+def disk_mod_fingerprint(mods_dir, mid, prev_files=None):
+    """Отпечаток мода с диска: ({rel: {size,mtime,sha}}, version). prev_files —
+    отпечаток из прошлого индекса (sha берётся повторно при тех же size+mtime)."""
+    mods_dir = Path(mods_dir)
+    base = mods_dir / mid.replace('/', os.sep)
+    prev_files = prev_files or {}
+    files = {}
+    if base.is_dir():
+        for dp, _dirs, fs in os.walk(base):
+            for fn in fs:
+                fp = Path(dp) / fn
+                try:
+                    rel = fp.relative_to(mods_dir).as_posix()
+                    stt = fp.stat()
+                except (OSError, ValueError):
+                    continue
+                size, mtime = stt.st_size, int(stt.st_mtime)
+                pv = prev_files.get(rel)
+                if pv and pv.get('size') == size and pv.get('mtime') == mtime and pv.get('sha'):
+                    sha = pv['sha']
+                else:
+                    sha = file_sha256(fp)
+                files[rel] = {'size': size, 'mtime': mtime, 'sha': sha}
+    pairs = sorted([(rel, f['sha']) for rel, f in files.items()])
+    version = hashlib.sha256(
+        json.dumps(pairs, ensure_ascii=False).encode('utf-8')).hexdigest()[:16]
+    return files, version
+
+
+def index_disk_mods(mods_dir, catalog, prev_index=None, log=print,
+                    progress_cb=None, should_cancel=None):
+    """Локальная индексация Mods (без сети): база + статус каждого мода:
+    'known' (есть в каталоге) | 'unknown' (нет в каталоге). Хранит отпечаток
+    (sha/size/mtime) + version-хэш для инкрементального реиндекса и точечных сверок.
+    ВАЖНО: «изменён?» тут НЕ определяем — version-хэш всего файлсета ненадёжен
+    (дисковый набор файлов часто != дескриптору → ложные срабатывания). Точная
+    проверка правок — на этапе самого обновления мода (пофайловая сверка)."""
+    catalog = catalog or {}
+    prev_mods = (prev_index or {}).get('mods', {})
+    try:
+        base = detect_installed_base(mods_dir)
+    except Exception:
+        base = None
+    mids = scan_installed_mods(mods_dir)
+    out = {'base': base, 'mods': {}, 'count': len(mids)}
+    n = max(1, len(mids))
+    for i, mid in enumerate(mids):
+        _check_cancel(should_cancel)
+        files, version = disk_mod_fingerprint(
+            mods_dir, mid, (prev_mods.get(mid) or {}).get('files'))
+        ent = catalog.get(mid)
+        if not ent:
+            leaf = mid.split('/')[-1]
+            cands = [k for k in catalog if k.split('/')[-1] == leaf]
+            ent = catalog[cands[0]] if len(cands) == 1 else None
+        status = 'known' if ent else 'unknown'
+        out['mods'][mid] = {'status': status, 'version': version,
+                            'n_files': len(files), 'files': files}
+        if progress_cb:
+            progress_cb(i + 1, n)
+    out['known'] = sum(1 for m in out['mods'].values() if m['status'] == 'known')
+    out['unknown'] = sum(1 for m in out['mods'].values() if m['status'] == 'unknown')
+    return out
+
+
+def index_path(mods_dir, snap_dir=None):
+    return _snap_dir(mods_dir, snap_dir) / '_index.json'
+
+
+def load_disk_index(mods_dir, snap_dir=None):
+    p = index_path(mods_dir, snap_dir)
+    return json.loads(p.read_text(encoding='utf-8')) if p.exists() else None
+
+
+def save_disk_index(mods_dir, index, snap_dir=None):
+    p = index_path(mods_dir, snap_dir)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(index, ensure_ascii=False), encoding='utf-8')
+    return p

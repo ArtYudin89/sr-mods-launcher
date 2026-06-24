@@ -78,11 +78,22 @@ class Launcher:
         self.current_profile = self.config.get('last_profile', 'default')
         self.profile = self._load_profile(self.current_profile)
         self.busy = False
+        self._pulsing = False                # прогресс-бар в режиме «бегунок»
+        self._cancel = threading.Event()     # кооперативная отмена текущей операции
+        self._op_buttons = []                # кнопки, блокируемые на время операции
+        self.verbose_var = tk.BooleanVar(value=self.config.get('log_verbose', False))
+        self._disk_index = None              # индекс дисковых модов (из снимков)
         self._sections = {}              # кэш Section из ModuleInfo: mid -> раздел
         self.progress_var = tk.DoubleVar(value=0)
         self._apply_theme()
         self._build_ui()
+        self._install_hotkeys()          # Ctrl+C/V/A/X независимо от раскладки
+        try:
+            self._disk_index = core.load_disk_index(self._mods_dir())
+        except Exception:
+            self._disk_index = None
         self._refresh_list()
+        self.root.after(800, self._offer_first_index)
 
     # ---------- storage ----------
     def _load_json(self, path, default):
@@ -289,8 +300,8 @@ class Launcher:
         self.tree_mode_var = tk.StringVar(
             value={'folder': 'По папкам', 'section': 'По разделу'}.get(
                 self.config.get('tree_mode', 'folder'), 'По папкам'))
-        mode_cb = ttk.Combobox(hdr, textvariable=self.tree_mode_var, width=12, state='readonly',
-                               values=['По папкам', 'По разделу'])
+        self.mode_cb = mode_cb = ttk.Combobox(hdr, textvariable=self.tree_mode_var, width=12,
+                                              state='readonly', values=['По папкам', 'По разделу'])
         mode_cb.pack(side=tk.LEFT, padx=4)
         mode_cb.bind('<<ComboboxSelected>>', self._on_tree_mode)
         _Tooltip(mode_cb, 'Группировка установленных модов: по папкам Mods или по разделу из ModuleInfo')
@@ -300,15 +311,20 @@ class Launcher:
         att.pack(side=tk.LEFT, padx=10)
         _Tooltip(att, 'Скрыть «✅ установлен» — оставить обновления, добавленные и прочее')
         bf = ttk.Frame(hdr, style='TFrame'); bf.pack(side=tk.RIGHT)
-        for txt, cmd, tip in [('＋', self._add_mod, 'Добавить мод/пак/лагерь'),
-                              ('－', self._remove_mod, 'Убрать выбранное из набора'),
-                              ('↑', self._move_up, 'Выше в порядке загрузки'),
-                              ('↓', self._move_down, 'Ниже в порядке загрузки'),
-                              ('⊞', self._expand_all, 'Развернуть всё'),
-                              ('⊟', self._collapse_all, 'Свернуть всё'),
-                              ('⟳', self._refresh_remote, 'Проверить обновления (перечитать каталог)')]:
+        for txt, cmd, tip, lock in [
+                ('＋', self._add_mod, 'Добавить мод/пак/лагерь', True),
+                ('－', self._remove_mod, 'Убрать выбранное из набора', True),
+                ('↑', self._move_up, 'Выше в порядке загрузки', True),
+                ('↓', self._move_down, 'Ниже в порядке загрузки', True),
+                ('⊞', self._expand_all, 'Развернуть всё', False),
+                ('⊟', self._collapse_all, 'Свернуть всё', False),
+                ('🗂', self._reindex, 'Проиндексировать моды на диске (база, знакомые/'
+                 'незнакомые, изменённые) — локально, без сети', True),
+                ('⟳', self._refresh_remote, 'Проверить обновления (перечитать каталог)', True)]:
             b = ttk.Button(bf, text=txt, width=3, command=cmd); b.pack(side=tk.LEFT, padx=1)
             _Tooltip(b, tip)
+            if lock:
+                self._op_buttons.append(b)
 
         cols = ('kind', 'status', 'installed')
         self.tree = ttk.Treeview(left, columns=cols, show='tree headings', height=18)
@@ -328,20 +344,39 @@ class Launcher:
         act = ttk.LabelFrame(right, text='Действия', padding=10); act.pack(fill=tk.X)
         for txt, cmd, style, tip in [
                 ('⬇  Установить выбранный', lambda: self._install(False), 'Accent.TButton',
-                 'Поставить выделенный мод/пак'),
-                ('⬇  Установить все', lambda: self._install(True), 'TButton',
-                 'Поставить все элементы набора'),
-                ('🧩 Установить набор (с зависим.)', lambda: self._install(True), 'Accent.TButton',
-                 'Поставить набор и подтянуть зависимости'),
+                 'Поставить выделенный элемент ВАШЕГО НАБОРА (📋). Не для строк из '
+                 '«Установлено в игре» — те уже на диске (для них — «🔀 Обновить»).'),
+                ('⬇  Установить весь набор', lambda: self._install(True), 'TButton',
+                 'Поставить все элементы вашего набора (📋) по порядку'),
+                ('🧩 Установить набор (с зависим.)', self._install_with_deps, 'Accent.TButton',
+                 'Поставить набор и АВТОМАТИЧЕСКИ подтянуть зависимости модов '
+                 '(Dependence из ModuleInfo), показать конфликты'),
+                ('🔀 Обновить (сохранить правки)', self._update_merge, 'TButton',
+                 'Обновить выделенный(е) мод(ы) с 3-way merge: ваши правки сохраняются. '
+                 'Работает и для модов из «💾 Установлено в игре».'),
                 ('🛡 Проверить совместимость', self._check_compat, 'TButton',
-                 'База/фиксы/сейвы/конфликты'),
+                 'Анализ ВСЕГО набора: одна ли база, фиксы→родитель, сейвы, '
+                 'конфликты/зависимости (по ModuleInfo). Только показывает.'),
                 ('🗑  Очистить Mods', self._clear_mods, 'TButton',
                  'Очистить папку Mods игры')]:
             b = ttk.Button(act, text=txt, style=style, command=cmd); b.pack(fill=tk.X, pady=2)
             _Tooltip(b, tip)
-        ttk.Label(right, text='Прогресс:').pack(anchor=tk.W, pady=(10, 0))
-        ttk.Progressbar(right, variable=self.progress_var, maximum=100).pack(fill=tk.X)
+            self._op_buttons.append(b)
+        pr = ttk.Frame(right, style='TFrame'); pr.pack(fill=tk.X, pady=(10, 0))
+        ttk.Label(pr, text='Прогресс:', background=self.theme['bg']).pack(side=tk.LEFT)
+        self.cancel_btn = ttk.Button(pr, text='✖ Отмена', width=10,
+                                     command=self._cancel_op, state='disabled')
+        self.cancel_btn.pack(side=tk.RIGHT)
+        _Tooltip(self.cancel_btn, 'Отменить текущую операцию')
+        self.prog_label = ttk.Label(pr, text='', background=self.theme['bg'])
+        self.prog_label.pack(side=tk.RIGHT, padx=8)
+        self.progress = ttk.Progressbar(right, variable=self.progress_var, maximum=100)
+        self.progress.pack(fill=tk.X)
         lf = ttk.LabelFrame(right, text='Лог', padding=6); lf.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
+        vb = ttk.Checkbutton(lf, text='Подробный лог', variable=self.verbose_var,
+                             command=self._on_verbose)
+        vb.pack(anchor=tk.W)
+        _Tooltip(vb, 'Краткий: только итоги по модам. Подробный: каждая загружаемая часть.')
         self.log_text = scrolledtext.ScrolledText(
             lf, width=42, height=16, bg=self.theme['tree_bg'], fg=self.theme['fg'],
             insertbackground=self.theme['fg'], relief=tk.FLAT,
@@ -365,7 +400,188 @@ class Launcher:
         self._post(_do)
 
     def _progress(self, done, total):
-        self._post(self.progress_var.set, (done / total * 100) if total else 0)
+        if not total:
+            return                       # неизвестен объём — оставляем «бегунок»
+        pct = max(0, min(100, int(done / total * 100)))
+
+        def _do():
+            if self._pulsing:            # перейти от «бегунка» к процентам
+                try:
+                    self.progress.stop(); self.progress.configure(mode='determinate')
+                except Exception:
+                    pass
+                self._pulsing = False
+            self.progress_var.set(pct)
+            self.prog_label.config(text=f'{pct}%')
+        self._post(_do)
+
+    # ---------- управление операцией: блокировка UI / отмена / индикатор ----------
+    def should_cancel(self):
+        return self._cancel.is_set()
+
+    def _begin_op(self, name):
+        """Начать операцию (главный поток): заблокировать кнопки, запустить индикатор,
+        включить «Отмена». Возвращает False, если уже занято."""
+        if self.busy:
+            messagebox.showwarning('Занято', 'Дождитесь окончания или отмените операцию')
+            return False
+        self.busy = True
+        self._cancel.clear()
+        for b in self._op_buttons:
+            try:
+                b.configure(state='disabled')
+            except Exception:
+                pass
+        for w in (getattr(self, 'profile_combo', None), getattr(self, 'mode_cb', None)):
+            try:
+                w.configure(state='disabled')
+            except Exception:
+                pass
+        self.cancel_btn.configure(state='normal')
+        core.LOG_VERBOSE = bool(self.verbose_var.get())   # краткий/детальный лог
+        try:
+            self.prog_label.config(text='')
+            self.progress.configure(mode='indeterminate'); self.progress.start(60)
+            self._pulsing = True
+        except Exception:
+            pass
+        self.status.config(text=name)
+        return True
+
+    def _end_op(self, msg='Готов'):
+        self.busy = False
+        try:
+            self.progress.stop(); self.progress.configure(mode='determinate')
+        except Exception:
+            pass
+        self._pulsing = False
+        self.progress_var.set(0)
+        self.prog_label.config(text='')
+        for b in self._op_buttons:
+            try:
+                b.configure(state='normal')
+            except Exception:
+                pass
+        for w in (getattr(self, 'profile_combo', None), getattr(self, 'mode_cb', None)):
+            try:
+                w.configure(state='readonly')
+            except Exception:
+                pass
+        self.cancel_btn.configure(state='disabled')
+        self.status.config(text=msg)
+
+    def _on_verbose(self):
+        core.LOG_VERBOSE = bool(self.verbose_var.get())
+        self.config['log_verbose'] = self.verbose_var.get()
+        self._save_config()
+
+    def _cancel_op(self):
+        if self.busy:
+            self._cancel.set()
+            self.log('Отмена операции…')
+            self.cancel_btn.configure(state='disabled')
+
+    # ---------- горячие клавиши в полях ввода независимо от раскладки ----------
+    def _install_hotkeys(self):
+        """Ctrl+C/V/X/A работают и при не-английской раскладке (по keycode, не keysym)."""
+        codes = {67: '<<Copy>>', 86: '<<Paste>>', 88: '<<Cut>>', 65: '<<SelectAll>>'}
+
+        def handler(event):
+            if not (event.state & 0x4):        # Control
+                return
+            virt = codes.get(event.keycode)
+            if virt:
+                event.widget.event_generate(virt)
+                return 'break'
+        for cls in ('TEntry', 'Entry', 'Text'):
+            self.root.bind_class(cls, '<Control-KeyPress>', handler, add='+')
+        # дефолтного <<SelectAll>> у Entry/Text нет — добавим обработчики
+        self.root.bind_class('TEntry', '<<SelectAll>>',
+                             lambda e: (e.widget.select_range(0, 'end'), 'break')[1], add='+')
+        self.root.bind_class('Entry', '<<SelectAll>>',
+                             lambda e: (e.widget.select_range(0, 'end'), 'break')[1], add='+')
+        self.root.bind_class('Text', '<<SelectAll>>',
+                             lambda e: (e.widget.tag_add('sel', '1.0', 'end'), 'break')[1], add='+')
+
+    # ---------- индексация дисковых модов ----------
+    def _offer_first_index(self):
+        """При старте: если в Mods есть моды, но индекса нет — предложить проиндексировать."""
+        if self.busy or self._disk_index is not None:
+            return
+        if self.config.get('skip_index_offer'):
+            return
+        try:
+            mids = core.scan_installed_mods(self._mods_dir())
+        except Exception:
+            mids = []
+        if not mids:
+            return
+        ans = messagebox.askyesno(
+            'Индексация модов',
+            f'В папке Mods найдено модов: {len(mids)}, но они ещё не проиндексированы.\n\n'
+            'Проиндексировать сейчас? Лаунчер определит базу, какие моды ему знакомы '
+            '(есть в каталоге), какие — нет, и какие изменены относительно каталога.\n\n'
+            'Это локально (без скачивания) и нужно один раз; потом — кнопка 🗂.')
+        if ans:
+            self._reindex()
+        else:
+            self.config['skip_index_offer'] = True
+            self._save_config()
+
+    def _reindex(self):
+        if not self._begin_op('Индексация модов…'):
+            return
+        threading.Thread(target=self._reindex_worker, daemon=True).start()
+
+    def _reindex_worker(self):
+        mods_dir = self._mods_dir()
+        try:
+            cat = getattr(self, '_catalog_cache', None)
+            if not cat:
+                self.log('Загрузка каталога для классификации…')
+                try:
+                    cat = core.load_catalog('descriptors/catalog.json', self._repo(),
+                                            self._token()) or {}
+                    self._catalog_cache = cat
+                except core.OperationCancelled:
+                    raise
+                except Exception as e:
+                    self.log(f'[warn] каталог не загружен ({e}) — моды будут «не в каталоге»')
+                    cat = {}
+            self.log('Индексирую моды на диске…')
+            idx = core.index_disk_mods(mods_dir, cat, prev_index=self._disk_index,
+                                       log=self.log, progress_cb=self._progress,
+                                       should_cancel=self.should_cancel)
+            core.save_disk_index(mods_dir, idx)
+            self._disk_index = idx
+            self.config['skip_index_offer'] = True
+            self._post(self._save_config)
+            self._post(self._refresh_list)
+            base = idx.get('base') or {}
+            self.log(f'Индексация готова: всего {idx["count"]}, знакомых каталогу '
+                     f'{idx["known"]}, не в каталоге {idx["unknown"]}. '
+                     f'База: {base.get("camp", "?")}.')
+            self._post(self._end_op, 'Индексация готова')
+        except core.OperationCancelled:
+            self.log('Индексация отменена.')
+            self._post(self._end_op, 'Отменено')
+        except Exception as e:
+            self.log(f'ОШИБКА индексации: {e}')
+            self._post(self._end_op, 'Ошибка индексации')
+
+    def _reindex_one(self, mid):
+        """Быстрый реиндекс ОДНОГО мода (после обновления/слияния) — без сети."""
+        if not mid or self._disk_index is None:
+            return
+        try:
+            cat = getattr(self, '_catalog_cache', None) or {}
+            files, ver = core.disk_mod_fingerprint(self._mods_dir(), mid)
+            status = 'known' if cat.get(mid) else 'unknown'
+            self._disk_index.setdefault('mods', {})[mid] = {
+                'status': status, 'version': ver, 'n_files': len(files), 'files': files}
+            core.save_disk_index(self._mods_dir(), self._disk_index)
+        except Exception:
+            pass
 
     # ---------- list (единое дерево: Лагерь→Пак→Мод; колонка «Установлен» = есть на диске) ----------
     def _disk_mods(self):
@@ -402,18 +618,20 @@ class Launcher:
             self._sections[mid] = core.read_module_section(p) if p.exists() else ''
         return self._sections[mid]
 
-    def _disk_place(self, mid):
-        """(лагерь, группа) для установленного мода — ТОЛЬКО по данным с диска.
-        Лагерь = установленная база. Группа: 'folder' → папка-категория из пути;
-        'section' → раздел из ModuleInfo (фолбэк на папку)."""
-        ib = self._get_installed_base()
-        camp = ib['camp'] if ib else 'прочее'
+    def _mod_group(self, mid):
+        """Группа мода в дереве: папка-категория из пути ('folder') или раздел из
+        ModuleInfo ('section', фолбэк на папку). Едино для дисковых и профильных модов."""
         folder = mid.split('/')[0] if '/' in mid else None
         if self._tree_mode() == 'section':
-            group = self._section_of(mid) or 'Не указан'
-        else:
-            group = folder
-        return camp, group
+            return self._section_of(mid) or folder or 'Не указан'
+        return folder
+
+    def _disk_place(self, mid):
+        """(лагерь, группа) для установленного мода — ТОЛЬКО по данным с диска.
+        Лагерь = установленная база."""
+        ib = self._get_installed_base()
+        camp = ib['camp'] if ib else 'прочее'
+        return camp, self._mod_group(mid)
 
     def _on_tree_mode(self, _e=None):
         self.config['tree_mode'] = self._tree_mode()
@@ -442,7 +660,7 @@ class Launcher:
                 mid = m['mod']; seen.add(mid)
                 on = (mid in disk) or bool(m.get('last_downloaded'))
                 date = m.get('last_downloaded') or disk.get(mid, '')
-                items.append((m.get('camp', 'прочее'), self._pack_group(m.get('unit')), 'мод',
+                items.append((m.get('camp', 'прочее'), self._mod_group(mid), 'мод',
                               mid.split('/')[-1], st_of(m, on), date if on else '', iid))
             elif typ == 'unit':
                 on = bool(m.get('last_downloaded'))
@@ -458,11 +676,15 @@ class Launcher:
                 items.append(('прочее', None, 'форк' if typ == 'desc' else 'zip',
                               m.get('name') or m.get('id') or m.get('url', ''),
                               st_of(m, on), m.get('last_downloaded', '') if on else '', iid))
+        idx_mods = (self._disk_index or {}).get('mods', {})
         for mid, ts in sorted(disk.items()):     # на диске, но не в наборе
             if mid in seen:
                 continue
             camp, pack = self._disk_place(mid)
-            items.append((camp, pack, 'мод', mid.split('/')[-1], '✅ установлен', ts, 'd:' + mid))
+            st = ('❓ не в каталоге'
+                  if (idx_mods.get(mid) or {}).get('status') == 'unknown'
+                  else '✅ установлен')
+            items.append((camp, pack, 'мод', mid.split('/')[-1], st, ts, 'd:' + mid))
 
         camp_nodes, pack_nodes = {}, {}
 
@@ -605,55 +827,66 @@ class Launcher:
         self._refresh_list()
 
     def _check_compat(self):
-        """Проверка совместимости набора (Фаза 2): база/фиксы/сейвы/конфликты модов."""
-        if self.busy:
-            return
+        """Совместимость: паки набора (Фаза 2) + незакрытые зависимости (Dependence)
+        установленных на диске модов."""
         units = [f'{m["camp"]}/{m["unit"]}' for m in self.profile.get('mods', [])
                  if m.get('type') == 'unit' and m.get('camp') and m.get('unit')]
-        if not units:
-            messagebox.showinfo('Совместимость',
-                                'В наборе нет юнитов-паков для проверки.')
+        if not self._begin_op('Проверка совместимости…'):
             return
-        self.log('Проверка совместимости…')
         threading.Thread(target=self._check_compat_worker, args=(units,),
                          daemon=True).start()
 
     def _check_compat_worker(self, units):
         tok = self._token()
-        try:
-            packs = self._get_packs(tok)
-            if not packs:
-                self._post(messagebox.showwarning, 'Совместимость',
-                           'Не удалось загрузить packs.json из репозитория.')
-                return
-            ib = core.detect_installed_base(self._mods_dir())
-            installed_base = (ib['base'] if ib else None) or self.profile.get('installed_base')
-            info = core.check_pack_compatibility(units, packs, installed_base=installed_base)
-        except Exception as e:
-            self._post(messagebox.showerror, 'Совместимость', f'Ошибка: {e}')
-            return
-
         problems, notes = [], []
-        bnames = [packs[b]['name'] for b in info['bases']]
-        if info['base_conflict']:
-            problems.append('⛔ В наборе НЕСКОЛЬКО базовых паков: ' + ', '.join(bnames) +
-                            '.\n   Нельзя смешивать базы — оставь ровно одну.')
-        elif info['missing_base']:
-            problems.append('⚠ В наборе НЕТ базового пака (с Rangers.exe).\n'
-                            '   Модам/фиксам нужна база — добавь одну (redux/original/universe…).')
-        elif bnames:
-            notes.append('✅ Базовый пак (в наборе): ' + bnames[0])
-        elif info.get('installed_base'):
-            notes.append('✅ Базовый пак уже установлен: ' + info['installed_base'])
-        for fix, parent in info['fix_orphans']:
-            problems.append(f'⚠ Фикс «{packs[fix]["name"]}» требует родительский пак '
-                            f'«{parent}», которого нет в наборе.')
-        if info['save_warning']:
-            problems.append('💾 ' + info['save_warning'])
-        if info['mandatory']:
-            mand = ', '.join(packs[u]['name'] for u in info['mandatory'])
-            notes.append('❗ Базовые/фикс-паки (обновление обязательно при выходе апдейта):\n   '
-                         + mand)
+        # --- уровень паков набора (если в наборе есть юниты-паки) ---
+        if units:
+            try:
+                packs = self._get_packs(tok)
+                ib = core.detect_installed_base(self._mods_dir())
+                installed_base = (ib['base'] if ib else None) or self.profile.get('installed_base')
+                info = core.check_pack_compatibility(units, packs, installed_base=installed_base)
+                bnames = [packs[b]['name'] for b in info['bases']]
+                if info['base_conflict']:
+                    problems.append('⛔ В наборе НЕСКОЛЬКО базовых паков: ' + ', '.join(bnames) +
+                                    '.\n   Нельзя смешивать базы — оставь ровно одну.')
+                elif info['missing_base']:
+                    problems.append('⚠ В наборе НЕТ базового пака (с Rangers.exe).\n'
+                                    '   Модам/фиксам нужна база (redux/original/universe…).')
+                elif bnames:
+                    notes.append('✅ Базовый пак (в наборе): ' + bnames[0])
+                elif info.get('installed_base'):
+                    notes.append('✅ Базовый пак уже установлен: ' + info['installed_base'])
+                for fix, parent in info['fix_orphans']:
+                    problems.append(f'⚠ Фикс «{packs[fix]["name"]}» требует родительский пак '
+                                    f'«{parent}», которого нет в наборе.')
+                if info['save_warning']:
+                    problems.append('💾 ' + info['save_warning'])
+                if info['mandatory']:
+                    mand = ', '.join(packs[u]['name'] for u in info['mandatory'])
+                    notes.append('❗ Базовые/фикс-паки (обновление обязательно):\n   ' + mand)
+            except core.OperationCancelled:
+                self.log('Проверка отменена.'); self._post(self._end_op, 'Отменено'); return
+            except Exception as e:
+                self.log(f'Совместимость (паки): ошибка {e}')
+        # --- незакрытые зависимости модов на ДИСКЕ (поле Dependence в ModuleInfo) ---
+        try:
+            self.log('Проверяю зависимости установленных модов (ModuleInfo)…')
+            dep_problems = core.check_disk_dependencies(
+                self._mods_dir(), progress_cb=self._progress,
+                should_cancel=self.should_cancel)
+        except core.OperationCancelled:
+            self.log('Проверка отменена.'); self._post(self._end_op, 'Отменено'); return
+        except Exception as e:
+            self.log(f'Совместимость (зависимости): ошибка {e}'); dep_problems = []
+        if dep_problems:
+            lines = [f'   • {d["mod"]} → нужен: {", ".join(d["missing"])}'
+                     for d in dep_problems[:30]]
+            extra = f'\n   … и ещё {len(dep_problems) - 30}' if len(dep_problems) > 30 else ''
+            problems.append('⚠ НЕУСТАНОВЛЕННЫЕ зависимости модов (Dependence):\n'
+                            + '\n'.join(lines) + extra)
+        else:
+            notes.append('✅ Незакрытых зависимостей (Dependence) у установленных модов не найдено.')
         notes.append('ℹ Смена базового пака делает несовместимыми сейвы текущей партии '
                      '(новую партию начать можно).')
 
@@ -663,8 +896,8 @@ class Launcher:
             body += 'НАЙДЕНЫ ВОПРОСЫ:\n\n' + '\n\n'.join(problems) + '\n\n'
         body += '— — —\n' + '\n'.join(notes)
         self.log('Совместимость: ' + ('проблемы' if problems else 'ок'))
-        show = messagebox.showwarning if problems else messagebox.showinfo
-        self._post(show, title, body)
+        self._post(messagebox.showwarning if problems else messagebox.showinfo, title, body)
+        self._post(self._end_op, 'Готов')
 
     def _remove_mod(self):
         i = self._selected()
@@ -695,7 +928,7 @@ class Launcher:
             except Exception: pass
 
     def _refresh_remote(self):
-        if self.busy:
+        if not self._begin_op('Проверка обновлений…'):
             return
         self._invalidate_remote_cache()        # ⟳ форсит свежий каталог (камп подтянется)
         threading.Thread(target=self._refresh_remote_worker, daemon=True).start()
@@ -720,6 +953,8 @@ class Launcher:
             return cat_cache[key]
 
         for m in self.profile.get('mods', []):
+            if self.should_cancel():
+                break
             try:
                 typ = m.get('type')
                 repo = m.get('repo', self._repo())
@@ -753,24 +988,58 @@ class Launcher:
                 self.log(f'{m.get("name","?")}: ошибка обновления ({e})')
         self._post(self._save_profile)
         self._post(self._refresh_list)
-        self.log('Информация об обновлениях получена')
+        cancelled = self.should_cancel()
+        self.log('Проверка отменена' if cancelled else 'Информация об обновлениях получена')
+        self._post(self._end_op, 'Отменено' if cancelled else 'Готов')
 
     # ---------- install ----------
     def _install(self, all_mods):
-        if self.busy:
-            messagebox.showwarning('Занято', 'Дождитесь окончания операции')
-            return
+        mods = self.profile.get('mods', [])
         if all_mods:
-            targets = list(range(len(self.profile.get('mods', []))))
+            if not mods:
+                messagebox.showinfo(
+                    'Набор пуст',
+                    'В вашем наборе (📋) ничего нет — устанавливать нечего.\n'
+                    'Добавьте моды/паки кнопкой ＋. (Моды из «💾 Установлено в игре» — '
+                    'это уже стоящее на диске, не набор.)')
+                return
+            # пропустить уже установленные и не требующие обновления (идемпотентность)
+            need = [i for i, m in enumerate(mods)
+                    if not (m.get('last_downloaded') and not m.get('update_available'))]
+            skipped = len(mods) - len(need)
+            if not need:
+                messagebox.showinfo(
+                    'Всё актуально',
+                    f'Все элементы набора ({len(mods)}) уже установлены и без обновлений '
+                    '— скачивать нечего.\n\nЧтобы переустановить конкретный мод принудительно — '
+                    'выделите его и «Установить выбранный».')
+                return
+            names = [mods[i].get('name') or mods[i].get('id') or mods[i].get('url', '?')
+                     for i in need]
+            preview = '\n'.join(f'  • {n}' for n in names[:15])
+            if len(names) > 15:
+                preview += f'\n  … и ещё {len(names) - 15}'
+            tail = (f'\n\nПропущено как уже актуальные: {skipped}.' if skipped else '')
+            if not messagebox.askyesno(
+                    'Установить набор',
+                    f'Будет установлено: {len(need)}\n\n{preview}{tail}\n\n'
+                    'Продолжить? (Перезапишет файлы этих модов в Mods.)'):
+                return
+            targets = need
         else:
             i = self._selected()
             if i is None:
-                messagebox.showwarning('Выбор', 'Выберите мод')
+                msg = ('Выберите мод из вашего НАБОРА (раздел 📋 Набор).\n\n'
+                       'Кнопки «Установить» работают с набором (что вы добавили через ＋).\n'
+                       'Если выделен мод из «💾 Установлено в игре» — он уже на диске; '
+                       'чтобы обновить его с сохранением правок, жмите «🔀 Обновить».')
+                messagebox.showwarning('Выбор', msg)
                 return
             targets = [i]
         if not targets:
             return
-        self.busy = True
+        if not self._begin_op('Установка…'):
+            return
         threading.Thread(target=self._install_worker, args=(targets,), daemon=True).start()
 
     def _install_worker(self, targets):
@@ -794,9 +1063,11 @@ class Launcher:
                             try:
                                 core.reconstruct_unit(m['repo'], p['camp'], p['name'],
                                                       mods_dir, tok, self._progress, self.log,
-                                                      tmp_dir=HERE)
+                                                      tmp_dir=HERE, should_cancel=self.should_cancel)
                                 if p.get('tier') == 'base':
                                     self.profile['installed_base'] = p['name']
+                            except core.OperationCancelled:
+                                raise
                             except Exception as e:
                                 self.log(f'ОШИБКА {p["name"]}: {e}')
                         m['last_downloaded'] = datetime.now().isoformat()
@@ -805,11 +1076,13 @@ class Launcher:
                     if m.get('type') == 'unit':
                         st = core.reconstruct_unit(m['repo'], m['camp'], m['unit'],
                                                    mods_dir, tok, self._progress, self.log,
-                                                   tmp_dir=HERE, mod=m.get('mod') or None)
+                                                   tmp_dir=HERE, mod=m.get('mod') or None,
+                                                   should_cancel=self.should_cancel)
                         m['last_updated'] = st.get('updated') or m.get('last_updated')
                     else:
                         up = core.install_zip(m['url'], mods_dir, tok, self._progress,
-                                              self.log, tmp_dir=HERE)
+                                              self.log, tmp_dir=HERE,
+                                              should_cancel=self.should_cancel)
                         m['last_updated'] = up or m.get('last_updated')
                     m['last_downloaded'] = datetime.now().isoformat()
                     m['update_available'] = False
@@ -826,14 +1099,20 @@ class Launcher:
                                 pass
                     self._post(self._save_profile)
                     self._post(self._refresh_list)
+                except core.OperationCancelled:
+                    raise
                 except Exception as e:
                     self.log(f'ОШИБКА {m["name"]}: {e}')
             if desc_idx:
                 self._install_desc_set(desc_idx, mods_dir, tok)
-        finally:
-            self.busy = False
-            self._post(self.progress_var.set, 0)
             self.log('Готово')
+            self._post(self._end_op, 'Готово')
+        except core.OperationCancelled:
+            self.log('Установка отменена.')
+            self._post(self._end_op, 'Отменено')
+        except Exception as e:
+            self.log(f'ОШИБКА установки: {e}')
+            self._post(self._end_op, 'Ошибка')
 
     def _desc_sel(self, m):
         if m.get('url'):
@@ -870,7 +1149,8 @@ class Launcher:
                             if d.get('chunk_index_url')), None)
             index = core.load_chunk_index(url=idx_url, repo=repo, token=tok)
             results = core.install_set(plan, mods_dir, index, token=tok,
-                                       log=self.log, tmp_dir=HERE)
+                                       log=self.log, tmp_dir=HERE,
+                                       should_cancel=self.should_cancel)
         except Exception as e:
             self.log(f'ОШИБКА установки набора: {e}')
             return
@@ -887,7 +1167,275 @@ class Launcher:
         self._post(self._refresh_list)
         self.log(f'Набор установлен: {len(results)} модов')
 
+    # ---------- установка с резолвом зависимостей (Dependence) ----------
+    def _install_with_deps(self):
+        """Поставить набор + АВТОМАТИЧЕСКИ подтянуть зависимости (Dependence). Записи
+        набора (desc и unit-моды) приводятся к каталожным выборам; resolve_set строит
+        замыкание зависимостей, ставим дескрипторами (deps подтягиваются единообразно)."""
+        sels = []
+        for m in self.profile.get('mods', []):
+            t = m.get('type')
+            if t == 'desc':
+                sels.append(self._desc_sel(m))
+            elif t == 'unit' and m.get('mod'):
+                sel = {'id': m['mod']}
+                if m.get('camp') and m.get('unit'):
+                    sel['source'] = f"{m['camp']}/{m['unit']}"
+                sels.append(sel)
+        if not sels:
+            messagebox.showinfo(
+                'Зависимости',
+                'В наборе нет модов с каталожным id для резолва зависимостей.\n'
+                'Добавьте моды из каталога (＋ → Мод) или по ссылке-форку. '
+                'Для паков целиком/лагерей зависимости не резолвятся.')
+            return
+        if not self._begin_op('Резолв зависимостей…'):
+            return
+        threading.Thread(target=self._resolve_deps_worker, args=(sels,), daemon=True).start()
+
+    def _resolve_deps_worker(self, sels):
+        repo, tok = self._repo(), self._token()
+        try:
+            cat = core.load_catalog('descriptors/catalog.json', repo, tok)
+            plan = core.resolve_set(sels, cat, repo, tok)
+        except core.OperationCancelled:
+            self.log('Отменено.'); self._post(self._end_op, 'Отменено'); return
+        except Exception as e:
+            self.log(f'ОШИБКА разрешения зависимостей: {e}')
+            self._post(self._end_op, 'Ошибка'); return
+        if plan['added_deps']:
+            self.log(f'➕ зависимости (Dependence): {", ".join(plan["added_deps"])}')
+        if plan['missing_deps']:
+            self.log(f'⚠ зависимости не в каталоге: {", ".join(plan["missing_deps"])}')
+        for a, b in plan['conflicts']:
+            self.log(f'⚠ КОНФЛИКТ: {a} ⟷ {b}')
+        self._post(self._confirm_deps_install, plan, repo, tok)
+
+    def _confirm_deps_install(self, plan, repo, tok):
+        order = plan['order']
+        deps = set(plan.get('added_deps') or [])
+        lines = []
+        for mid in order[:25]:
+            lines.append(f'  • {mid}' + ('   (зависимость)' if mid in deps else ''))
+        if len(order) > 25:
+            lines.append(f'  … и ещё {len(order) - 25}')
+        extra = ''
+        if plan['missing_deps']:
+            extra += f'\n\n⚠ НЕ найдены в каталоге: {", ".join(plan["missing_deps"])}'
+        if plan['conflicts']:
+            extra += '\n\n⚠ Конфликты (показаны, не снимаются): ' + \
+                     '; '.join(f'{a}⟷{b}' for a, b in plan['conflicts'])
+        ok = messagebox.askyesno(
+            'Установить с зависимостями',
+            f'Будет установлено модов: {len(order)} '
+            f'(из них зависимостей: {len(deps)})\n\n' + '\n'.join(lines) + extra +
+            '\n\nПродолжить?')
+        if not ok:
+            self.log('Установка отменена.'); self._end_op('Отменено'); return
+        threading.Thread(target=self._deps_install_worker, args=(plan, repo, tok),
+                         daemon=True).start()
+
+    def _deps_install_worker(self, plan, repo, tok):
+        mods_dir = self._mods_dir()
+        try:
+            idx_url = next((d.get('chunk_index_url') for d in plan['mods'].values()
+                            if d.get('chunk_index_url')), None)
+            index = core.load_chunk_index(url=idx_url, repo=repo, token=tok)
+            results = core.install_set(plan, mods_dir, index, token=tok, log=self.log,
+                                       tmp_dir=HERE, should_cancel=self.should_cancel)
+        except core.OperationCancelled:
+            self.log('Установка отменена.'); self._post(self._end_op, 'Отменено'); return
+        except Exception as e:
+            self.log(f'ОШИБКА установки: {e}'); self._post(self._end_op, 'Ошибка'); return
+        # отметить установленные версии у совпавших записей набора
+        now = datetime.now().isoformat()
+        for m in self.profile.get('mods', []):
+            mid = m.get('id') or m.get('mod')
+            if mid and mid in plan['mods']:
+                m['installed_version'] = plan['mods'][mid].get('version')
+                m['last_updated'] = m['installed_version']
+                m['last_downloaded'] = now
+                m['update_available'] = False
+        self._post(self._save_profile)
+        self._post(self._refresh_list)
+        self.log(f'Готово: установлено {len(results)} модов (с зависимостями).')
+        self._post(self._end_op, 'Готово')
+
+    # ---------- Фаза 4: обновление с сохранением правок игрока (3-way merge) ----------
+    def _selected_disk(self):
+        """mod_id для выбранного ЛИСТА дискового мода (iid 'd:<mid>') или None."""
+        s = self.tree.selection()
+        if s and s[0].startswith('d:'):
+            return s[0][2:]
+        return None
+
+    def _update_merge(self):
+        """Обновить ВЫБРАННЫЕ моды, сохранив ручные правки игрока (3-way merge).
+        Поддержаны desc-моды из набора и дисковые моды (ветка «Установлено в игре»).
+        Несколько выделенных строк обрабатываются по очереди."""
+        targets = []           # [('profile', idx) | ('disk', mid)]
+        skipped = 0
+        for iid in self.tree.selection():
+            if iid.startswith('p') and iid[1:].isdigit():
+                if self.profile['mods'][int(iid[1:])].get('type') == 'desc':
+                    targets.append(('profile', int(iid[1:])))
+                else:
+                    skipped += 1
+            elif iid.startswith('d:'):
+                targets.append(('disk', iid[2:]))
+        if not targets:
+            messagebox.showinfo(
+                'Обновление',
+                'Выберите мод-лист дерева для обновления с сохранением правок:\n'
+                '• мод из вашего набора (📋), добавленный из каталога/по ссылке, или\n'
+                '• мод из «💾 Установлено в игре».\n\n'
+                'Для паков/лагерей целиком используйте «Установить».')
+            return
+        if not self._begin_op(f'Обновление ({len(targets)})…'):
+            return
+        if skipped:
+            self.log(f'Пропущено {skipped} (паки/лагеря обновляются через «Установить»).')
+        self._merge_queue = targets
+        self._merge_advance()
+
+    def _merge_advance(self):
+        """Взять следующий мод из очереди обновления (главный поток)."""
+        if self.should_cancel():
+            self._merge_queue = []
+        if not getattr(self, '_merge_queue', None):
+            self._end_op('Готово')
+            return
+        kind, ref = self._merge_queue.pop(0)
+        if kind == 'profile':
+            threading.Thread(target=self._plan_merge_worker, args=(ref,), daemon=True).start()
+        else:
+            threading.Thread(target=self._plan_merge_disk_worker, args=(ref,), daemon=True).start()
+
+    def _merge_after_item(self, msg):
+        """Завершить текущий мод и перейти к следующему (или закончить операцию)."""
+        self.status.config(text=msg)
+        self._merge_advance()
+
+    def _plan_merge_disk_worker(self, mid):
+        """Дисковый мод: подобрать вариант каталога по совпадению файлов, спланировать
+        обновление (база — снимок, если есть; иначе пусто → отличия = конфликты)."""
+        repo, tok = self._repo(), self._token()
+        mods_dir = self._mods_dir()
+        self.log(f'=== Обновление дискового мода: {mid} ===')
+        try:
+            cat = core.load_catalog('descriptors/catalog.json', repo, tok)
+            ib = self._get_installed_base()
+            prefer = ib['camp'] if ib else None
+            self.log('Подбираю вариант мода по файлам на диске…')
+            desc, info = core.pick_disk_variant(cat, mid, mods_dir, repo, tok,
+                                                prefer_camp=prefer, log=self.log,
+                                                should_cancel=self.should_cancel)
+            if not desc:
+                reason = (info or {}).get('reason')
+                if reason == 'load_failed':
+                    self.log(f'Мод {mid}: не удалось загрузить дескриптор (сеть?). '
+                             'Повторите — запросы теперь с ретраями.')
+                else:
+                    self.log(f'Мод {mid} не найден в каталоге — обновить нечем.')
+                self._post(self._merge_after_item, 'Не найдено'); return
+            self.log(f'Вариант: {info["source"]} (совпало файлов {info["match"]}/{info["cover"]} '
+                     f'из {info["total"]})')
+            snap = core.load_install_snapshot(mods_dir, desc.get('id'))
+            index = core.load_chunk_index(desc=desc, repo=repo, token=tok)
+            plan = core.plan_update_merge(desc, mods_dir, index, token=tok, log=self.log,
+                                          snapshot=snap, tmp_dir=HERE, progress_cb=self._progress,
+                                          should_cancel=self.should_cancel)
+        except core.OperationCancelled:
+            self.log('Планирование отменено.'); self._post(self._merge_after_item, 'Отменено'); return
+        except Exception as e:
+            self.log(f'ОШИБКА планирования обновления: {e}')
+            self._post(self._merge_after_item, 'Ошибка'); return
+        s = plan['summary']
+        actionable = sum(s.get(k, 0) for k in
+                         ('add', 'update', 'automerge', 'deleted_clean')) + s.get('conflicts', 0)
+        if actionable == 0:
+            self.log(f'{mid}: файлы совпадают с каталогом — обновлять нечего.')
+            self._post(self._merge_after_item, 'Актуально'); return
+        # индекс профиля тут не нужен — передаём -1 (apply не трогает профиль для диска)
+        self._post(self._open_merge_dialog, -1, desc, plan, index)
+
+    def _plan_merge_worker(self, i):
+        m = self.profile['mods'][i]
+        repo, tok = self._repo(), self._token()
+        mods_dir = self._mods_dir()
+        self.log(f'=== Обновление с сохранением правок: {m.get("name", m.get("id", "?"))} ===')
+        try:
+            cat = {}
+            if not m.get('url'):
+                cat = core.load_catalog(m.get('catalog', 'descriptors/catalog.json'), repo, tok)
+            desc = core.descriptor_for(self._desc_sel(m), cat, repo, tok)
+            if not desc:
+                self.log('Не удалось получить дескриптор мода (нет в каталоге?).')
+                self._post(self._merge_after_item, 'Не найдено'); return
+            snap = core.load_install_snapshot(mods_dir, desc.get('id'))
+            if snap is None:
+                self.log('Нет снимка прошлой установки — поставьте мод лаунчером один раз '
+                         '(или используйте обновление для дискового мода из «Установлено в игре»).')
+                self._post(self._merge_after_item, 'Нет снимка'); return
+            index = core.load_chunk_index(desc=desc, repo=repo, token=tok)
+            plan = core.plan_update_merge(desc, mods_dir, index, token=tok,
+                                          log=self.log, snapshot=snap, tmp_dir=HERE,
+                                          progress_cb=self._progress,
+                                          should_cancel=self.should_cancel)
+        except core.OperationCancelled:
+            self.log('Планирование отменено.'); self._post(self._merge_after_item, 'Отменено'); return
+        except Exception as e:
+            self.log(f'ОШИБКА планирования обновления: {e}')
+            self._post(self._merge_after_item, 'Ошибка'); return
+        s = plan['summary']
+        actionable = sum(s.get(k, 0) for k in
+                         ('add', 'update', 'automerge', 'deleted_clean')) + s.get('conflicts', 0)
+        if actionable == 0:
+            self.log('Изменений для применения нет (всё совпадает / только ваши правки).')
+            self._post(self._merge_after_item, 'Актуально'); return
+        self._post(self._open_merge_dialog, i, desc, plan, index)
+
+    def _open_merge_dialog(self, i, desc, plan, index):
+        def on_apply(decisions):
+            self.status.config(text='Применение обновления…')
+            threading.Thread(target=self._apply_merge_worker,
+                             args=(i, desc, plan, index, decisions), daemon=True).start()
+
+        def on_cancel():
+            self.log(f'{plan.get("id")}: пропущено (изменения не применялись).')
+            self._merge_after_item('Пропущено')
+        MergePreviewDialog(self.root, self.theme, plan, on_apply, on_cancel)
+
+    def _apply_merge_worker(self, i, desc, plan, index, decisions):
+        mods_dir = self._mods_dir()
+        try:
+            stats = core.apply_update_plan(desc, plan, decisions, mods_dir, index,
+                                           token=self._token(), log=self.log,
+                                           tmp_dir=HERE, progress_cb=self._progress,
+                                           should_cancel=self.should_cancel)
+        except core.OperationCancelled:
+            self.log('Применение отменено (часть файлов могла быть записана).')
+            self._post(self._merge_after_item, 'Отменено'); return
+        except Exception as e:
+            self.log(f'ОШИБКА применения обновления: {e}')
+            self._post(self._merge_after_item, 'Ошибка'); return
+        if i is not None and i >= 0:        # дисковый мод (i=-1) не в профиле
+            m = self.profile['mods'][i]
+            m['installed_version'] = plan.get('version_new')
+            m['last_updated'] = plan.get('version_new')
+            m['last_downloaded'] = datetime.now().isoformat()
+            self._post(self._save_profile)
+        # обновить индекс этого мода (на диске теперь новая версия/слияния)
+        self._post(self._reindex_one, desc.get('id'))
+        self._post(self._refresh_list)
+        self.log(f'Обновлено {desc.get("id")}: записано {stats["written"]}, слито {stats["merged"]}, '
+                 f'оставлено {stats["kept"]}, удалено {stats["deleted"]}, '
+                 f'рядом .srnew {stats["sidecar"]}, конфликтов решено {stats["conflict"]}.')
+        self._post(self._merge_after_item, 'Обновлено')
+
     def _clear_mods(self):
+        if self.busy:
+            return
         d = self._mods_dir()
         n = sum(1 for _ in d.rglob('*') if _.is_file())
         if n == 0:
@@ -958,6 +1506,12 @@ class Launcher:
         self.tree.selection_set(iid)
         path = self._path_for_iid(iid)
         menu = tk.Menu(self.root, tearoff=0)
+        # «Обновить с сохранением правок» — для листа desc-мода или дискового мода
+        if (not self.busy and (iid.startswith('d:')
+                or (iid.startswith('p') and iid[1:].isdigit()
+                    and self.profile['mods'][int(iid[1:])].get('type') == 'desc'))):
+            menu.add_command(label='🔀 Обновить (сохранить правки)', command=self._update_merge)
+            menu.add_separator()
         if path:
             menu.add_command(label='📂 Открыть папку мода',
                              command=lambda: self._open_mod_folder(path))
@@ -1179,6 +1733,120 @@ class AddModDialog:
             mod['name'] = mod_sel
         self.dlg.destroy()
         self.on_ok(mod)
+
+
+# Фаза 4: предпросмотр обновления + поштучное решение конфликтов
+STATUS_LABELS = {
+    'add': '➕ добавить (новый файл)',
+    'update': '⬆ обновить (вы не меняли)',
+    'automerge': '🔀 авто-слить ваши правки',
+    'player_only': '✋ оставить вашу правку (мод не менял)',
+    'unchanged': '· без изменений',
+    'deleted_clean': '🗑 удалить (нет в новой версии)',
+    'conflict_text': '⚠ КОНФЛИКТ текста',
+    'conflict_binary': '⚠ КОНФЛИКТ бинарного файла',
+    'conflict_deleted': '⚠ КОНФЛИКТ: удалён в новой версии, вы правили',
+}
+# опции выбора для конфликтов: подпись -> код решения (см. core.apply_update_plan)
+CONFLICT_OPTIONS = {
+    'conflict_text': [('оставить мой', 'mine'), ('взять новый', 'theirs'),
+                      ('сохранить оба (.srnew)', 'both')],
+    'conflict_binary': [('оставить мой', 'mine'), ('взять новый', 'theirs'),
+                        ('сохранить оба (.srnew)', 'both')],
+    'conflict_deleted': [('оставить мой', 'keep'), ('удалить', 'delete')],
+}
+
+
+class MergePreviewDialog:
+    """Предпросмотр обновления мода: дерево всех действий + поштучный выбор по
+    каждому конфликту. По «Применить» отдаёт decisions в on_apply."""
+
+    def __init__(self, parent, theme, plan, on_apply, on_cancel=None):
+        self.plan = plan
+        self.on_apply = on_apply
+        self.on_cancel = on_cancel
+        self.choice = {}        # relpath -> tk.StringVar (подпись решения)
+        self.opt_lookup = {}    # relpath -> {подпись: код}
+        d = self.dlg = tk.Toplevel(parent)
+        d.title('Обновление — предпросмотр'); d.transient(parent); d.grab_set()
+        d.geometry('760x560')
+        d.protocol('WM_DELETE_WINDOW', self._cancel)
+
+        s = plan['summary']
+        head = (f"Мод: {plan.get('id', '?')}    версия {plan.get('version_old') or '—'} "
+                f"→ {plan.get('version_new') or '—'}\n"
+                f"авто-слить: {s.get('automerge', 0)}   обновить: {s.get('update', 0)}   "
+                f"добавить: {s.get('add', 0)}   удалить: {s.get('deleted_clean', 0)}   "
+                f"ваших правок сохранится: {s.get('player_only', 0)}   "
+                f"конфликтов: {s.get('conflicts', 0)}")
+        ttk.Label(d, text=head, justify=tk.LEFT).pack(anchor=tk.W, padx=12, pady=(12, 6))
+
+        # дерево всех действий, сгруппированных по статусу
+        tw = ttk.Frame(d); tw.pack(fill=tk.BOTH, expand=True, padx=12)
+        tree = ttk.Treeview(tw, columns=('act',), show='tree headings', height=12)
+        tree.heading('#0', text='Файл'); tree.column('#0', width=440, anchor=tk.W)
+        tree.heading('act', text='Действие'); tree.column('act', width=260, anchor=tk.W)
+        sb = ttk.Scrollbar(tw, orient=tk.VERTICAL, command=tree.yview)
+        tree.configure(yscrollcommand=sb.set)
+        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True); sb.pack(side=tk.RIGHT, fill=tk.Y)
+        by_status = {}
+        for r in plan['actions']:
+            by_status.setdefault(r['status'], []).append(r)
+        order = ['conflict_text', 'conflict_binary', 'conflict_deleted', 'automerge',
+                 'update', 'add', 'deleted_clean', 'player_only', 'unchanged']
+        for st in order:
+            rows = by_status.get(st)
+            if not rows:
+                continue
+            gid = tree.insert('', tk.END, text=f'{STATUS_LABELS.get(st, st)}  ({len(rows)})',
+                              open=st.startswith('conflict'))
+            for r in rows:
+                tree.insert(gid, tk.END, text=core.install_relpath(r['relpath']))
+
+        # панель поштучного решения конфликтов
+        conflicts = [r for r in plan['actions'] if r['status'] in CONFLICT_OPTIONS]
+        cf = ttk.LabelFrame(d, text='Конфликты — выберите по каждому', padding=6)
+        cf.pack(fill=tk.BOTH, expand=False, padx=12, pady=(8, 4))
+        if not conflicts:
+            ttk.Label(cf, text='Конфликтов нет — всё применится автоматически.').pack(anchor=tk.W)
+        else:
+            canvas = tk.Canvas(cf, height=140, highlightthickness=0,
+                               bg=theme.get('panel', '#ffffff'))
+            inner = ttk.Frame(canvas)
+            csb = ttk.Scrollbar(cf, orient=tk.VERTICAL, command=canvas.yview)
+            canvas.configure(yscrollcommand=csb.set)
+            canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True); csb.pack(side=tk.RIGHT, fill=tk.Y)
+            canvas.create_window((0, 0), window=inner, anchor='nw')
+            inner.bind('<Configure>', lambda e: canvas.configure(scrollregion=canvas.bbox('all')))
+            for r in conflicts:
+                rp = r['relpath']
+                opts = CONFLICT_OPTIONS[r['status']]
+                self.opt_lookup[rp] = {lbl: code for lbl, code in opts}
+                row = ttk.Frame(inner); row.pack(fill=tk.X, pady=2)
+                default = core.DECISION_DEFAULTS.get(r['status'])
+                def_lbl = next((lbl for lbl, code in opts if code == default), opts[0][0])
+                var = tk.StringVar(value=def_lbl)
+                self.choice[rp] = var
+                ttk.Combobox(row, textvariable=var, state='readonly', width=22,
+                             values=[lbl for lbl, _ in opts]).pack(side=tk.LEFT, padx=(0, 8))
+                ttk.Label(row, text=core.install_relpath(rp)).pack(side=tk.LEFT)
+
+        bf = ttk.Frame(d); bf.pack(side=tk.BOTTOM, pady=10)
+        ttk.Button(bf, text='Применить', style='Accent.TButton',
+                   command=self._apply).pack(side=tk.LEFT, padx=4)
+        ttk.Button(bf, text='Отмена', command=self._cancel).pack(side=tk.LEFT)
+
+    def _apply(self):
+        decisions = {}
+        for rp, var in self.choice.items():
+            decisions[rp] = self.opt_lookup[rp].get(var.get())
+        self.dlg.destroy()
+        self.on_apply(decisions)
+
+    def _cancel(self):
+        self.dlg.destroy()
+        if self.on_cancel:
+            self.on_cancel()
 
 
 def main():
