@@ -804,6 +804,54 @@ def scan_installed_mods(mods_dir):
     return sorted(found)
 
 
+def read_modcfg(mods_dir):
+    """Моды, ПОДКЛЮЧЁННЫЕ в игре — поле CurrentMod из Mods/ModCFG.txt.
+    Возвращает список mod_id с '/' (как scan_installed_mods), порядок сохраняется.
+    [] если файла нет. Без сети — только файловая система."""
+    p = Path(mods_dir) / 'ModCFG.txt'
+    if not p.is_file():
+        return []
+    raw = read_module_info(p).get('CurrentMod', '')
+    out, seen = [], set()
+    for part in raw.replace('\n', ',').split(','):
+        mid = part.strip().replace('\\', '/').strip('/')
+        if mid and mid not in seen:
+            seen.add(mid)
+            out.append(mid)
+    return out
+
+
+def write_modcfg(mods_dir, mod_ids):
+    """Записать ПОДКЛЮЧЁННЫЕ моды в Mods/ModCFG.txt (CurrentMod=Кат\\Мод, ...).
+    Прочие строки и кодировка существующего файла сохраняются; '/' -> '\\'.
+    Возвращает Path к файлу."""
+    p = Path(mods_dir) / 'ModCFG.txt'
+    line = 'CurrentMod=' + ', '.join(m.replace('/', '\\') for m in mod_ids)
+    enc, lines, replaced = 'utf-8', [], False
+    if p.is_file():
+        b = open(p, 'rb').read()
+        if b[:2] in (b'\xff\xfe', b'\xfe\xff'):
+            enc, txt = 'utf-16', b.decode('utf-16', 'replace')
+        else:
+            try:
+                txt = b.decode('utf-8')
+            except UnicodeDecodeError:
+                enc, txt = 'cp1251', b.decode('cp1251', 'replace')
+        for ln in txt.splitlines():
+            if ln.split('=', 1)[0].strip().lower() == 'currentmod':
+                if not replaced:
+                    lines.append(line)
+                    replaced = True
+            else:
+                lines.append(ln)
+    if not replaced:
+        lines.append(line)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, 'w', encoding=enc, newline='') as f:
+        f.write('\r\n'.join(lines) + '\r\n')
+    return p
+
+
 def check_pack_compatibility(selected_units, packs, installed_base=None):
     """Структурная совместимость НАБОРА на уровне паков (Фаза 2). Только показывает.
     selected_units: список ключей 'camp/unit'. packs: из load_packs.

@@ -122,12 +122,19 @@ class Launcher:
 
     def _load_profile(self, name):
         p = PROFILES_DIR / f'{name}.json'
-        default = {'name': name, 'game_path': '', 'mods': [],
-                   'created': datetime.now().isoformat()}
+        # Постоянные поля профиля (переносимы — можно отдать другому человеку):
+        #   base    — выбранная база набора (лагерь: redux/universe/...), факт диска отдельно;
+        #   enabled — набор подключённых модов (как ModCFG, mod_id с '/');
+        #   fork    — (на будущее) ссылка на гит-форк агрегатора.
+        # mods — СЕССИОННАЯ очередь установки, затирается на старте (см. __init__).
+        default = {'name': name, 'game_path': '', 'mods': [], 'enabled': [],
+                   'base': '', 'fork': '', 'created': datetime.now().isoformat()}
         return self._load_json(p, default)
 
     def _save_profile(self):
         self.profile['game_path'] = self.game_path_var.get()
+        if hasattr(self, 'base_var'):
+            self.profile['base'] = self.base_var.get().strip()
         self.profile['updated'] = datetime.now().isoformat()
         (PROFILES_DIR / f'{self.profile["name"]}.json').write_text(
             json.dumps(self.profile, ensure_ascii=False, indent=2), encoding='utf-8')
@@ -277,6 +284,16 @@ class Launcher:
                          ('Удалить', self._del_profile)]:
             ttk.Button(r1, text=txt, command=cmd).pack(side=tk.LEFT, padx=2)
         ttk.Separator(r1, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=10)
+        ttk.Label(r1, text='База:', background=self.theme['panel']).pack(side=tk.LEFT)
+        self.base_var = tk.StringVar(value=self.profile.get('base', ''))
+        base_cb = ttk.Combobox(r1, textvariable=self.base_var, width=10,
+                               values=['', 'redux', 'universe', 'shared'])
+        base_cb.pack(side=tk.LEFT, padx=6)
+        base_cb.bind('<<ComboboxSelected>>', lambda e: (self._save_profile(), self._refresh_list()))
+        _Tooltip(base_cb, 'База НАБОРА (переносимая часть профиля). База в папке игры '
+                          'определяется отдельно по факту с диска — если не совпадает, '
+                          'в дереве будут две: установленная и «добавить».')
+        ttk.Separator(r1, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=10)
         ttk.Label(r1, text='Папка игры:', background=self.theme['panel']).pack(side=tk.LEFT)
         gp0 = self.profile.get('game_path', '') or self._autofind_game()
         self.game_path_var = tk.StringVar(value=gp0)
@@ -341,12 +358,14 @@ class Launcher:
             if lock:
                 self._op_buttons.append(b)
 
-        cols = ('kind', 'status', 'installed')
+        cols = ('kind', 'status', 'in_game', 'in_profile', 'installed')
         self.tree = ttk.Treeview(left, columns=cols, show='tree headings', height=18)
         self.tree.heading('#0', text='Лагерь / Пак / Мод')
-        self.tree.column('#0', width=320, anchor=tk.W)
-        for c, txt, w in [('kind', 'Тип', 70), ('status', 'Статус', 110),
-                          ('installed', 'Установлен', 130)]:
+        self.tree.column('#0', width=300, anchor=tk.W)
+        for c, txt, w in [('kind', 'Тип', 60), ('status', 'Статус', 110),
+                          ('in_game', 'Подключен в игре', 120),
+                          ('in_profile', 'Подключен в профиле', 130),
+                          ('installed', 'Установлен', 120)]:
             self.tree.heading(c, text=txt)
             self.tree.column(c, width=w, anchor=tk.CENTER)
         sb = ttk.Scrollbar(left, orient=tk.VERTICAL, command=self.tree.yview)
@@ -354,6 +373,7 @@ class Launcher:
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         sb.pack(side=tk.RIGHT, fill=tk.Y)
         self.tree.bind('<Button-3>', self._tree_menu)        # ПКМ — контекстное меню
+        self.tree.bind('<Button-1>', self._tree_click)       # клик по «Подключен в профиле»
 
         right = ttk.Frame(main, style='TFrame'); right.pack(side=tk.RIGHT, fill=tk.BOTH)
         act = ttk.LabelFrame(right, text='Действия', padding=10); act.pack(fill=tk.X)
@@ -377,6 +397,20 @@ class Launcher:
             b = ttk.Button(act, text=txt, style=style, command=cmd); b.pack(fill=tk.X, pady=2)
             _Tooltip(b, tip)
             self._op_buttons.append(b)
+
+        cfg = ttk.LabelFrame(right, text='Подключение в игре (ModCFG)', padding=10)
+        cfg.pack(fill=tk.X, pady=(8, 0))
+        for txt, cmd, tip in [
+                ('⟸  Считать из игры в профиль', self._modcfg_to_profile,
+                 'Прочитать Mods/ModCFG.txt (что подключено в игре) и записать в набор '
+                 '«Подключен в профиле».'),
+                ('⟹  Записать профиль в игру', self._profile_to_modcfg,
+                 'Записать «Подключен в профиле» в Mods/ModCFG.txt (CurrentMod=) — что игра '
+                 'будет загружать.')]:
+            b = ttk.Button(cfg, text=txt, command=cmd); b.pack(fill=tk.X, pady=2)
+            _Tooltip(b, tip)
+            self._op_buttons.append(b)
+
         pr = ttk.Frame(right, style='TFrame'); pr.pack(fill=tk.X, pady=(10, 0))
         ttk.Label(pr, text='Прогресс:', background=self.theme['bg']).pack(side=tk.LEFT)
         self.cancel_btn = ttk.Button(pr, text='✖ Отмена', width=10,
@@ -701,6 +735,13 @@ class Launcher:
         camp = ib['camp'] if ib else 'прочее'
         return camp, self._mod_group(mid)
 
+    def _mod_available(self, mid, catalog):
+        """Есть ли мод в каталоге (можно ли скачать) — по mod_id или короткому имени."""
+        if not catalog or mid in catalog:
+            return mid in catalog
+        leaf = mid.split('/')[-1]
+        return any(k.split('/')[-1] == leaf for k in catalog)
+
     def _on_tree_mode(self, _e=None):
         self.config['tree_mode'] = self._tree_mode()
         self._save_config()
@@ -714,13 +755,18 @@ class Launcher:
         except Exception:
             self._inst_base = None
         disk = self._disk_mods()
+        try:
+            modcfg = set(core.read_modcfg(self._mods_dir()))   # подключено в игре
+        except Exception:
+            modcfg = set()
+        enabled = set(self.profile.get('enabled', []))         # подключено в профиле
 
         def st_of(m, on_disk):
             if m.get('update_available'):
                 return '⬆ обновление'
             return '✅ установлен' if on_disk else '➕ добавлен'
 
-        items = []          # (camp, pack, kind, label, status, date, iid)
+        items = []          # (camp, pack, kind, label, status, date, iid, mid)
         seen = set()
         for idx, m in enumerate(self.profile.get('mods', [])):
             typ = m.get('type'); iid = f'p{idx}'
@@ -729,30 +775,43 @@ class Launcher:
                 on = (mid in disk) or bool(m.get('last_downloaded'))
                 date = m.get('last_downloaded') or disk.get(mid, '')
                 items.append((m.get('camp', 'прочее'), self._mod_group(mid), 'мод',
-                              mid.split('/')[-1], st_of(m, on), date if on else '', iid))
+                              mid.split('/')[-1], st_of(m, on), date if on else '', iid, mid))
             elif typ == 'unit':
                 on = bool(m.get('last_downloaded'))
                 items.append((m.get('camp', 'прочее'), self._pack_group(m.get('unit')), 'пак',
                               m.get('name', m.get('unit')), st_of(m, on),
-                              m.get('last_downloaded', '') if on else '', iid))
+                              m.get('last_downloaded', '') if on else '', iid, ''))
             elif typ == 'camp':
                 on = bool(m.get('last_downloaded'))
                 items.append((m.get('camp', 'прочее'), None, 'лагерь', '★ весь лагерь',
-                              st_of(m, on), m.get('last_downloaded', '') if on else '', iid))
+                              st_of(m, on), m.get('last_downloaded', '') if on else '', iid, ''))
             else:
                 on = bool(m.get('last_downloaded'))
                 items.append(('прочее', None, 'форк' if typ == 'desc' else 'zip',
                               m.get('name') or m.get('id') or m.get('url', ''),
-                              st_of(m, on), m.get('last_downloaded', '') if on else '', iid))
+                              st_of(m, on), m.get('last_downloaded', '') if on else '', iid, ''))
         idx_mods = (self._disk_index or {}).get('mods', {})
         for mid, ts in sorted(disk.items()):     # на диске, но не в наборе
             if mid in seen:
                 continue
+            seen.add(mid)
             camp, pack = self._disk_place(mid)
             st = ('❓ не в каталоге'
                   if (idx_mods.get(mid) or {}).get('status') == 'unknown'
                   else '✅ установлен')
-            items.append((camp, pack, 'мод', mid.split('/')[-1], st, ts, 'd:' + mid))
+            items.append((camp, pack, 'мод', mid.split('/')[-1], st, ts, 'd:' + mid, mid))
+        # моды НАБОРА ПРОФИЛЯ, которых нет на диске и нет в очереди: показать как
+        # доступные к скачиванию (если есть в каталоге) либо помеченные недоступными.
+        catalog = getattr(self, '_catalog_cache', None) or {}
+        prof_camp = self.profile.get('base') or 'набор профиля'
+        for mid in sorted(enabled):
+            if mid in seen:
+                continue
+            avail = self._mod_available(mid, catalog)
+            st = '📥 доступен' if avail else ('⚠ недоступен'
+                                              if catalog else '… (каталог грузится)')
+            items.append((prof_camp, self._mod_group(mid), 'мод', mid.split('/')[-1],
+                          st, '', 'e:' + mid, mid))
 
         camp_nodes, pack_nodes = {}, {}
 
@@ -770,12 +829,14 @@ class Launcher:
             return pack_nodes[key]
 
         only_attn = getattr(self, 'attention_var', None) and self.attention_var.get()
-        for camp, pack, kind, label, status, date, iid in sorted(items, key=lambda x: (
+        for camp, pack, kind, label, status, date, iid, mid in sorted(items, key=lambda x: (
                 x[0], x[1] or '', x[3])):
             if only_attn and status.startswith('✅'):     # скрыть просто установленные
                 continue
             parent = pack_node(camp, pack) if (pack and kind == 'мод') else camp_node(camp)
-            vals = (kind, status, fmt_date(date) if date else '')
+            in_game = '✓' if (mid and mid in modcfg) else ''
+            in_prof = '✓' if (mid and mid in enabled) else ''
+            vals = (kind, status, in_game, in_prof, fmt_date(date) if date else '')
             if iid:
                 self.tree.insert(parent, tk.END, iid=iid, text=label, values=vals)
             else:
@@ -914,6 +975,7 @@ class Launcher:
         self.current_profile = name
         self.profile = self._load_profile(name)
         self.game_path_var.set(self.profile.get('game_path', ''))
+        self.base_var.set(self.profile.get('base', ''))
         self._refresh_list()
         self.log(f'Профиль: {name}')
 
@@ -948,8 +1010,66 @@ class Launcher:
         self.current_profile = 'default'
         self.profile = self._load_profile('default')
         self.game_path_var.set(self.profile.get('game_path', ''))
+        self.base_var.set(self.profile.get('base', ''))
         self._save_config()
         self._refresh_list()
+
+    # ---------- подключение модов (профиль ⟷ игра/ModCFG) ----------
+    def _toggle_enabled(self, mid, on):
+        """Вкл/выкл мод в наборе «Подключен в профиле» (profile['enabled'])."""
+        en = self.profile.setdefault('enabled', [])
+        if on and mid not in en:
+            en.append(mid)
+        elif not on and mid in en:
+            en.remove(mid)
+        self._save_profile()
+        self._refresh_list()
+
+    def _tree_click(self, event):
+        """Клик по колонке «Подключен в профиле» = переключить подключение мода."""
+        if self.busy:
+            return
+        if self.tree.identify_region(event.x, event.y) != 'cell':
+            return
+        if self.tree.identify_column(event.x) != '#4':      # in_profile (4-я после #0)
+            return
+        iid = self.tree.identify_row(event.y)
+        mid = self._path_for_iid(iid) if iid else None
+        if mid:
+            self._toggle_enabled(mid, mid not in set(self.profile.get('enabled', [])))
+
+    def _modcfg_to_profile(self):
+        """Игра → профиль: считать Mods/ModCFG.txt в набор «Подключен в профиле»."""
+        if self.busy:
+            return
+        mods_dir = self._mods_dir()
+        if not (mods_dir / 'ModCFG.txt').exists():
+            messagebox.showinfo('ModCFG', 'В папке Mods нет ModCFG.txt — нечего считывать.')
+            return
+        mods = core.read_modcfg(mods_dir)
+        self.profile['enabled'] = mods
+        self._save_profile()
+        self._refresh_list()
+        self.log(f'Из игры в профиль: {len(mods)} подключённых модов')
+
+    def _profile_to_modcfg(self):
+        """Профиль → игра: записать набор «Подключен в профиле» в Mods/ModCFG.txt."""
+        if self.busy:
+            return
+        en = list(self.profile.get('enabled', []))
+        if not en and not messagebox.askyesno(
+                'ModCFG', 'В профиле нет подключённых модов.\n'
+                'Записать пустой CurrentMod (отключить все моды в игре)?'):
+            return
+        disk = set(self._disk_mods())
+        missing = [m for m in en if m not in disk]
+        if missing and not messagebox.askyesno(
+                'ModCFG', f'{len(missing)} мод(ов) из профиля нет в папке Mods — игра их '
+                'не загрузит, пока не установите их.\nВсё равно записать ModCFG?'):
+            return
+        p = core.write_modcfg(self._mods_dir(), en)
+        self._refresh_list()
+        self.log(f'Из профиля в игру: {len(en)} модов записано в {p.name}')
 
     # ---------- mods ----------
     def _add_mod(self):
@@ -1824,11 +1944,20 @@ class Launcher:
         """Относительный путь мода под Mods для строки дерева (или None)."""
         if iid.startswith('d:'):
             return iid[2:]
+        if iid.startswith('e:'):                       # мод набора профиля (не на диске)
+            return iid[2:]
         if iid.startswith('p') and iid[1:].isdigit():
             m = self.profile['mods'][int(iid[1:])]
             if m.get('type') == 'unit' and m.get('mod'):
                 return m['mod']
         return None
+
+    def _add_enabled_to_set(self, mid):
+        """Добавить мод набора профиля в очередь установки (📋) как desc — чтобы скачать."""
+        ent = {'type': 'desc', 'repo': self._repo(), 'catalog': 'descriptors/catalog.json',
+               'id': mid, 'source': '', 'url': '', 'name': mid.split('/')[-1],
+               'installed_version': None, 'last_downloaded': None, 'last_updated': None}
+        self._on_mod_added(ent)
 
     def _tree_menu(self, event):
         iid = self.tree.identify_row(event.y)
@@ -1843,6 +1972,19 @@ class Launcher:
                     and self.profile['mods'][int(iid[1:])].get('type') == 'desc'))):
             menu.add_command(label='🔀 Обновить (сохранить правки)', command=self._update_merge)
             menu.add_separator()
+        # подключение в профиле — для любого листа с mod_id
+        if path:
+            on = path in set(self.profile.get('enabled', []))
+            menu.add_command(
+                label='☑ Отключить в профиле' if on else '☐ Подключить в профиле',
+                command=lambda: self._toggle_enabled(path, not on))
+        # доступный мод набора профиля (не на диске) — добавить в очередь установки
+        if iid.startswith('e:') and not self.busy:
+            cat = getattr(self, '_catalog_cache', None) or {}
+            if self._mod_available(path, cat):
+                menu.add_command(label='⬇ Добавить в набор (скачать)',
+                                 command=lambda: self._add_enabled_to_set(path))
+        menu.add_separator()
         if path:
             menu.add_command(label='📂 Открыть папку мода',
                              command=lambda: self._open_mod_folder(path))
