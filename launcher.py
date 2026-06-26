@@ -56,6 +56,17 @@ DEFAULT_THEME = {
     "banner": ""
 }
 
+# Тестовая сборка с вшитым ключом (RWT — release with tests). Файл embedded_secrets.py
+# НЕ коммитится (см. .gitignore) и кладётся только при сборке для тестеров; если его нет —
+# обычная публичная сборка (токен вводится вручную в поле настроек).
+try:
+    import embedded_secrets as _sec      # type: ignore
+    EMBEDDED_TOKEN = (getattr(_sec, 'GITHUB_TOKEN', '') or '').strip()
+    EMBEDDED_REPO = (getattr(_sec, 'REPO', '') or '').strip()
+except Exception:
+    EMBEDDED_TOKEN = EMBEDDED_REPO = ''
+IS_RWT = bool(EMBEDDED_TOKEN)
+
 
 def fmt_date(iso):
     if not iso:
@@ -69,7 +80,7 @@ def fmt_date(iso):
 class Launcher:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title('SR Mods Launcher')
+        self.root.title('SR Mods Launcher' + (' — тестовая сборка (RWT)' if IS_RWT else ''))
         self.root.geometry('1040x720')
         self.theme = self._load_json(THEME_FILE, DEFAULT_THEME)
         self.config = self._load_json(CONFIG_FILE, {
@@ -146,7 +157,8 @@ class Launcher:
         self._save_config()
 
     def _token(self):
-        return self.token_var.get().strip() or os.environ.get('GH_TOKEN', '')
+        return (self.token_var.get().strip() or os.environ.get('GH_TOKEN', '')
+                or EMBEDDED_TOKEN)
 
     def _repo(self):
         return (self.repo_var.get().strip() if hasattr(self, 'repo_var')
@@ -307,16 +319,27 @@ class Launcher:
         ttk.Button(r2, text='📂 Папка модов', command=self._open_mods).pack(side=tk.LEFT, padx=8)
         ttk.Label(r2, text='Репозиторий:', background=self.theme['panel']).pack(side=tk.LEFT,
                                                                                 padx=(14, 4))
-        self.repo_var = tk.StringVar(value=self.config.get('repo', 'ArtYudin89/sr-mods-aggregator'))
-        e_repo = ttk.Entry(r2, textvariable=self.repo_var, width=26); e_repo.pack(side=tk.LEFT)
-        ttk.Label(r2, text='GitHub token:', background=self.theme['panel']).pack(side=tk.LEFT,
-                                                                                 padx=(14, 4))
+        self.repo_var = tk.StringVar(value=self.config.get(
+            'repo', EMBEDDED_REPO or 'ArtYudin89/sr-mods-aggregator'))
         self.token_var = tk.StringVar(value=self.config.get('github_token', ''))
-        e_tok = ttk.Entry(r2, textvariable=self.token_var, width=22, show='•'); e_tok.pack(side=tk.LEFT)
-        # при изменении токена/репо — сбросить кэш каталога и перечитать (камп подтянется)
-        for e in (e_repo, e_tok):
-            e.bind('<FocusOut>', self._on_creds_change)
-            e.bind('<Return>', self._on_creds_change)
+        if IS_RWT:
+            # Тестовая сборка: ключ и репозиторий уже встроены — не грузим нетехнического
+            # тестера полями. Просто понятная плашка.
+            lbl = ttk.Label(r2, text='✓ Ключ доступа встроен — настраивать ничего не нужно',
+                            background=self.theme['panel'], foreground='#5ad17a')
+            lbl.pack(side=tk.LEFT, padx=(14, 4))
+        else:
+            ttk.Label(r2, text='Репозиторий:', background=self.theme['panel']).pack(
+                side=tk.LEFT, padx=(14, 4))
+            e_repo = ttk.Entry(r2, textvariable=self.repo_var, width=26); e_repo.pack(side=tk.LEFT)
+            ttk.Label(r2, text='GitHub token:', background=self.theme['panel']).pack(
+                side=tk.LEFT, padx=(14, 4))
+            e_tok = ttk.Entry(r2, textvariable=self.token_var, width=22, show='•')
+            e_tok.pack(side=tk.LEFT)
+            # при изменении токена/репо — сбросить кэш каталога и перечитать (камп подтянется)
+            for e in (e_repo, e_tok):
+                e.bind('<FocusOut>', self._on_creds_change)
+                e.bind('<Return>', self._on_creds_change)
 
         # main split
         main = ttk.Frame(root, style='TFrame'); main.pack(fill=tk.BOTH, expand=True)

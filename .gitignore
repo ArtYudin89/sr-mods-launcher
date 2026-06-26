@@ -6,6 +6,9 @@
 # Артефакт релиза (пересобирается, кладётся в GitHub Release)
 /SRModsLauncher-source.zip
 
+# Вшитый ключ для тестовых сборок (RWT) — СЕКРЕТ, не коммитить
+/embedded_secrets.py
+
 # Python
 __pycache__/
 *.pyc
