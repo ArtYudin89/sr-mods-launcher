@@ -105,6 +105,9 @@ class Api:
 
     def __init__(self):
         self.config = load_json(CONFIG_FILE, DEFAULT_CONFIG)
+        # синхронизировать флаг подробного лога ядра с конфигом (по умолч. краткий);
+        # без этого core.LOG_VERBOSE=True по умолчанию давал построчный лог при снятой галочке
+        core.LOG_VERBOSE = bool(self.config.get('log_verbose', False))
         PROFILES_DIR.mkdir(exist_ok=True)
         self.current_profile = self.config.get('last_profile', 'default')
         self.profile = self._load_profile(self.current_profile)
