@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="ru" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SR Mods Launcher</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- ШАПКА -->
+  <div class="topbar">
+    <div class="logo"><span class="mark">◆</span> SR Mods Launcher</div>
+    <div class="field">Сборка:
+      <select id="profileSel" title="Сборка — это сохранённый набор модов. Можно держать несколько и переключаться."></select>
+    </div>
+    <button class="icon-btn" id="profileMenuBtn" title="Создать / удалить сборку">⋯</button>
+    <div class="game-path" id="gamePath" title="Папка, куда установлена игра. Нажмите, чтобы выбрать.">Папка игры не выбрана</div>
+    <div class="spacer"></div>
+    <button class="icon-btn" id="themeBtn" title="Светлая / тёмная тема">🌙</button>
+    <button class="icon-btn" id="settingsBtn" title="Настройки">⚙</button>
+    <button class="btn play" id="launchBtn" title="Запустить Space Rangers HD">▶  Играть</button>
+  </div>
+
+  <div class="body">
+    <!-- ОСНОВНАЯ КОЛОНКА -->
+    <div class="main">
+
+      <!-- онбординг-подсказка (показывается, когда не выбрана папка игры) -->
+      <div class="hint" id="setupHint" style="display:none">
+        <span style="font-size:22px">🚀</span>
+        <div class="txt"><b>Шаг 1 — укажите, где установлена игра.</b><br>
+          Без этого лаунчер не знает, куда ставить моды. Нажмите кнопку справа и выберите папку Space Rangers HD.</div>
+        <button class="btn primary" id="chooseGameBtn">Выбрать папку игры</button>
+      </div>
+
+      <!-- инструменты -->
+      <div class="toolbar">
+        <div class="seg" id="viewSeg" title="Как группировать моды в списке">
+          <button data-mode="folder" class="on">По папкам</button>
+          <button data-mode="section">По разделам</button>
+        </div>
+        <div class="pop-host">
+          <button class="btn ghost" id="filterBtn" title="Показать только нужные состояния и подключения">⚲ Фильтр <span class="fcount" id="filterCount"></span></button>
+          <div class="popover hidden" id="filterPop">
+            <div class="pop-sec">
+              <div class="pop-head">Показывать состояния</div>
+              <div id="stateChecks"></div>
+              <div class="pop-row">
+                <button class="mini" id="fAll">Все</button>
+                <button class="mini" id="fNone">Снять все</button>
+                <button class="mini" id="fImportant">Только важное</button>
+              </div>
+            </div>
+            <div class="pop-sec">
+              <div class="pop-head">Подключение</div>
+              <label class="pop-chk"><input type="checkbox" id="fInGame"> только подключённые в игре</label>
+              <label class="pop-chk"><input type="checkbox" id="fInProfile"> только входящие в сборку</label>
+            </div>
+          </div>
+        </div>
+        <button class="btn ghost" id="legendBtn" title="Что означают значки состояний">ⓘ Обозначения</button>
+        <span class="queue-lbl" id="queueLbl"></span>
+        <div class="spacer"></div>
+        <input class="search" id="searchInp" placeholder="🔎 поиск мода…">
+        <button class="icon-btn" id="expandBtn" title="Развернуть всё">⊕</button>
+        <button class="icon-btn" id="collapseBtn" title="Свернуть всё">⊖</button>
+        <button class="icon-btn" id="refreshBtn" title="Обновить список и проверить обновления">⟳</button>
+      </div>
+
+      <!-- легенда состояний (скрыта по умолчанию) -->
+      <div class="legend hidden" id="legendBar"></div>
+
+      <!-- дерево -->
+      <div class="tree-wrap">
+        <div class="tree-head">
+          <div>Мод</div>
+          <div class="c" id="colDim" title="Папка на диске или раздел из ModuleInfo — показывается измерение, обратное группировке">Раздел</div>
+          <div class="c help" title="✓ — мод сейчас подключён в самой игре (файл ModCFG)">В игре</div>
+          <div class="c help" title="✓ — мод входит в эту сборку. Нажмите галочку, чтобы включить/выключить.">В сборке</div>
+          <div class="c">Состояние</div>
+        </div>
+        <div class="tree-body" id="treeBody">
+          <div class="tree-empty">Загрузка…</div>
+        </div>
+      </div>
+
+      <!-- действия -->
+      <div class="actions">
+        <button class="btn primary" id="addBtn" title="Добавить мод, пак или целый лагерь в эту сборку">➕ Добавить мод</button>
+        <button class="btn" id="installBtn" title="Скачать и установить ТОЛЬКО выделенные в списке строки">⬇ Установить выбранное</button>
+        <button class="btn" id="installSetBtn" title="Скачать и установить ВСЁ, что добавлено в сборку (📋), целиком">🧩 Установить всю сборку</button>
+        <button class="btn" id="mergeBtn" title="Обновить выбранный мод до новой версии, сохранив ваши ручные правки файлов">🔀 Обновить (сохранить правки)</button>
+        <button class="btn" id="compatBtn" title="Проверить, всё ли совместимо: есть ли база, фиксы, конфликты">🛡 Совместимость</button>
+        <div class="spacer"></div>
+        <button class="btn ghost danger" id="removeBtn" title="Убрать выбранное из сборки (файлы на диске не трогает)">🗑 Убрать из сборки</button>
+      </div>
+
+      <!-- прогресс -->
+      <div class="progress-card hidden" id="progressCard">
+        <div class="progress-top">
+          <span id="progText">Подготовка…</span>
+          <span id="progRight"></span>
+        </div>
+        <div class="bar pulse" id="progBar"><i></i></div>
+        <div class="progress-top">
+          <label class="check"><input type="checkbox" id="verboseChk"> Подробный лог</label>
+          <button class="btn ghost danger" id="cancelBtn">✖ Отмена</button>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- БОКОВАЯ ПАНЕЛЬ -->
+    <div class="side">
+      <h3>Подключение в игре</h3>
+      <div class="modcfg">
+        <div class="desc">Игра хранит список подключённых модов отдельно (ModCFG). Здесь можно синхронизировать его со сборкой.</div>
+        <button class="btn" id="modcfgReadBtn" title="Взять список подключённых модов из игры и записать в текущую сборку">⟸ Считать из игры в сборку</button>
+        <button class="btn" id="modcfgWriteBtn" title="Подключить в игре ровно те моды, что отмечены в сборке">⟹ Записать сборку в игру</button>
+      </div>
+      <div class="log-head"><h3>Журнал</h3>
+        <button class="icon-btn" id="clearLogBtn" title="Очистить журнал" style="width:28px;height:26px;font-size:13px">🗑</button>
+      </div>
+      <div class="log" id="logBox"></div>
+      <div class="side-foot">
+        <span id="verBadge">SR Mods Launcher</span>
+        <span class="spacer"></span>
+        <span class="dot" id="repoDot"></span><span>репозиторий</span>
+        <span class="dot" id="tokenDot"></span><span>токен</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- МОДАЛКА: настройки -->
+  <div class="overlay hidden" id="settingsOverlay">
+    <div class="modal">
+      <h2>Настройки</h2>
+      <div class="m-body">
+        <div class="m-row">
+          <label>Папка игры</label>
+          <div class="sub">Туда, где лежит Rangers.exe. Моды ставятся в подпапку Mods.</div>
+          <div style="display:flex;gap:8px">
+            <input id="setGamePath" style="flex:1" placeholder="например, D:\Steam\...\Space Rangers HD A War Apart">
+            <button class="btn" id="setBrowseBtn">Обзор…</button>
+          </div>
+        </div>
+        <div class="m-row">
+          <label>База сборки</label>
+          <div class="sub">Какую версию игры берём за основу. Менять посреди партии нельзя — старые сохранения не подойдут.</div>
+          <select id="setBase">
+            <option value="">— не выбрано —</option>
+            <option value="redux">redux</option>
+            <option value="universe">universe</option>
+            <option value="original">original</option>
+          </select>
+        </div>
+        <details>
+          <summary style="cursor:pointer;color:var(--muted);font-size:12.5px;margin:6px 0">Дополнительно (репозиторий и токен) — обычно менять не нужно</summary>
+          <div class="m-row">
+            <label>Репозиторий</label>
+            <input id="setRepo" placeholder="ArtYudin89/sr-mods-aggregator">
+          </div>
+          <div class="m-row">
+            <label>GitHub-токен</label>
+            <div class="sub">Нужен только для приватного репозитория. Оставьте пустым, если не знаете, что это.</div>
+            <input id="setToken" type="password" placeholder="оставьте пустым, если не требуется">
+          </div>
+        </details>
+      </div>
+      <div class="m-foot">
+        <button class="btn ghost" id="setCancelBtn">Отмена</button>
+        <button class="btn primary" id="setSaveBtn">Сохранить</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- МОДАЛКА: подтверждение -->
+  <div class="overlay hidden" id="confirmOverlay">
+    <div class="modal">
+      <h2 id="confirmTitle">Подтверждение</h2>
+      <div class="m-body" id="confirmBody"></div>
+      <div class="m-foot">
+        <button class="btn ghost" id="confirmCancel">Отмена</button>
+        <button class="btn primary" id="confirmOk">Продолжить</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- МОДАЛКА: новая сборка -->
+  <div class="overlay hidden" id="profileOverlay">
+    <div class="modal">
+      <h2>Сборки модов</h2>
+      <div class="m-body">
+        <div class="m-row">
+          <label>Создать новую сборку</label>
+          <div class="sub">Сборка — это переносимый набор: база + список модов. Можно отдать другому игроку.</div>
+          <div style="display:flex;gap:8px">
+            <input id="newProfName" style="flex:1" placeholder="название, например «Моя redux-сборка»">
+            <button class="btn primary" id="createProfBtn">Создать</button>
+          </div>
+        </div>
+        <div class="note" id="delProfNote" style="border-left-color:var(--danger)">
+          Удалить текущую сборку «<b id="delProfName"></b>» — действие необратимо.
+          <div style="margin-top:8px"><button class="btn ghost danger" id="deleteProfBtn">Удалить эту сборку</button></div>
+        </div>
+      </div>
+      <div class="m-foot">
+        <button class="btn" id="profCloseBtn">Закрыть</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- МОДАЛКА: добавить мод -->
+  <div class="overlay hidden" id="addOverlay">
+    <div class="modal">
+      <h2>Добавить в сборку</h2>
+      <div class="m-body">
+        <div class="seg" id="addModeSeg" style="margin:4px 0 10px">
+          <button data-amode="src" class="on">Из каталога</button>
+          <button data-amode="fork">По ссылке (форк)</button>
+        </div>
+
+        <div id="addSrc">
+          <div class="m-row">
+            <label>Лагерь</label>
+            <div class="sub">Какую ветку модов берём. Можно добавить весь лагерь целиком.</div>
+            <select id="addCamp"><option value="">— выберите лагерь —</option></select>
+          </div>
+          <div class="m-row">
+            <label>Пак</label>
+            <div class="sub">«Весь лагерь» — добавить все паки. Иначе выберите конкретный пак.</div>
+            <select id="addPack" disabled></select>
+          </div>
+          <div class="m-row">
+            <label>Мод</label>
+            <div class="sub">«Весь пак» — добавить пак целиком. Иначе — один мод из пака.</div>
+            <select id="addMod" disabled></select>
+          </div>
+        </div>
+
+        <div id="addFork" style="display:none">
+          <div class="m-row">
+            <label>Ссылка на дескриптор</label>
+            <div class="sub">Прямая ссылка на файл &lt;id&gt;.json форка мода (GitHub/HF).</div>
+            <input id="addUrl" placeholder="https://.../MyMod.json">
+          </div>
+        </div>
+        <div class="sub" id="addStatus" style="min-height:16px"></div>
+      </div>
+      <div class="m-foot">
+        <button class="btn ghost" id="addCancelBtn">Отмена</button>
+        <button class="btn primary" id="addOkBtn">Добавить</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- МОДАЛКА: обновление (превью + конфликты) -->
+  <div class="overlay hidden" id="mergeOverlay">
+    <div class="modal" style="width:640px">
+      <h2>Обновление мода</h2>
+      <div class="m-body">
+        <div id="mergeHead" class="note" style="border-left-color:var(--accent)"></div>
+        <div id="mergeGroups"></div>
+        <div id="mergeConflicts"></div>
+      </div>
+      <div class="m-foot">
+        <button class="btn ghost" id="mergeSkipBtn" title="Не применять — перейти к следующему / закончить">Пропустить</button>
+        <button class="btn primary" id="mergeApplyBtn">Применить</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast-wrap" id="toastWrap"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

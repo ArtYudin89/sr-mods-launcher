@@ -1,0 +1,632 @@
+'use strict';
+// ───────── мост к Python ─────────
+const api = () => window.pywebview.api;
+const $ = (id) => document.getElementById(id);
+
+let STATE = {};
+let TREE = null;
+const selected = new Set();          // выбранные iid листьев
+const collapsed = new Set();         // свёрнутые узлы
+const NODE = {};                     // iid -> узел (для быстрых проверок)
+let busy = false;
+let reconcileTimer = null;
+
+// состояния и их описание (для легенды и фильтра)
+const STATES = [
+  { k: 'ok', label: 'установлен', badge: 'b-ok', tip: 'мод установлен — всё в порядке' },
+  { k: 'upd', label: 'обновление', badge: 'b-upd', tip: 'для мода вышла новая версия' },
+  { k: 'queued', label: 'добавлен', badge: 'b-queued', tip: 'добавлен в сборку, но ещё не установлен' },
+  { k: 'avail', label: 'доступен', badge: 'b-avail', tip: 'есть в каталоге — можно установить' },
+  { k: 'miss', label: 'недоступен', badge: 'b-miss', tip: 'в сборке есть, но в каталоге не найден' },
+  { k: 'unknown', label: 'не в каталоге', badge: 'b-unknown', tip: 'установлен, но в каталоге его нет' },
+  { k: 'load', label: 'каталог грузится', badge: 'b-load', tip: 'каталог ещё загружается' },
+];
+const filter = { states: new Set(STATES.map((s) => s.k)), inGame: false, inProfile: false };
+
+// данные диалога добавления
+let CAMPPACKS = {};
+let packsByUnit = {};
+
+// ───────── события из Python ─────────
+window.__emit = (event, data) => {
+  switch (event) {
+    case 'log': appendLog(data); break;
+    case 'tree_dirty': refreshTree(); break;
+    case 'op_begin': onOpBegin(data); break;
+    case 'op_end': onOpEnd(data); break;
+    case 'progress': onProgress(data); break;
+    case 'merge_plan': onMergePlan(data); break;
+    case 'deps_confirm': onDepsConfirm(data); break;
+  }
+};
+
+// ───────── инициализация ─────────
+window.addEventListener('pywebviewready', init);
+
+async function init() {
+  STATE = await api().get_state();
+  applyState();
+  buildStateChecks();
+  buildLegend();
+  wireUI();
+  refreshTree();
+}
+
+function applyState() {
+  document.documentElement.dataset.theme = STATE.theme || 'dark';
+  $('themeBtn').textContent = STATE.theme === 'light' ? '☀' : '🌙';
+  const sel = $('profileSel');
+  sel.innerHTML = '';
+  (STATE.profiles || []).forEach((p) => {
+    const o = document.createElement('option');
+    o.value = o.textContent = p;
+    if (p === STATE.current_profile) o.selected = true;
+    sel.appendChild(o);
+  });
+  const gp = $('gamePath');
+  if (STATE.game_path) { gp.textContent = '📁 ' + STATE.game_path; gp.classList.remove('unset'); }
+  else { gp.textContent = 'Папка игры не выбрана'; gp.classList.add('unset'); }
+  $('setupHint').style.display = STATE.game_path ? 'none' : 'flex';
+  document.querySelectorAll('#viewSeg button').forEach((b) =>
+    b.classList.toggle('on', b.dataset.mode === STATE.tree_mode));
+  updateColHeader();
+  $('verBadge').textContent = STATE.is_rwt ? 'тестовая сборка (RWT)' : 'SR Mods Launcher';
+  $('repoDot').classList.toggle('on', !!STATE.repo);
+  $('tokenDot').classList.toggle('on', !!STATE.has_token);
+  $('verboseChk').checked = !!STATE.log_verbose;
+}
+
+function updateColHeader() {
+  // показываем измерение, ОБРАТНОЕ группировке
+  $('colDim').textContent = (STATE.tree_mode === 'section') ? 'Папка' : 'Раздел';
+}
+
+// ───────── проводка ─────────
+function wireUI() {
+  $('themeBtn').onclick = toggleTheme;
+  $('launchBtn').onclick = launchGame;
+  $('gamePath').onclick = browseGame;
+  $('chooseGameBtn').onclick = browseGame;
+  $('settingsBtn').onclick = openSettings;
+  $('profileSel').onchange = (e) => switchProfile(e.target.value);
+  $('profileMenuBtn').onclick = openProfiles;
+
+  document.querySelectorAll('#viewSeg button').forEach((b) => b.onclick = () => setViewMode(b.dataset.mode));
+  $('searchInp').oninput = renderTree;
+  $('expandBtn').onclick = () => { collapsed.clear(); renderTree(); };
+  $('collapseBtn').onclick = collapseAll;
+  $('refreshBtn').onclick = () => { api().get_state().then((s) => { STATE = s; applyState(); }); refreshTree(); };
+
+  // фильтр
+  $('filterBtn').onclick = (e) => { e.stopPropagation(); $('filterPop').classList.toggle('hidden'); };
+  $('fAll').onclick = () => { STATES.forEach((s) => filter.states.add(s.k)); syncStateChecks(); applyFilter(); };
+  $('fNone').onclick = () => { filter.states.clear(); syncStateChecks(); applyFilter(); };
+  $('fImportant').onclick = () => {
+    filter.states = new Set(STATES.map((s) => s.k)); filter.states.delete('ok');
+    syncStateChecks(); applyFilter();
+  };
+  $('fInGame').onchange = (e) => { filter.inGame = e.target.checked; applyFilter(); };
+  $('fInProfile').onchange = (e) => { filter.inProfile = e.target.checked; applyFilter(); };
+  $('legendBtn').onclick = () => $('legendBar').classList.toggle('hidden');
+
+  // действия
+  $('addBtn').onclick = openAdd;
+  $('installBtn').onclick = installSelected;
+  $('installSetBtn').onclick = installWholeSet;
+  $('mergeBtn').onclick = startMerge;
+  $('compatBtn').onclick = checkCompat;
+  $('removeBtn').onclick = removeSelected;
+
+  $('modcfgReadBtn').onclick = () => api().modcfg_to_profile().then((r) => {
+    if (r.ok) { toast(`Считано ${r.count} модов из игры`, 'ok'); refreshTree(); } else toast(r.error, 'err');
+  });
+  $('modcfgWriteBtn').onclick = modcfgWrite;
+  $('clearLogBtn').onclick = () => { $('logBox').innerHTML = ''; };
+  $('verboseChk').onchange = (e) => api().set_verbose(e.target.checked);
+  $('cancelBtn').onclick = () => api().cancel();
+
+  // настройки
+  $('setCancelBtn').onclick = () => hide('settingsOverlay');
+  $('setSaveBtn').onclick = saveSettings;
+  $('setBrowseBtn').onclick = async () => { const p = await api().browse_game(); if (p) $('setGamePath').value = p; };
+  // профили
+  $('createProfBtn').onclick = createProfile;
+  $('deleteProfBtn').onclick = deleteProfile;
+  $('profCloseBtn').onclick = () => hide('profileOverlay');
+  $('confirmCancel').onclick = () => hide('confirmOverlay');
+  // добавление
+  document.querySelectorAll('#addModeSeg button').forEach((b) => b.onclick = () => setAddMode(b.dataset.amode));
+  $('addCancelBtn').onclick = () => hide('addOverlay');
+  $('addOkBtn').onclick = doAdd;
+  $('addCamp').onchange = onAddCamp;
+  $('addPack').onchange = onAddPack;
+  // обновление
+  $('mergeApplyBtn').onclick = doMergeApply;
+  $('mergeSkipBtn').onclick = () => { hide('mergeOverlay'); api().merge_skip(); };
+
+  // закрытие по клику на фон — только для «безопасных» модалок
+  // (confirm/merge завязаны на состояние бэкенда → закрываются только кнопками)
+  ['settingsOverlay', 'profileOverlay', 'addOverlay'].forEach((id) =>
+    $(id).onclick = (e) => { if (e.target === $(id)) $(id).classList.add('hidden'); });
+  // закрыть фильтр-поповер по клику вне
+  document.addEventListener('click', (e) => {
+    if (!$('filterPop').classList.contains('hidden') &&
+        !$('filterPop').contains(e.target) && e.target !== $('filterBtn')) {
+      $('filterPop').classList.add('hidden');
+    }
+  });
+}
+
+// ───────── фильтр ─────────
+function buildStateChecks() {
+  $('stateChecks').innerHTML = STATES.map((s) => `
+    <label class="pop-chk"><input type="checkbox" class="fstate" value="${s.k}" ${filter.states.has(s.k) ? 'checked' : ''}>
+      <span class="badge ${s.badge}">${s.label}</span></label>`).join('');
+  document.querySelectorAll('.fstate').forEach((c) => c.onchange = () => {
+    c.checked ? filter.states.add(c.value) : filter.states.delete(c.value);
+    applyFilter();
+  });
+}
+function syncStateChecks() {
+  document.querySelectorAll('.fstate').forEach((c) => c.checked = filter.states.has(c.value));
+}
+function applyFilter() {
+  const n = (filter.states.size < STATES.length ? 1 : 0) + (filter.inGame ? 1 : 0) + (filter.inProfile ? 1 : 0);
+  $('filterCount').textContent = n ? String(n) : '';
+  renderTree();
+}
+function passFilter(node) {
+  if (!filter.states.has(node.status_class)) return false;
+  if (filter.inGame && !node.in_game) return false;
+  if (filter.inProfile && !node.in_profile) return false;
+  return true;
+}
+
+// ───────── легенда ─────────
+function buildLegend() {
+  const parts = STATES.map((s) =>
+    `<span class="lg"><span class="badge ${s.badge}">${s.label}</span> — ${s.tip}</span>`);
+  parts.push('<span class="lg"><span class="toggle ro on">✓</span> «В игре» — мод подключён в самой игре</span>');
+  parts.push('<span class="lg"><span class="toggle on">✓</span> «В сборке» — мод входит в текущую сборку (кликабельно)</span>');
+  $('legendBar').innerHTML = parts.join('');
+}
+
+// ───────── тема ─────────
+function toggleTheme() {
+  const next = (document.documentElement.dataset.theme === 'light') ? 'dark' : 'light';
+  document.documentElement.dataset.theme = next;
+  $('themeBtn').textContent = next === 'light' ? '☀' : '🌙';
+  STATE.theme = next;
+  api().set_theme(next);
+}
+
+// ───────── дерево ─────────
+async function refreshTree() {
+  TREE = await api().get_tree(false);
+  STATE.base = TREE.base;
+  renderTree();
+  const q = TREE.queue || {};
+  $('queueLbl').textContent = q.count ? `в сборке: ${q.count}${q.size ? ' · ~' + q.size : ''}` : '';
+}
+
+function groupKey(camp, pack) { return pack ? `c:${camp}|p:${pack}` : `c:${camp}`; }
+function colValue(n) { return STATE.tree_mode === 'section' ? n.folder : n.section; }
+
+function renderTree() {
+  for (const k in NODE) delete NODE[k];
+  const body = $('treeBody');
+  const camps = (TREE && TREE.camps) || [];
+  if (!camps.length) {
+    body.innerHTML = `<div class="tree-empty">Пока пусто.<br>
+      Нажмите «➕ Добавить мод», чтобы собрать набор, затем «🧩 Установить всю сборку».</div>`;
+    updateActionButtons();
+    return;
+  }
+  const q = ($('searchInp').value || '').trim().toLowerCase();
+  const visible = (n) => passFilter(n) && (!q || n.label.toLowerCase().includes(q));
+
+  const rows = [];
+  for (const camp of camps) {
+    const directMods = camp.mods.filter(visible);
+    const packsVis = camp.packs.map((pk) => ({ pk, mods: pk.mods.filter(visible) }))
+      .filter((x) => x.mods.length);
+    if (!directMods.length && !packsVis.length) continue;
+
+    const ckey = groupKey(camp.label, null);
+    const cCol = collapsed.has(ckey);
+    const cnt = directMods.length + packsVis.reduce((a, x) => a + x.mods.length, 0);
+    rows.push(groupRow('camp', camp.label, ckey, cCol, cnt));
+    if (cCol) continue;
+    for (const n of directMods) { NODE[n.iid] = n; rows.push(leafRow(n, 2)); }
+    for (const { pk, mods } of packsVis) {
+      const pkey = groupKey(camp.label, pk.label);
+      const pCol = collapsed.has(pkey);
+      rows.push(groupRow('pack', pk.label, pkey, pCol, mods.length));
+      if (pCol) continue;
+      for (const n of mods) { NODE[n.iid] = n; rows.push(leafRow(n, 3)); }
+    }
+  }
+  body.innerHTML = rows.length ? rows.join('')
+    : `<div class="tree-empty">Ничего не подходит под фильтр.<br>Снимите фильтр или измените поиск.</div>`;
+
+  body.querySelectorAll('.row.group').forEach((el) => el.onclick = () => toggleCollapse(el.dataset.key));
+  body.querySelectorAll('.row.leaf').forEach((el) => el.onclick = (e) => onLeafClick(e, el.dataset.iid));
+  body.querySelectorAll('.toggle.click').forEach((el) =>
+    el.onclick = (e) => { e.stopPropagation(); onToggleClick(el); });
+  updateActionButtons();
+}
+
+function groupRow(kind, label, key, isCol, count) {
+  const icon = kind === 'camp' ? '🗂' : '■';
+  const tw = isCol ? '▸' : '▾';
+  const lvl = kind === 'camp' ? 'lvl1' : 'lvl2';
+  return `<div class="row group ${kind} ${lvl}" data-key="${esc(key)}">
+    <div class="name"><span class="tw">${tw}</span><span class="label">${icon} ${esc(label)}</span></div>
+    <div class="cell"></div><div class="cell"></div><div class="cell"></div>
+    <div class="cell"><span class="tag">${count}</span></div></div>`;
+}
+
+function leafRow(n, lvl) {
+  const sel = selected.has(n.iid) ? ' sel' : '';
+  const inGame = `<span class="toggle ro${n.in_game ? ' on' : ''}" title="${n.in_game ? 'подключён в игре' : 'не подключён в игре'}">${n.in_game ? '✓' : ''}</span>`;
+  const inProf = n.mid
+    ? `<span class="toggle click${n.in_profile ? ' on' : ''}" data-mid="${esc(n.mid)}" data-on="${n.in_profile ? 1 : 0}" title="нажмите, чтобы включить/выключить в сборке">${n.in_profile ? '✓' : ''}</span>`
+    : '';
+  return `<div class="row leaf lvl${lvl}${sel}" data-iid="${esc(n.iid)}">
+    <div class="name"><span class="tw">·</span><span class="label">${esc(n.label)}</span></div>
+    <div class="cell">${esc(colValue(n) || '')}</div>
+    <div class="cell">${inGame}</div>
+    <div class="cell">${inProf}</div>
+    <div class="cell"><span class="badge b-${n.status_class}">${esc(n.status)}</span></div></div>`;
+}
+
+function toggleCollapse(key) { collapsed.has(key) ? collapsed.delete(key) : collapsed.add(key); renderTree(); }
+function collapseAll() {
+  (TREE.camps || []).forEach((c) => {
+    collapsed.add(groupKey(c.label, null));
+    c.packs.forEach((p) => collapsed.add(groupKey(c.label, p.label)));
+  });
+  renderTree();
+}
+
+// ───────── выбор ─────────
+function onLeafClick(e, iid) {
+  if (!iid) return;
+  if (e.ctrlKey || e.metaKey) {
+    selected.has(iid) ? selected.delete(iid) : selected.add(iid);
+  } else {
+    const only = selected.size === 1 && selected.has(iid);
+    selected.clear();
+    if (!only) selected.add(iid);
+  }
+  renderTree();
+}
+function selectedPidx() {
+  return [...selected].filter((i) => /^p\d+$/.test(i)).map((i) => parseInt(i.slice(1)));
+}
+function updateActionButtons() {
+  const pidx = selectedPidx();
+  const mergeable = [...selected].some((i) => NODE[i] && NODE[i].mergeable);
+  $('installBtn').disabled = busy || !pidx.length;
+  $('removeBtn').disabled = busy || !pidx.length;
+  $('mergeBtn').disabled = busy || !mergeable;
+  $('addBtn').disabled = busy;
+}
+
+// ───────── оптимистичный toggle «в сборке» (без лага) ─────────
+function onToggleClick(el) {
+  const mid = el.dataset.mid;
+  const on = el.dataset.on !== '1';
+  // мгновенно меняем вид
+  el.classList.toggle('on', on);
+  el.textContent = on ? '✓' : '';
+  el.dataset.on = on ? '1' : '0';
+  // обновляем модель в памяти (все узлы с этим mid)
+  for (const k in NODE) if (NODE[k].mid === mid) NODE[k].in_profile = on;
+  (TREE.camps || []).forEach((c) => {
+    [...c.mods, ...c.packs.flatMap((p) => p.mods)].forEach((n) => { if (n.mid === mid) n.in_profile = on; });
+  });
+  api().toggle_enabled(mid, on);          // в фоне, без ожидания
+  // отложенная сверка (для строк e:<mid> — модов сборки не на диске)
+  clearTimeout(reconcileTimer);
+  reconcileTimer = setTimeout(refreshTree, 600);
+}
+
+async function toggleEnabledRow() {}  // (оставлено для совместимости)
+
+// ───────── действия установки/удаления ─────────
+function installSelected() {
+  const pidx = selectedPidx();
+  if (!pidx.length) { toast('Выберите строку сборки (📋) в списке', 'err'); return; }
+  confirmBox('Установить выбранное?',
+    `Будет скачано и установлено: <b>${pidx.length}</b> позиц.<br>Это может занять время и трафик. Продолжить?`,
+    () => api().install(pidx).then(handleOpStart));
+}
+function installWholeSet() {
+  // запускаем резолв зависимостей; подтверждение покажется по событию deps_confirm
+  api().install_set_with_deps().then(handleOpStart);
+}
+function onDepsConfirm(d) {
+  const order = d.order || [], deps = new Set(d.added_deps || []);
+  const lines = order.map((mid) => '• ' + mid + (deps.has(mid) ? '   (зависимость)' : ''));
+  if ((d.count || 0) > order.length) lines.push(`… и ещё ${d.count - order.length}`);
+  let head = `Будет установлено модов из каталога: <b>${d.count || 0}</b>`;
+  if (d.bulk) head += ` + паков/лагерей: <b>${d.bulk}</b>`;
+  if (deps.size) head += ` <span style="color:var(--muted)">(из них зависимостей: ${deps.size})</span>`;
+  let body = head + '.';
+  if (lines.length) body += `<div style="margin-top:8px;font-family:var(--mono);font-size:12px;max-height:190px;overflow:auto;color:var(--muted)">${lines.map(esc).join('<br>')}</div>`;
+  if (d.missing_deps && d.missing_deps.length)
+    body += `<div class="note">⚠ Не найдены в каталоге: ${esc(d.missing_deps.join(', '))}</div>`;
+  if (d.conflicts && d.conflicts.length)
+    body += `<div class="note">⚠ Конфликты (показаны, не снимаются): ${d.conflicts.map((p) => esc(p[0] + '⟷' + p[1])).join('; ')}</div>`;
+  if (!order.length && !d.bulk) body += '<div class="note">Нечего устанавливать.</div>';
+  confirmBox('Установить всю сборку', body,
+    () => api().confirm_install_deps(),
+    () => api().cancel_deps());
+}
+function removeSelected() {
+  const pidx = selectedPidx();
+  if (!pidx.length) return;
+  confirmBox('Убрать из сборки?',
+    `Будет убрано из сборки: <b>${pidx.length}</b> позиц.<br>
+     <span style="color:var(--muted)">Файлы на диске не удаляются — снимается только пометка «в сборке».</span>`,
+    () => api().remove_pidx(pidx).then(() => { selected.clear(); refreshTree(); }));
+}
+function handleOpStart(r) { if (!r || !r.ok) toast((r && r.error) || 'Не удалось запустить', 'err'); }
+
+// ───────── совместимость ─────────
+async function checkCompat() {
+  appendLog('— Проверка совместимости —', 'acc');
+  const r = await api().check_compat();
+  const probs = r.problems || [], deps = r.missing_deps || [];
+  if (!probs.length && !deps.length) { toast('Проблем не найдено ✓', 'ok'); appendLog('Совместимость: проблем нет.', 'ok'); return; }
+  probs.forEach((p) => appendLog('• ' + (p.message || p), 'warn'));
+  deps.forEach((d) => appendLog('• не хватает зависимости: ' + (d.name || d), 'warn'));
+  toast(`Найдено замечаний: ${probs.length + deps.length}`, 'err');
+}
+
+// ───────── ModCFG ─────────
+function modcfgWrite() {
+  confirmBox('Записать сборку в игру?',
+    `В игре будут подключены ровно те моды, что отмечены «в сборке».<br>
+     Текущее подключение в игре будет перезаписано. Продолжить?`,
+    () => api().profile_to_modcfg().then((r) => {
+      if (!r.ok) { toast(r.error, 'err'); return; }
+      let m = `Подключено в игре: ${r.count}`;
+      if (r.missing && r.missing.length) m += ` (но ${r.missing.length} нет на диске)`;
+      toast(m, r.missing && r.missing.length ? 'err' : 'ok');
+      refreshTree();
+    }));
+}
+
+// ───────── запуск/папка ─────────
+async function launchGame() { const r = await api().launch_game(); r.ok ? toast('Запускаю игру…', 'ok') : toast(r.error, 'err'); }
+async function browseGame() {
+  const p = await api().browse_game();
+  if (p) { STATE.game_path = p; applyState(); refreshTree(); toast('Папка игры выбрана', 'ok'); }
+}
+
+// ───────── профили/настройки ─────────
+async function switchProfile(name) { STATE = await api().switch_profile(name); applyState(); selected.clear(); refreshTree(); }
+function openProfiles() {
+  $('delProfName').textContent = STATE.current_profile;
+  $('delProfNote').style.display = STATE.current_profile === 'default' ? 'none' : 'block';
+  $('newProfName').value = '';
+  show('profileOverlay');
+}
+async function createProfile() {
+  const name = $('newProfName').value.trim(); if (!name) return;
+  const r = await api().new_profile(name);
+  if (!r.ok) { toast(r.error, 'err'); return; }
+  STATE = r.state; applyState(); selected.clear(); refreshTree(); hide('profileOverlay'); toast('Сборка создана', 'ok');
+}
+async function deleteProfile() {
+  const r = await api().delete_profile(STATE.current_profile);
+  if (!r.ok) { toast(r.error, 'err'); return; }
+  STATE = r.state; applyState(); selected.clear(); refreshTree(); hide('profileOverlay'); toast('Сборка удалена', 'ok');
+}
+function openSettings() {
+  $('setGamePath').value = STATE.game_path || '';
+  $('setBase').value = STATE.base || '';
+  $('setRepo').value = STATE.repo || '';
+  $('setToken').value = '';
+  show('settingsOverlay');
+}
+async function saveSettings() {
+  const token = $('setToken').value;
+  STATE = await api().save_settings($('setGamePath').value, $('setRepo').value,
+    token === '' ? null : token, $('setBase').value);
+  applyState(); refreshTree(); hide('settingsOverlay'); toast('Настройки сохранены', 'ok');
+}
+async function setViewMode(mode) {
+  document.querySelectorAll('#viewSeg button').forEach((b) => b.classList.toggle('on', b.dataset.mode === mode));
+  STATE.tree_mode = mode; updateColHeader();
+  await api().set_tree_mode(mode);
+  refreshTree();
+}
+
+// ───────── добавление мода ─────────
+async function openAdd() {
+  setAddMode('src');
+  $('addStatus').textContent = 'Загрузка списка паков…';
+  $('addCamp').innerHTML = '<option value="">— выберите лагерь —</option>';
+  $('addPack').innerHTML = ''; $('addPack').disabled = true;
+  $('addMod').innerHTML = ''; $('addMod').disabled = true;
+  $('addUrl').value = '';
+  show('addOverlay');
+  const r = await api().get_camp_packs();
+  if (!r.ok) { $('addStatus').textContent = 'Ошибка: ' + r.error; return; }
+  CAMPPACKS = r.camps || {};
+  Object.keys(CAMPPACKS).sort().forEach((c) => {
+    const o = document.createElement('option'); o.value = o.textContent = c; $('addCamp').appendChild(o);
+  });
+  $('addStatus').textContent = `Лагерей: ${Object.keys(CAMPPACKS).length}`;
+}
+function setAddMode(mode) {
+  document.querySelectorAll('#addModeSeg button').forEach((b) => b.classList.toggle('on', b.dataset.amode === mode));
+  $('addSrc').style.display = mode === 'src' ? 'block' : 'none';
+  $('addFork').style.display = mode === 'fork' ? 'block' : 'none';
+  $('addOverlay').dataset.mode = mode;
+}
+function onAddCamp() {
+  const camp = $('addCamp').value;
+  const packs = CAMPPACKS[camp] || [];
+  packsByUnit = {};
+  $('addPack').innerHTML = '<option value="">★ весь лагерь</option>';
+  packs.forEach((p) => {
+    packsByUnit[p.unit] = p;
+    const o = document.createElement('option');
+    o.value = p.unit; o.textContent = `${p.name}  [${p.unit}]`;
+    $('addPack').appendChild(o);
+  });
+  $('addPack').disabled = !camp;
+  $('addMod').innerHTML = ''; $('addMod').disabled = true;
+}
+async function onAddPack() {
+  $('addMod').innerHTML = ''; $('addMod').disabled = true;
+  const unit = $('addPack').value;
+  if (!unit) return;                          // весь лагерь
+  const p = packsByUnit[unit]; if (!p) return;
+  $('addStatus').textContent = 'Загрузка модов пака…';
+  const r = await api().get_unit_mods(p.camp, p.unit);
+  if (!r.ok) { $('addStatus').textContent = 'Ошибка: ' + r.error; return; }
+  $('addMod').innerHTML = '<option value="">★ весь пак</option>';
+  (r.mods || []).forEach((m) => { const o = document.createElement('option'); o.value = o.textContent = m; $('addMod').appendChild(o); });
+  $('addMod').disabled = false;
+  $('addStatus').textContent = `Модов в паке: ${(r.mods || []).length}`;
+}
+async function doAdd() {
+  const mode = $('addOverlay').dataset.mode || 'src';
+  let payload;
+  if (mode === 'fork') {
+    const url = $('addUrl').value.trim();
+    if (!url) { toast('Укажите ссылку на дескриптор', 'err'); return; }
+    payload = { mode: 'fork', url };
+  } else {
+    const camp = $('addCamp').value;
+    if (!camp) { toast('Выберите лагерь', 'err'); return; }
+    const unit = $('addPack').value;
+    const pack = unit ? packsByUnit[unit] : null;
+    payload = { mode: 'src', camp, pack: pack ? { camp: pack.camp, unit: pack.unit, name: pack.name } : null, mod: $('addMod').value };
+  }
+  const r = await api().add_mod(payload);
+  if (!r.ok) { toast(r.error, 'err'); return; }
+  hide('addOverlay'); refreshTree(); toast('Добавлено в сборку', 'ok');
+}
+
+// ───────── обновление с сохранением правок ─────────
+function startMerge() {
+  const iids = [...selected].filter((i) => NODE[i] && NODE[i].mergeable);
+  if (!iids.length) {
+    toast('Выберите мод из сборки (добавленный из каталога/по ссылке) или из «Установлено в игре»', 'err');
+    return;
+  }
+  api().start_merge(iids).then((r) => { if (!r.ok) toast(r.error, 'err'); });
+}
+function onMergePlan(plan) {
+  const s = plan.summary || {};
+  $('mergeHead').innerHTML =
+    `<b>${esc(plan.id || '?')}</b> · версия ${esc(plan.version_old || '—')} → ${esc(plan.version_new || '—')}<br>
+     авто-слить: ${s.automerge || 0} · обновить: ${s.update || 0} · добавить: ${s.add || 0} ·
+     удалить: ${s.deleted_clean || 0} · ваших правок сохранится: ${s.player_only || 0} ·
+     <b style="color:var(--warn)">конфликтов: ${s.conflicts || 0}</b>`;
+  // группы (кроме «без изменений»)
+  const groups = plan.groups || {}; const labels = plan.labels || {};
+  const order = ['conflict_text', 'conflict_binary', 'conflict_deleted', 'automerge', 'update', 'add', 'deleted_clean', 'player_only'];
+  let html = '';
+  for (const st of order) {
+    const files = groups[st]; if (!files || !files.length) continue;
+    html += `<div class="mg-group"><div class="mg-title">${esc(labels[st] || st)} (${files.length})</div>
+      <div class="mg-files">${files.map(esc).join('<br>')}</div></div>`;
+  }
+  $('mergeGroups').innerHTML = html;
+  // конфликты с выбором решения
+  const conflicts = plan.conflicts || [];
+  $('mergeConflicts').innerHTML = conflicts.length
+    ? `<div class="mg-title" style="margin-top:10px">Как поступить с конфликтами (${conflicts.length}):</div>` +
+      conflicts.map((c, i) => `
+        <div class="mg-conflict">
+          <div class="path">${esc(c.display)}</div>
+          <select data-relpath="${esc(c.relpath)}" id="cf${i}">
+            ${c.options.map((o) => `<option value="${esc(o.code)}" ${o.code === c.default ? 'selected' : ''}>${esc(o.label)}</option>`).join('')}
+          </select>
+        </div>`).join('')
+    : '';
+  show('mergeOverlay');
+}
+function doMergeApply() {
+  const decisions = {};
+  $('mergeConflicts').querySelectorAll('select').forEach((s) => { decisions[s.dataset.relpath] = s.value; });
+  hide('mergeOverlay');
+  api().apply_merge(decisions);
+}
+
+// ───────── прогресс/лог ─────────
+function onOpBegin() {
+  busy = true;
+  $('progressCard').classList.remove('hidden');
+  $('progBar').classList.add('pulse');
+  $('progText').textContent = 'Подготовка…';
+  $('progRight').textContent = '';
+  ['addBtn', 'installBtn', 'installSetBtn', 'mergeBtn', 'compatBtn', 'removeBtn', 'launchBtn'].forEach((id) => $(id).disabled = true);
+}
+function onOpEnd(d) {
+  busy = false;
+  $('progBar').classList.remove('pulse');
+  $('progBar').querySelector('i').style.width = '100%';
+  $('progText').textContent = (d && d.status) || 'Готово';
+  setTimeout(() => $('progressCard').classList.add('hidden'), 1600);
+  ['launchBtn'].forEach((id) => $(id).disabled = false);
+  updateActionButtons();
+  toast((d && d.status) || 'Готово', (d && d.status === 'Ошибка') ? 'err' : 'ok');
+}
+function onProgress(d) {
+  const bar = $('progBar');
+  if (d.mode === 'parts') {
+    bar.classList.remove('pulse');
+    bar.querySelector('i').style.width = (d.pct || 0) + '%';
+    $('progText').textContent = `${d.ctx || 'Установка'} · часть ${d.parts || ''}`;
+    $('progRight').textContent = d.gb && d.gb !== '0.00' ? `↓ ${d.gb} ГБ` : '';
+  } else if (d.mode === 'pct') {
+    bar.classList.remove('pulse');
+    bar.querySelector('i').style.width = (d.pct || 0) + '%';
+    $('progRight').textContent = (d.pct || 0) + '%';
+  }
+}
+function appendLog(msg, cls) {
+  const box = $('logBox');
+  const line = document.createElement('div');
+  let klass = cls;
+  if (!klass) {
+    const s = String(msg);
+    if (/ОШИБКА|error/i.test(s)) klass = 'err';
+    else if (/^===|^---|готово/i.test(s)) klass = 'acc';
+    else if (/✓/.test(s)) klass = 'ok';
+  }
+  if (klass) line.className = 'l-' + klass;
+  line.textContent = msg;
+  box.appendChild(line);
+  box.scrollTop = box.scrollHeight;
+}
+
+// ───────── утилиты ─────────
+function show(id) { $(id).classList.remove('hidden'); }
+function hide(id) { $(id).classList.add('hidden'); }
+function confirmBox(title, html, onOk, onCancel) {
+  $('confirmTitle').textContent = title;
+  $('confirmBody').innerHTML = html;
+  show('confirmOverlay');
+  $('confirmOk').onclick = () => { hide('confirmOverlay'); onOk(); };
+  $('confirmCancel').onclick = () => { hide('confirmOverlay'); if (onCancel) onCancel(); };
+}
+function toast(msg, kind) {
+  const t = document.createElement('div');
+  t.className = 'toast' + (kind ? ' ' + kind : '');
+  t.textContent = msg;
+  $('toastWrap').appendChild(t);
+  setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.remove(), 300); }, 2600);
+}
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}

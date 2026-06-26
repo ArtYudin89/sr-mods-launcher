@@ -1,7 +1,12 @@
 # PyInstaller
 /build/
 /dist/
+/webui/build/
+/webui/dist/
+/webui/_*.log
+# spec нового UI — коммитим (рецепт сборки), остальные .spec игнорируем
 *.spec
+!/webui/SRModsLauncher.spec
 
 # Артефакт релиза (пересобирается, кладётся в GitHub Release)
 /SRModsLauncher-source.zip
