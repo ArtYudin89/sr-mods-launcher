@@ -1086,6 +1086,93 @@ class Api:
             self.log(f'ОШИБКА применения: {e}')
         self._merge_next()
 
+    # ───────── индексация дисковых модов ─────────
+    def reindex(self):
+        if self.busy:
+            return {'ok': False, 'error': 'Уже идёт операция.'}
+        err = self._require_game()
+        if err:
+            return {'ok': False, 'error': err}
+        self.busy = True
+        self._cancel.clear()
+        self._emit('op_begin', {'name': 'Индексация'})
+        threading.Thread(target=self._reindex_worker, daemon=True).start()
+        return {'ok': True}
+
+    def _reindex_worker(self):
+        mods_dir = self._mods_dir()
+        try:
+            cat = self._catalog_cache
+            if not cat:
+                self.log('Загрузка каталога для классификации…')
+                try:
+                    cat = core.load_catalog('descriptors/catalog.json', self._repo(),
+                                            self._token()) or {}
+                    self._catalog_cache = cat
+                except core.OperationCancelled:
+                    raise
+                except Exception as e:
+                    self.log(f'[!] каталог не загружен ({e}) — моды будут «не в каталоге»')
+                    cat = {}
+            self.log('Индексирую моды на диске…')
+            idx = core.index_disk_mods(mods_dir, cat, prev_index=self._disk_index,
+                                       log=self.log, progress_cb=self._progress,
+                                       should_cancel=self.should_cancel)
+            core.save_disk_index(mods_dir, idx)
+            self._disk_index = idx
+            self.config['skip_index_offer'] = True
+            self._save_config()
+            base = idx.get('base') or {}
+            self.log(f'Индексация готова: всего {idx["count"]}, знакомых каталогу '
+                     f'{idx["known"]}, не в каталоге {idx["unknown"]}. '
+                     f'База: {base.get("camp", "?")}.')
+            self.busy = False
+            self._emit('op_end', {'status': 'Индексация готова'})
+            self._emit('tree_dirty')
+        except core.OperationCancelled:
+            self.log('Индексация отменена.')
+            self.busy = False
+            self._emit('op_end', {'status': 'Отменено'})
+        except Exception as e:
+            self.log(f'ОШИБКА индексации: {e}')
+            self.busy = False
+            self._emit('op_end', {'status': 'Ошибка'})
+
+    # ───────── очистка папки Mods ─────────
+    def mods_info(self):
+        err = self._require_game()
+        if err:
+            return {'ok': False, 'error': err}
+        d = self._mods_dir()
+        n = sum(1 for p in d.rglob('*') if p.is_file()) if d.exists() else 0
+        return {'ok': True, 'count': n, 'path': str(d)}
+
+    def clear_mods(self):
+        if self.busy:
+            return {'ok': False, 'error': 'Уже идёт операция.'}
+        err = self._require_game()
+        if err:
+            return {'ok': False, 'error': err}
+        import shutil
+        d = self._mods_dir()
+        if not d.exists():
+            return {'ok': True, 'removed': 0}
+        n = sum(1 for p in d.rglob('*') if p.is_file())
+        for it in d.iterdir():
+            if it.is_dir():
+                shutil.rmtree(it, ignore_errors=True)
+            else:
+                try:
+                    it.unlink()
+                except Exception:
+                    pass
+        for m in self.profile.get('mods', []):
+            m['last_downloaded'] = None
+        self._save_profile()
+        self.log(f'Очищено: {n} файлов из {d}')
+        self._emit('tree_dirty')
+        return {'ok': True, 'removed': n}
+
     # ───────── совместимость (показ) ─────────
     def check_compat(self):
         tok = self._token()

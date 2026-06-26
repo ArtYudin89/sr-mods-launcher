@@ -95,6 +95,8 @@ function wireUI() {
   $('searchInp').oninput = renderTree;
   $('expandBtn').onclick = () => { collapsed.clear(); renderTree(); };
   $('collapseBtn').onclick = collapseAll;
+  $('indexBtn').onclick = doReindex;
+  $('clearModsBtn').onclick = doClearMods;
   $('refreshBtn').onclick = () => { api().get_state().then((s) => { STATE = s; applyState(); }); refreshTree(); };
 
   // фильтр
@@ -374,6 +376,23 @@ function removeSelected() {
 }
 function handleOpStart(r) { if (!r || !r.ok) toast((r && r.error) || 'Не удалось запустить', 'err'); }
 
+function doReindex() { api().reindex().then(handleOpStart); }
+
+async function doClearMods() {
+  const info = await api().mods_info();
+  if (!info.ok) { toast(info.error, 'err'); return; }
+  if (!info.count) { toast('Папка Mods уже пуста', 'ok'); return; }
+  confirmBox('Очистить папку Mods?',
+    `Будут удалены <b>ВСЕ</b> файлы из папки модов игры:<br>
+     <span style="font-family:var(--mono);font-size:12px;color:var(--muted)">${esc(info.path)}</span><br>
+     Файлов: <b>${info.count}</b>.<br><br>
+     <span style="color:var(--danger)">Действие необратимо.</span> Сама игра не затрагивается — только моды.`,
+    () => api().clear_mods().then((r) => {
+      if (r.ok) { toast(`Удалено файлов: ${r.removed}`, 'ok'); refreshTree(); }
+      else toast(r.error, 'err');
+    }));
+}
+
 // ───────── совместимость ─────────
 async function checkCompat() {
   appendLog('— Проверка совместимости —', 'acc');
@@ -568,7 +587,7 @@ function onOpBegin() {
   $('progBar').classList.add('pulse');
   $('progText').textContent = 'Подготовка…';
   $('progRight').textContent = '';
-  ['addBtn', 'installBtn', 'installSetBtn', 'mergeBtn', 'compatBtn', 'removeBtn', 'launchBtn'].forEach((id) => $(id).disabled = true);
+  ['addBtn', 'installBtn', 'installSetBtn', 'mergeBtn', 'compatBtn', 'removeBtn', 'launchBtn', 'indexBtn', 'clearModsBtn'].forEach((id) => $(id).disabled = true);
 }
 function onOpEnd(d) {
   busy = false;
@@ -576,7 +595,7 @@ function onOpEnd(d) {
   $('progBar').querySelector('i').style.width = '100%';
   $('progText').textContent = (d && d.status) || 'Готово';
   setTimeout(() => $('progressCard').classList.add('hidden'), 1600);
-  ['launchBtn'].forEach((id) => $(id).disabled = false);
+  ['launchBtn', 'indexBtn', 'clearModsBtn'].forEach((id) => $(id).disabled = false);
   updateActionButtons();
   toast((d && d.status) || 'Готово', (d && d.status === 'Ошибка') ? 'err' : 'ok');
 }
