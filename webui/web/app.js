@@ -309,10 +309,13 @@ function selectedPidx() {
 function updateActionButtons() {
   const pidx = selectedPidx();
   const mergeable = [...selected].some((i) => NODE[i] && NODE[i].mergeable);
+  const hasSet = !!(TREE && TREE.queue && TREE.queue.count);
+  $('addBtn').disabled = busy;
   $('installBtn').disabled = busy || !pidx.length;
   $('removeBtn').disabled = busy || !pidx.length;
   $('mergeBtn').disabled = busy || !mergeable;
-  $('addBtn').disabled = busy;
+  $('installSetBtn').disabled = busy || !hasSet;
+  $('compatBtn').disabled = busy;
 }
 
 // ───────── оптимистичный toggle «в сборке» (без лага) ─────────
