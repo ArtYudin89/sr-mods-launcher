@@ -178,10 +178,24 @@ class Api:
         return None
 
     def _mods_dir(self):
-        root = self._game_root() or ROOT
+        # Папку Mods создаём ТОЛЬКО когда задан реальный путь игры — иначе вернём
+        # путь-заглушку рядом с exe, НО НЕ создаём её (чтобы не плодить пустую Mods
+        # около лаунчера до выбора игры). Читающие вызовы переживают отсутствие папки.
+        root = self._game_root()
+        if root is None:
+            return ROOT / 'Mods'
         d = root / 'Mods'
-        d.mkdir(parents=True, exist_ok=True)
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
         return d
+
+    def _require_game(self):
+        """None, если путь игры задан; иначе текст ошибки для UI."""
+        if self._game_root() is None:
+            return 'Сначала укажите папку игры (где лежит Rangers.exe).'
+        return None
 
     def _autofind_game(self):
         for drive in ('C:', 'D:', 'E:', 'F:'):
@@ -506,6 +520,9 @@ class Api:
         return {'ok': True, 'count': len(mods)}
 
     def profile_to_modcfg(self):
+        err = self._require_game()
+        if err:
+            return {'ok': False, 'error': err}
         en = list(self.profile.get('enabled', []))
         disk = set(self._disk_mods())
         missing = [m for m in en if m not in disk]
@@ -581,6 +598,9 @@ class Api:
     def install(self, indices):
         if self.busy:
             return {'ok': False, 'error': 'Уже идёт операция.'}
+        err = self._require_game()
+        if err:
+            return {'ok': False, 'error': err}
         indices = sorted(set(int(i) for i in indices))
         if not indices:
             return {'ok': False, 'error': 'Ничего не выбрано.'}
@@ -712,6 +732,9 @@ class Api:
         каталожные моды (desc/unit-мод) через resolve_set (подтянуть Dependence)."""
         if self.busy:
             return {'ok': False, 'error': 'Уже идёт операция.'}
+        err = self._require_game()
+        if err:
+            return {'ok': False, 'error': err}
         if not self.profile.get('mods'):
             return {'ok': False, 'error': 'В сборке пока нет позиций. Нажмите «➕ Добавить мод».'}
         self.busy = True
@@ -896,6 +919,9 @@ class Api:
     def start_merge(self, iids):
         if self.busy:
             return {'ok': False, 'error': 'Уже идёт операция.'}
+        err = self._require_game()
+        if err:
+            return {'ok': False, 'error': err}
         targets, skipped = [], 0
         for iid in iids:
             if iid.startswith('d:'):
