@@ -961,6 +961,20 @@ class Launcher:
         self._refresh_list()
         self.log(f'Добавлен мод: {mod["name"]}')
 
+    @staticmethod
+    def _unit_install_rank(p, packs):
+        """Порядок установки при полной установке лагеря:
+        0 — база (Rangers.exe); 1 — паки/моды; 2 — фиксы паков; 3 — фиксы базы.
+        Фикс базы накатывается ПОСЛЕ всего (поверх готовой сборки)."""
+        tier = p.get('tier')
+        if tier == 'base':
+            return 0
+        if tier == 'fix':
+            name_tier = {q['name']: q.get('tier') for q in packs.values()}
+            parent = p.get('fix_parent')
+            return 3 if (parent and name_tier.get(parent) == 'base') else 2
+        return 1                              # mod / assets — обычные паки
+
     def _get_packs(self, tok):
         """packs.json (тиры юнитов) с кэшем в рамках сессии."""
         if getattr(self, '_packs_cache', None) is None:
@@ -1305,8 +1319,10 @@ class Launcher:
                 try:
                     if m.get('type') == 'camp':
                         packs = self._get_packs(tok)
-                        units = sorted([p for p in packs.values() if p['camp'] == m['camp']],
-                                       key=lambda p: p.get('load_order', 999))
+                        units = sorted(
+                            [p for p in packs.values() if p['camp'] == m['camp']],
+                            key=lambda p: (self._unit_install_rank(p, packs),
+                                           p.get('load_order', 999)))
                         if not units:
                             self.log(f'  нет паков для лагеря {m["camp"]}')
                         ntot = len(units)
