@@ -14,14 +14,30 @@ import json
 import os
 import re
 import shutil
+import threading
 import time
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from difflib import SequenceMatcher
 from pathlib import Path
 
 import requests
 
 API = 'https://api.github.com'
+
+# Сколько частей качать одновременно. На канале с большой задержкой/DPI один поток
+# не насыщает полосу (предел = окно/RTT) — параллель даёт основной выигрыш (как у
+# браузера). Умеренно (по умолч. 6), чтобы не словить rate-limit HF / лишний DPI.
+PARALLEL_DOWNLOADS = int(os.environ.get('SRML_PARALLEL', '6'))
+
+# Общая HTTP-сессия с пулом соединений: переиспользование TCP+TLS между частями
+# (без неё requests.get на каждую часть = новый handshake). Пул потокобезопасен.
+_SESSION = requests.Session()
+_adapter = requests.adapters.HTTPAdapter(
+    pool_connections=PARALLEL_DOWNLOADS * 2, pool_maxsize=PARALLEL_DOWNLOADS * 2,
+    max_retries=0)
+_SESSION.mount('https://', _adapter)
+_SESSION.mount('http://', _adapter)
 
 # Детальность лога: True — показывать построчно загрузку каждой части; False —
 # только итоги по модам. GUI переключает перед операцией.
@@ -111,10 +127,11 @@ def _zip_asset(release):
     return None
 
 
-def _stream_download(url, headers, dest, progress_cb=None, should_cancel=None):
-    """Потоковое скачивание с ретраями и кооперативной отменой."""
+def _stream_download(url, headers, dest, progress_cb=None, should_cancel=None, byte_cb=None):
+    """Потоковое скачивание с ретраями и кооперативной отменой.
+    byte_cb(delta) — инкремент скачанных байт (для агрегатного счётчика при параллели)."""
     def do():
-        with requests.get(url, headers=headers, stream=True, timeout=(10, 120)) as r:
+        with _SESSION.get(url, headers=headers, stream=True, timeout=(10, 120)) as r:
             r.raise_for_status()
             total = int(r.headers.get('content-length', 0))
             done = 0
@@ -123,39 +140,172 @@ def _stream_download(url, headers, dest, progress_cb=None, should_cancel=None):
                     _check_cancel(should_cancel)
                     f.write(c)
                     done += len(c)
+                    if byte_cb:
+                        byte_cb(len(c))
                     if progress_cb and total:
                         progress_cb(done, total)
         return dest
     return _with_retries(do, should_cancel=should_cancel)
 
 
-def download_asset(asset, token, dest, progress_cb=None, should_cancel=None):
+def download_asset(asset, token, dest, progress_cb=None, should_cancel=None, byte_cb=None):
     """Скачать ассет релиза по api-url (Accept: octet-stream). Работает для приватных."""
     return _stream_download(asset['url'], _headers(token, 'application/octet-stream'),
-                            dest, progress_cb, should_cancel)
+                            dest, progress_cb, should_cancel, byte_cb)
 
 
-def download_url(url, token, dest, progress_cb=None, should_cancel=None):
+def download_url(url, token, dest, progress_cb=None, should_cancel=None, byte_cb=None):
     """Скачать произвольный URL (для generic zip — browser_download_url)."""
-    return _stream_download(url, _headers(token, '*/*'), dest, progress_cb, should_cancel)
+    return _stream_download(url, _headers(token, '*/*'), dest, progress_cb, should_cancel, byte_cb)
+
+
+def _parallel_fetch_extract(need, mods_dir, tmp, resolver, log,
+                            should_cancel=None, part_cb=None,
+                            workers=None, byte_cb=None, sha_sink=None):
+    """Скачать нужные части ПАРАЛЛЕЛЬНО и извлечь файлы во все целевые пути.
+
+    need: {chunk_name: {sha256: [(relpath, kind), ...]}}.
+    resolver(chunk, cpath, should_cancel, byte_cb): скачать часть chunk в файл cpath.
+    Параллелится только СКАЧИВАНИЕ (узкое место — сеть); распаковка/запись идут в
+    главном потоке по мере готовности частей → на диске одновременно не больше
+    ~workers скачанных частей. Кооперативная отмена и побайтовые ретраи сохранены.
+    """
+    mods_dir = Path(mods_dir); tmp = Path(tmp)
+    total = len(need)
+    if not total:
+        return
+    workers = max(1, min(workers or PARALLEL_DOWNLOADS, total))
+
+    def fetch(chunk):
+        _check_cancel(should_cancel)
+        cpath = tmp / f'_chunk_{chunk}'
+        resolver(chunk, cpath, should_cancel, byte_cb)   # ретраи внутри _stream_download
+        return chunk, cpath
+
+    done = 0
+    ex = ThreadPoolExecutor(max_workers=workers)
+    futs = {ex.submit(fetch, ch): ch for ch in need}
+    try:
+        for fut in as_completed(futs):
+            _check_cancel(should_cancel)
+            chunk, cpath = fut.result()
+            shamap = need[chunk]
+            with zipfile.ZipFile(cpath) as z:
+                for sh, targets in shamap.items():
+                    data = z.read(sh)
+                    for relpath, _kind in targets:
+                        where, rel = install_route(relpath)
+                        if where is None:            # мусор инсталлятора — пропустить
+                            continue
+                        base = mods_dir if where == 'mods' else mods_dir.parent
+                        target = base / rel
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_bytes(data)
+                        if sha_sink and where == 'mods':   # отпечаток для индекса
+                            sha_sink(rel, target, data)
+            cpath.unlink(missing_ok=True)
+            done += 1
+            if part_cb:
+                part_cb(done, total)
+            if LOG_VERBOSE:
+                log(f'Часть {done}/{total} готова ({len(shamap)} файлов)')
+    except BaseException:
+        for f in futs:                               # отменить ещё не начатые
+            f.cancel()
+        raise
+    finally:
+        ex.shutdown(wait=True)                        # дождаться/завершить потоки
+        for ch in need:                               # подчистить временные части
+            (tmp / f'_chunk_{ch}').unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
 # Пути установки
 # ---------------------------------------------------------------------------
 
+# Куда раскладывать файл при установке. Источники (Inno-распаковка агрегатором) дают
+# пути трёх видов: 1) контент Mods (`.../Mods/<Кат>/<Мод>/...`); 2) корневые файлы игры
+# (`{app}/matrix/...`, `Rangers.exe`, `CFG/`, `DATA/` — у базы/фиксов `{app}`=корень игры);
+# 3) мусор инсталлятора (readme, .iss, .exe-установщик, Inno-плейсхолдеры `{userdocs}`).
+# А ещё бывают staging-обёртки `<X>_unpacked/...` (вложенный инсталлятор) — их срезаем.
+# Имена корня игры — небольшой фиксированный набор; всё прочее в папке мода — это мод.
+ROOT_DIRS = {'cfg', 'data', 'matrix', 'soundtrack', 'help', 'man', 'build', 'dist'}
+ROOT_FILES = {
+    'rangers.exe', 'cassandra.exe', 'manualrus.exe', 'matrixgame.dll',
+    'build version.txt', 'cachedata.txt', 'cfg.txt', 'cfg.dat', 'lang.txt',
+    'main.txt', 'changelog_rus.txt', 'generatemergedcfg.bat',
+    'install.txt', 'install_russian.txt', 'readme_ru_ru.txt',
+}
+ROOT_EXTS = {'.dll'}        # libogg-0.dll, zlib.dll, steam_api.dll … — в корень игры
+
+
+def install_route(relpath):
+    """Решить назначение файла: ('mods', rel) — в папку Mods; ('root', rel) — в корень
+    игры; (None, None) — пропустить (мусор инсталлятора). rel — путь относительно
+    выбранного корня. См. комментарий выше про виды путей."""
+    parts = [p for p in relpath.replace('\\', '/').split('/') if p]
+    # 0) staging агрегатора (.temp/.tmp и пр. скрытые сегменты) — не контент мода
+    if any(p.startswith('.') for p in parts):
+        return (None, None)
+    # 1) срезать staging-обёртки '<X>_unpacked/' (вложенные инсталляторы)
+    while parts and parts[0].lower().endswith('_unpacked'):
+        parts = parts[1:]
+    if not parts:
+        return (None, None)
+    # 1b) сам файл-инсталлятор/скрипт инсталлятора (.exe не из набора игры, .iss) —
+    # это не контент мода, где бы ни лежал → пропустить
+    base = parts[-1].lower()
+    ext = os.path.splitext(base)[1]
+    if ext == '.iss' or (ext == '.exe' and base not in ROOT_FILES):
+        return (None, None)
+    # 2) контент Mods/ — всё после последнего сегмента 'Mods'
+    low = [p.lower() for p in parts]
+    if 'mods' in low:
+        i = max(j for j, p in enumerate(low) if p == 'mods')
+        rest = parts[i + 1:]
+        return ('mods', '/'.join(rest)) if rest else (None, None)
+    # 3) срезать ведущий Inno '{app}' (= игровая папка), затем перепроверить Mods/
+    if parts and parts[0] == '{app}':
+        parts = parts[1:]
+        low = [p.lower() for p in parts]
+        if not parts:
+            return (None, None)
+        if 'mods' in low:
+            i = max(j for j, p in enumerate(low) if p == 'mods')
+            rest = parts[i + 1:]
+            return ('mods', '/'.join(rest)) if rest else (None, None)
+    top = parts[0]
+    topl = top.lower()
+    # 4) прочие Inno-плейсхолдеры ({userdocs},{commondocs},…) — не в игру
+    if topl.startswith('{') and topl.endswith('}'):
+        return (None, None)
+    # 5) корневые папки/файлы игры
+    if topl in ROOT_DIRS:
+        return ('root', '/'.join(parts))
+    if len(parts) == 1:                      # одиночный файл на верхнем уровне
+        ext = os.path.splitext(topl)[1]
+        if topl in ROOT_FILES or ext in ROOT_EXTS:
+            return ('root', top)
+        return (None, None)                  # readme/changelog/.iss/.exe-установщик
+    # 6) всё прочее (папка категории/мода) — это мод
+    return ('mods', '/'.join(parts))
+
+
+def install_target(relpath, mods_dir):
+    """Path назначения файла на диске или None (пропустить). mods_dir = <игра>/Mods;
+    корневые файлы кладутся в mods_dir.parent (= папка игры)."""
+    where, rel = install_route(relpath)
+    if where is None:
+        return None
+    base = Path(mods_dir) if where == 'mods' else Path(mods_dir).parent
+    return base / rel
+
+
 def install_relpath(relpath):
-    """Нормализовать путь к виду относительно игровой Mods/.
-    Берём всё ПОСЛЕ последнего сегмента 'Mods'. Если 'Mods' нет, но есть '{app}'
-    (мод ставится в корень игры через Inno) — срезаем '{app}'. Иначе путь как есть."""
-    parts = relpath.replace('\\', '/').split('/')
-    midx = [i for i, p in enumerate(parts) if p.lower() == 'mods']
-    if midx and midx[-1] < len(parts) - 1:
-        return '/'.join(parts[midx[-1] + 1:])
-    aidx = [i for i, p in enumerate(parts) if p.lower() == '{app}']
-    if aidx and aidx[-1] < len(parts) - 1:
-        return '/'.join(parts[aidx[-1] + 1:])
-    return '/'.join(parts)
+    """Путь относительно Mods/ (для модовых файлов — корректный; используется в
+    отображении и 3-way merge, который работает только с модами)."""
+    where, rel = install_route(relpath)
+    return rel if rel is not None else relpath.replace('\\', '/')
 
 
 # ---------------------------------------------------------------------------
@@ -207,7 +357,9 @@ def _extract_zip_to(zip_path, mods_dir):
                     name = name.encode('cp437').decode('cp866')
                 except Exception:
                     pass
-            target = mods_dir / install_relpath(name)
+            target = install_target(name, mods_dir)
+            if target is None:
+                continue
             target.parent.mkdir(parents=True, exist_ok=True)
             with z.open(info) as src, open(target, 'wb') as out:
                 shutil.copyfileobj(src, out)
@@ -256,7 +408,8 @@ def list_unit_mods(repo, camp, unit, token):
 
 
 def reconstruct_unit(repo, camp, unit, mods_dir, token, progress_cb=None,
-                     log=print, tmp_dir=None, dry_run=False, mod=None, should_cancel=None):
+                     log=print, tmp_dir=None, dry_run=False, mod=None, should_cancel=None,
+                     part_cb=None, byte_cb=None, sha_sink=None):
     """Собрать юнит (или один мод mod=mod_key) из HF: код И ассеты берутся из
     content-addressed чанков asset_index по code.manifest + assets.manifest.
     mod=None -> весь юнит; mod='Кат/Имя' или '_base' -> только этот мод.
@@ -299,35 +452,24 @@ def reconstruct_unit(repo, camp, unit, mods_dir, token, progress_cb=None,
     if dry_run:
         return stats
 
-    # Скачать каждую нужную часть и извлечь файлы во все целевые пути.
-    done_parts = 0
-    for chunk, shamap in need.items():
-        _check_cancel(should_cancel)
+    # Скачать нужные части ПАРАЛЛЕЛЬНО и извлечь файлы во все целевые пути.
+    def resolve(chunk, cpath, sc, bcb):
         meta = index['chunks'].get(chunk, {})
-        cpath = tmp / f'_chunk_{chunk}'
-        done_parts += 1
-        if LOG_VERBOSE:
-            log(f'Загрузка части {done_parts}/{len(need)} ({len(shamap)} файлов)…')
         url = meta.get('url')
         if url:                                  # HF public / любой прямой URL
             ctoken = token if meta.get('store') == 'github' else None
-            download_url(url, ctoken, cpath, progress_cb, should_cancel)
+            download_url(url, ctoken, cpath, None, sc, bcb)
         else:                                    # back-compat: GitHub release по тегу
             tag = meta.get('release_tag')
             crel = release_by_tag(repo, tag, token)
             casset = next((a for a in crel.get('assets', []) if a['name'] == chunk), None)
             if not casset:
-                log('[!] часть не найдена (нет ссылки/релиза)')
-                continue
-            download_asset(casset, token, cpath, progress_cb, should_cancel)
-        with zipfile.ZipFile(cpath) as z:
-            for sh, targets in shamap.items():
-                data = z.read(sh)
-                for relpath, _kind in targets:
-                    target = mods_dir / install_relpath(relpath)
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_bytes(data)
-        cpath.unlink(missing_ok=True)
+                raise RuntimeError(f'часть {chunk}: нет ссылки/релиза')
+            download_asset(casset, token, cpath, None, sc, bcb)
+
+    _parallel_fetch_extract(need, mods_dir, tmp, resolve, log,
+                            should_cancel=should_cancel, part_cb=part_cb, byte_cb=byte_cb,
+                            sha_sink=sha_sink)
     log(f'Готово: {stats["code_files"]} код + {stats["asset_files"]} ассетов в {mods_dir}')
     return stats
 
@@ -724,7 +866,7 @@ def load_chunk_index(desc=None, url=None, repo=None, token=None):
 
 def install_descriptor(desc, mods_dir, index, token=None, progress_cb=None,
                        log=print, tmp_dir=None, dry_run=False, snap_dir=None,
-                       should_cancel=None):
+                       should_cancel=None, part_cb=None, byte_cb=None, sha_sink=None):
     """Установить мод из дескриптора: блобы (code+assets) резолвятся по sha через index
     -> чанки -> извлечение -> запись в mods_dir/install_relpath(relpath)."""
     mods_dir = Path(mods_dir)
@@ -752,25 +894,14 @@ def install_descriptor(desc, mods_dir, index, token=None, progress_cb=None,
         + (f', НЕ найдено файлов: {stats["missing"]}' if stats['missing'] else ''))
     if dry_run:
         return stats
-    done_parts = 0
-    for chunk, shamap in need.items():
-        _check_cancel(should_cancel)
+    def resolve(chunk, cpath, sc, bcb):
         meta = index['chunks'].get(chunk, {})
-        cpath = tmp / f'_chunk_{chunk}'
-        done_parts += 1
-        if LOG_VERBOSE:
-            log(f'Загрузка части {done_parts}/{len(need)} ({len(shamap)} файлов)…')
-        url = meta.get('url')
         ctoken = token if meta.get('store') == 'github' else None
-        download_url(url, ctoken, cpath, progress_cb, should_cancel)
-        with zipfile.ZipFile(cpath) as z:
-            for sh, targets in shamap.items():
-                data = z.read(sh)
-                for relpath, _kind in targets:
-                    target = mods_dir / install_relpath(relpath)
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_bytes(data)
-        cpath.unlink(missing_ok=True)
+        download_url(meta.get('url'), ctoken, cpath, None, sc, bcb)
+
+    _parallel_fetch_extract(need, mods_dir, tmp, resolve, log,
+                            should_cancel=should_cancel, part_cb=part_cb, byte_cb=byte_cb,
+                            sha_sink=sha_sink)
     # снимок установки -> база для будущего 3-way merge при обновлении (Фаза 4)
     save_snapshot_from_desc(mods_dir, desc, snap_dir)
     log(f'Готово: {desc.get("id")} -> {mods_dir}')
@@ -778,14 +909,15 @@ def install_descriptor(desc, mods_dir, index, token=None, progress_cb=None,
 
 
 def install_set(plan, mods_dir, index, token=None, log=print, tmp_dir=None, dry_run=False,
-                should_cancel=None):
+                should_cancel=None, part_cb=None, byte_cb=None, sha_sink=None):
     """Установить весь разрешённый набор (resolve_set -> план). Ставит все mods плана."""
     results = {}
     for mid in plan['order']:
         _check_cancel(should_cancel)
         results[mid] = install_descriptor(plan['mods'][mid], mods_dir, index,
                                           token=token, log=log, tmp_dir=tmp_dir,
-                                          dry_run=dry_run, should_cancel=should_cancel)
+                                          dry_run=dry_run, should_cancel=should_cancel,
+                                          part_cb=part_cb, byte_cb=byte_cb, sha_sink=sha_sink)
     return results
 
 
@@ -879,7 +1011,8 @@ def save_snapshot_from_desc(mods_dir, desc, snap_dir=None):
                                  flat, desc.get('source'), snap_dir)
 
 
-def fetch_blobs(index, shas, token, tmp, log=print, progress_cb=None, should_cancel=None):
+def fetch_blobs(index, shas, token, tmp, log=print, progress_cb=None, should_cancel=None,
+                byte_cb=None):
     """Скачать блобы по sha256 из content-addressed чанков. -> {sha: bytes}.
     Чанк скачивается один раз, из него извлекаются все нужные блобы."""
     tmp = Path(tmp)
@@ -890,23 +1023,43 @@ def fetch_blobs(index, shas, token, tmp, log=print, progress_cb=None, should_can
         if b:
             need.setdefault(b['chunk'], set()).add(sh)
     out = {}
-    for chunk, shaset in need.items():
+    chunks = [c for c in need if index['chunks'].get(c, {}).get('url')]
+    for c in need:                                # части без ссылки — пропустить с логом
+        if c not in chunks:
+            log(f'[!] для части пропущено {len(need[c])} файлов (нет ссылки)')
+    if not chunks:
+        return out
+
+    def fetch(chunk):
         _check_cancel(should_cancel)
         meta = index['chunks'].get(chunk, {})
-        url = meta.get('url')
-        if not url:
-            log(f'[!] для части пропущено {len(shaset)} файлов (нет ссылки)')
-            continue
         cpath = tmp / f'_chunk_{chunk}'
         ctoken = token if meta.get('store') == 'github' else None
-        download_url(url, ctoken, cpath, progress_cb, should_cancel)
-        with zipfile.ZipFile(cpath) as z:
-            for sh in shaset:
-                try:
-                    out[sh] = z.read(sh)
-                except KeyError:
-                    log(f'[!] файл {sh[:12]} не найден в части')
-        cpath.unlink(missing_ok=True)
+        download_url(meta['url'], ctoken, cpath, None, should_cancel, byte_cb)
+        return chunk, cpath
+
+    workers = max(1, min(PARALLEL_DOWNLOADS, len(chunks)))
+    ex = ThreadPoolExecutor(max_workers=workers)
+    futs = {ex.submit(fetch, c): c for c in chunks}
+    try:
+        for fut in as_completed(futs):
+            _check_cancel(should_cancel)
+            chunk, cpath = fut.result()
+            with zipfile.ZipFile(cpath) as z:
+                for sh in need[chunk]:
+                    try:
+                        out[sh] = z.read(sh)
+                    except KeyError:
+                        log(f'[!] файл {sh[:12]} не найден в части')
+            cpath.unlink(missing_ok=True)
+    except BaseException:
+        for f in futs:
+            f.cancel()
+        raise
+    finally:
+        ex.shutdown(wait=True)
+        for c in chunks:
+            (tmp / f'_chunk_{c}').unlink(missing_ok=True)
     return out
 
 
@@ -1167,12 +1320,14 @@ def apply_update_plan(desc, plan, decisions, mods_dir, index, token=None, log=pr
 # Инкрементально: sha файла переиспользуется, если size+mtime не изменились.
 # ---------------------------------------------------------------------------
 
-def disk_mod_fingerprint(mods_dir, mid, prev_files=None):
+def disk_mod_fingerprint(mods_dir, mid, prev_files=None, sha_cache=None):
     """Отпечаток мода с диска: ({rel: {size,mtime,sha}}, version). prev_files —
-    отпечаток из прошлого индекса (sha берётся повторно при тех же size+mtime)."""
+    отпечаток из прошлого индекса; sha_cache — глобальные отпечатки, посчитанные при
+    самой установке (sha берётся повторно при тех же size+mtime → файл НЕ перечитывается)."""
     mods_dir = Path(mods_dir)
     base = mods_dir / mid.replace('/', os.sep)
     prev_files = prev_files or {}
+    sha_cache = sha_cache or {}
     files = {}
     if base.is_dir():
         for dp, _dirs, fs in os.walk(base):
@@ -1184,7 +1339,7 @@ def disk_mod_fingerprint(mods_dir, mid, prev_files=None):
                 except (OSError, ValueError):
                     continue
                 size, mtime = stt.st_size, int(stt.st_mtime)
-                pv = prev_files.get(rel)
+                pv = prev_files.get(rel) or sha_cache.get(rel)
                 if pv and pv.get('size') == size and pv.get('mtime') == mtime and pv.get('sha'):
                     sha = pv['sha']
                 else:
@@ -1197,7 +1352,7 @@ def disk_mod_fingerprint(mods_dir, mid, prev_files=None):
 
 
 def index_disk_mods(mods_dir, catalog, prev_index=None, log=print,
-                    progress_cb=None, should_cancel=None):
+                    progress_cb=None, should_cancel=None, sha_cache=None):
     """Локальная индексация Mods (без сети): база + статус каждого мода:
     'known' (есть в каталоге) | 'unknown' (нет в каталоге). Хранит отпечаток
     (sha/size/mtime) + version-хэш для инкрементального реиндекса и точечных сверок.
@@ -1216,7 +1371,7 @@ def index_disk_mods(mods_dir, catalog, prev_index=None, log=print,
     for i, mid in enumerate(mids):
         _check_cancel(should_cancel)
         files, version = disk_mod_fingerprint(
-            mods_dir, mid, (prev_mods.get(mid) or {}).get('files'))
+            mods_dir, mid, (prev_mods.get(mid) or {}).get('files'), sha_cache)
         ent = catalog.get(mid)
         if not ent:
             leaf = mid.split('/')[-1]

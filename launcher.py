@@ -8,6 +8,7 @@
 Темизация: всё оформление берётся из theme.json — можно перекрасить под игру
 без правки кода. Запуск: python launcher.py
 """
+import hashlib
 import json
 import os
 import queue
@@ -77,8 +78,18 @@ class Launcher:
         PROFILES_DIR.mkdir(exist_ok=True)
         self.current_profile = self.config.get('last_profile', 'default')
         self.profile = self._load_profile(self.current_profile)
+        # Очередь установки (📋 Набор) — СЕССИОННАЯ: при перезапуске очищается.
+        # На диске остаются сами файлы (видны в дереве через скан Mods), а очередь —
+        # это лишь «что поставить сейчас». Сохраняются game_path/installed_base и пр.
+        self.profile['mods'] = []
         self.busy = False
         self._pulsing = False                # прогресс-бар в режиме «бегунок»
+        self._has_parts = False              # идёт многочастёвая установка
+        self._parts_done = self._parts_total = 0
+        self._dl_bytes = 0                   # агрегатный счётчик скачанных байт за операцию
+        self._dl_lock = threading.Lock()
+        self._pack_ctx = ''                  # «пак K/T имя» при установке лагеря
+        self._prog_after = None              # id периодического тика прогресса
         self._cancel = threading.Event()     # кооперативная отмена текущей операции
         self._op_buttons = []                # кнопки, блокируемые на время операции
         self.verbose_var = tk.BooleanVar(value=self.config.get('log_verbose', False))
@@ -296,6 +307,10 @@ class Launcher:
                                                           expand=True, padx=(0, 6))
         hdr = ttk.Frame(left, style='TFrame'); hdr.pack(fill=tk.X)
         ttk.Label(hdr, text='Моды', style='Head.TLabel').pack(side=tk.LEFT)
+        # бегущий итог по очереди (📋 набор): сколько модов и сколько весит к установке
+        self.queue_lbl = ttk.Label(hdr, text='', background=self.theme['bg'],
+                                    foreground=self.theme['accent'])
+        self.queue_lbl.pack(side=tk.RIGHT, padx=8)
         ttk.Label(hdr, text='  Вид:', background=self.theme['bg']).pack(side=tk.LEFT)
         self.tree_mode_var = tk.StringVar(
             value={'folder': 'По папкам', 'section': 'По разделу'}.get(
@@ -400,7 +415,9 @@ class Launcher:
         self._post(_do)
 
     def _progress(self, done, total):
-        if not total:
+        # Побайтовый прогресс СКАЧИВАНИЯ одной части. Если идёт многочастёвая
+        # установка (известен счётчик частей) — баром управляют части, метку не трогаем.
+        if not total or getattr(self, '_has_parts', False):
             return                       # неизвестен объём — оставляем «бегунок»
         pct = max(0, min(100, int(done / total * 100)))
 
@@ -415,6 +432,43 @@ class Launcher:
             self.prog_label.config(text=f'{pct}%')
         self._post(_do)
 
+    def _part_progress(self, done, total):
+        """Счётчик частей текущего пака (читается тиком _prog_tick). Зовётся из воркера."""
+        self._has_parts = True
+        self._parts_done = done
+        self._parts_total = total
+
+    def _byte_progress(self, delta):
+        """Инкремент скачанных байт (зовётся из всех параллельных загрузок)."""
+        with self._dl_lock:
+            self._dl_bytes += delta
+
+    def _prog_tick(self):
+        """Периодическое (0.5с) обновление индикатора — главный поток. Показывает
+        пак K/T, часть N/M текущего пака и АГРЕГАТНО скачанные ГБ (всегда растут →
+        видно, что не зависло, даже когда крупная часть качается долго)."""
+        if not self.busy:
+            self._prog_after = None
+            return
+        bits = []
+        if self._pack_ctx:
+            bits.append(self._pack_ctx)
+        if self._parts_total:
+            bits.append(f'часть {self._parts_done}/{self._parts_total}')
+        if self._dl_bytes:
+            bits.append(f'↓ {self._dl_bytes / (1 << 30):.2f} ГБ')
+        if bits:
+            self.prog_label.config(text='  ·  '.join(bits))
+        if self._has_parts and self._parts_total:
+            if self._pulsing:
+                try:
+                    self.progress.stop(); self.progress.configure(mode='determinate')
+                except Exception:
+                    pass
+                self._pulsing = False
+            self.progress_var.set(int(self._parts_done / self._parts_total * 100))
+        self._prog_after = self.root.after(500, self._prog_tick)
+
     # ---------- управление операцией: блокировка UI / отмена / индикатор ----------
     def should_cancel(self):
         return self._cancel.is_set()
@@ -427,6 +481,12 @@ class Launcher:
             return False
         self.busy = True
         self._cancel.clear()
+        self._has_parts = False
+        self._parts_done = self._parts_total = 0
+        self._dl_bytes = 0
+        self._pack_ctx = ''
+        if self._prog_after is None:
+            self._prog_after = self.root.after(500, self._prog_tick)
         for b in self._op_buttons:
             try:
                 b.configure(state='disabled')
@@ -450,11 +510,19 @@ class Launcher:
 
     def _end_op(self, msg='Готов'):
         self.busy = False
+        if self._prog_after is not None:
+            try:
+                self.root.after_cancel(self._prog_after)
+            except Exception:
+                pass
+            self._prog_after = None
         try:
             self.progress.stop(); self.progress.configure(mode='determinate')
         except Exception:
             pass
         self._pulsing = False
+        self._has_parts = False
+        self._pack_ctx = ''
         self.progress_var.set(0)
         self.prog_label.config(text='')
         for b in self._op_buttons:
@@ -723,16 +791,77 @@ class Launcher:
                         'descriptors/catalog.json', self._repo(), self._token()) or {}
                 except Exception:
                     self._catalog_cache = {}
-                try:                          # карта фикс→родитель для группировки
+                try:                          # карта фикс→родитель + кэш паков (с размерами)
                     pk = core.load_packs('state/packs.json', self._repo(), self._token())
+                    self._packs_cache = pk
                     self._fixparent = {p['name']: p['fix_parent']
                                        for p in pk.values() if p.get('fix_parent')}
                 except Exception:
                     self._fixparent = {}
                 self._cat_loading = False
-                if self._catalog_cache:
+                if self._catalog_cache or getattr(self, '_packs_cache', None):
                     self._post(self._refresh_list)
             threading.Thread(target=bg, daemon=True).start()
+        self._update_queue_total()
+
+    def _fmt_size(self, b):
+        if not b:
+            return ''
+        gb = b / (1 << 30)
+        return f'{gb:.2f} ГБ' if gb >= 1 else f'{b / (1 << 20):.0f} МБ'
+
+    def _item_bytes(self, m):
+        """Размер записи набора (байт) по packs.json. Камп = сумма юнитов; пак = его
+        размер; мод/zip/форк = неизвестно (0) — нет поюнитной разбивки."""
+        packs = getattr(self, '_packs_cache', None) or {}
+        t = m.get('type')
+        if t == 'camp':
+            return sum(p.get('bytes', 0) for p in packs.values()
+                       if p.get('camp') == m.get('camp'))
+        if t == 'unit' and not m.get('mod'):
+            return packs.get(f"{m.get('camp')}/{m.get('unit')}", {}).get('bytes', 0)
+        return 0
+
+    def _target_bytes(self, indices):
+        return sum(self._item_bytes(self.profile['mods'][i]) for i in indices)
+
+    def _size_note(self, indices):
+        """Строка про объём загрузки для подтверждений: реальный размер + пометка базы."""
+        packs = getattr(self, '_packs_cache', None) or {}
+        total = self._target_bytes(indices)
+        has_base = False
+        for i in indices:
+            m = self.profile['mods'][i]
+            if m.get('type') == 'camp':
+                has_base = has_base or any(
+                    p.get('tier') == 'base' for p in packs.values()
+                    if p.get('camp') == m.get('camp'))
+            elif m.get('type') == 'unit' and not m.get('mod'):
+                if packs.get(f"{m.get('camp')}/{m.get('unit')}", {}).get('tier') == 'base':
+                    has_base = True
+        if not total:                       # размеры ещё не подгружены/не в packs.json
+            if has_base:
+                return ('Объём: включает базовый пак игры — это крупная загрузка '
+                        '(несколько ГБ).')
+            return ''
+        s = f'Объём загрузки: ~{self._fmt_size(total)}'
+        if has_base:
+            s += '\n(включая базовый пак игры — это крупная загрузка)'
+        elif total >= 2 * (1 << 30):
+            s += '\n(крупная загрузка)'
+        return s
+
+    def _update_queue_total(self):
+        """Обновить бегущий итог по очереди (📋 набор) в шапке списка."""
+        mods = self.profile.get('mods', [])
+        if not mods:
+            self.queue_lbl.config(text='')
+            return
+        total = sum(self._item_bytes(m) for m in mods)
+        txt = f'в наборе: {len(mods)}'
+        if total:
+            txt += f' · ~{self._fmt_size(total)}'
+        self.queue_lbl.config(text=txt)
 
     def _selected(self):
         """Индекс записи профиля для выбранного листа дерева (или None для групп)."""
@@ -743,6 +872,38 @@ class Launcher:
         if iid.startswith('p') and iid[1:].isdigit():
             return int(iid[1:])
         return None
+
+    @staticmethod
+    def _is_pidx(iid):
+        return iid.startswith('p') and iid[1:].isdigit()
+
+    def _descendant_pidx(self, iid):
+        """Индексы записей набора (pN) среди потомков узла дерева (для групп)."""
+        out = []
+        for c in self.tree.get_children(iid):
+            if self._is_pidx(c):
+                out.append(int(c[1:]))
+            out += self._descendant_pidx(c)
+        return out
+
+    def _selected_pidx(self):
+        """Все индексы записей набора для текущего выделения. Группы (лагерь/пак)
+        разворачиваются в их листья-записи; дисковые листья (d:) игнорируются."""
+        res = []
+        for iid in self.tree.selection():
+            if self._is_pidx(iid):
+                res.append(int(iid[1:]))
+            else:                              # группа или дисковый лист
+                res += self._descendant_pidx(iid)
+        seen, out = set(), []
+        for i in res:
+            if i not in seen:
+                seen.add(i); out.append(i)
+        return out
+
+    def _mod_label(self, i):
+        m = self.profile['mods'][i]
+        return m.get('name') or m.get('id') or m.get('url', '?')
 
     # ---------- profiles ----------
     def _on_profile_change(self, e=None):
@@ -944,14 +1105,28 @@ class Launcher:
         self._end_op('Готов')
 
     def _remove_mod(self):
-        i = self._selected()
-        if i is None:
+        idxs = self._selected_pidx()      # листья + развёрнутые группы
+        if not idxs:
+            if self.tree.selection():
+                messagebox.showinfo(
+                    'Удаление',
+                    'Выделенное — не из вашего набора (📋).\n\n'
+                    'Из списка убирается только то, что добавлено через ＋. '
+                    'Файлы, уже стоящие на диске («💾 Установлено в игре»), '
+                    'удаляются кнопкой «🗑 Очистить Mods».')
             return
-        name = self.profile['mods'][i]['name']
-        if messagebox.askyesno('Удалить', f'Удалить «{name}» из списка?'):
+        names = [self._mod_label(i) for i in idxs]
+        preview = '\n'.join(f'  • {n}' for n in names[:15])
+        if len(names) > 15:
+            preview += f'\n  … и ещё {len(names) - 15}'
+        title = ('Удалить из набора' if len(idxs) > 1 else 'Удалить')
+        if not messagebox.askyesno(
+                title, f'Убрать из набора (📋): {len(idxs)}\n\n{preview}'):
+            return
+        for i in sorted(idxs, reverse=True):       # с конца — индексы не съезжают
             del self.profile['mods'][i]
-            self._save_profile()
-            self._refresh_list()
+        self._save_profile()
+        self._refresh_list()
 
     def _move_up(self):
         i = self._selected()
@@ -1064,31 +1239,63 @@ class Launcher:
             if len(names) > 15:
                 preview += f'\n  … и ещё {len(names) - 15}'
             tail = (f'\n\nПропущено как уже актуальные: {skipped}.' if skipped else '')
+            note = self._size_note(need)
+            note = ('\n\n⚠ ' + note) if note else ''
             if not messagebox.askyesno(
                     'Установить набор',
-                    f'Будет установлено: {len(need)}\n\n{preview}{tail}\n\n'
+                    f'Будет установлено: {len(need)}\n\n{preview}{tail}{note}\n\n'
                     'Продолжить? (Перезапишет файлы этих модов в Mods.)'):
                 return
             targets = need
         else:
-            i = self._selected()
-            if i is None:
-                msg = ('Выберите мод из вашего НАБОРА (раздел 📋 Набор).\n\n'
+            sel = self.tree.selection()
+            idxs = self._selected_pidx()       # лист или развёрнутая группа
+            if not idxs:
+                msg = ('Выберите мод из вашего НАБОРА (раздел 📋 Набор) — или группу '
+                       '(лагерь/пак), чтобы поставить всё под ней.\n\n'
                        'Кнопки «Установить» работают с набором (что вы добавили через ＋).\n'
                        'Если выделен мод из «💾 Установлено в игре» — он уже на диске; '
                        'чтобы обновить его с сохранением правок, жмите «🔀 Обновить».')
                 messagebox.showwarning('Выбор', msg)
                 return
-            targets = [i]
+            single_leaf = (len(sel) == 1 and self._is_pidx(sel[0]))
+            note = self._size_note(idxs)
+            # Подтверждаем, если выделена группа/несколько ИЛИ загрузка крупная.
+            if not single_leaf or note:
+                names = [self._mod_label(i) for i in idxs]
+                preview = '\n'.join(f'  • {n}' for n in names[:15])
+                if len(names) > 15:
+                    preview += f'\n  … и ещё {len(names) - 15}'
+                wtxt = ('\n\n⚠ ' + note) if note else ''
+                head = ('Поставить всё под выделенной группой?'
+                        if not single_leaf else 'Установить выбранное?')
+                if not messagebox.askyesno(
+                        'Установить',
+                        f'{head}\n\nБудет установлено: {len(idxs)}\n\n{preview}{wtxt}\n\n'
+                        'Продолжить?'):
+                    return
+            targets = idxs
         if not targets:
             return
         if not self._begin_op('Установка…'):
             return
         threading.Thread(target=self._install_worker, args=(targets,), daemon=True).start()
 
+    def _sha_sink(self, rel, target, data):
+        """Запомнить отпечаток только что записанного файла мода (для индекса БЕЗ
+        повторного чтения с диска). rel — путь относительно Mods."""
+        try:
+            mt = int(target.stat().st_mtime)
+        except OSError:
+            mt = 0
+        self._inst_sha[rel] = {'size': len(data), 'mtime': mt,
+                               'sha': hashlib.sha256(data).hexdigest()}
+
     def _install_worker(self, targets):
         tok = self._token()
         mods_dir = self._mods_dir()
+        done_ids = set()          # id() записей, успешно установленных → убрать из очереди
+        self._inst_sha = {}       # отпечатки установленных файлов (для индекса без чтения)
         try:
             desc_idx = [i for i in targets if self.profile['mods'][i].get('type') == 'desc']
             other_idx = [i for i in targets if self.profile['mods'][i].get('type') != 'desc']
@@ -1102,12 +1309,18 @@ class Launcher:
                                        key=lambda p: p.get('load_order', 999))
                         if not units:
                             self.log(f'  нет паков для лагеря {m["camp"]}')
-                        for p in units:
+                        ntot = len(units)
+                        for k, p in enumerate(units, 1):
+                            self._pack_ctx = f'пак {k}/{ntot} {p["name"]}'
+                            self._parts_done = self._parts_total = 0
                             self.log(f'--- {p["name"]} ({p["tier"]}) ---')
                             try:
                                 core.reconstruct_unit(m['repo'], p['camp'], p['name'],
                                                       mods_dir, tok, self._progress, self.log,
-                                                      tmp_dir=HERE, should_cancel=self.should_cancel)
+                                                      tmp_dir=HERE, should_cancel=self.should_cancel,
+                                                      part_cb=self._part_progress,
+                                                      byte_cb=self._byte_progress,
+                                                      sha_sink=self._sha_sink)
                                 if p.get('tier') == 'base':
                                     self.profile['installed_base'] = p['name']
                             except core.OperationCancelled:
@@ -1115,13 +1328,17 @@ class Launcher:
                             except Exception as e:
                                 self.log(f'ОШИБКА {p["name"]}: {e}')
                         m['last_downloaded'] = datetime.now().isoformat()
+                        done_ids.add(id(m))
                         self._post(self._save_profile); self._post(self._refresh_list)
                         continue
                     if m.get('type') == 'unit':
                         st = core.reconstruct_unit(m['repo'], m['camp'], m['unit'],
                                                    mods_dir, tok, self._progress, self.log,
                                                    tmp_dir=HERE, mod=m.get('mod') or None,
-                                                   should_cancel=self.should_cancel)
+                                                   should_cancel=self.should_cancel,
+                                                   part_cb=self._part_progress,
+                                                   byte_cb=self._byte_progress,
+                                                   sha_sink=self._sha_sink)
                         m['last_updated'] = st.get('updated') or m.get('last_updated')
                     else:
                         up = core.install_zip(m['url'], mods_dir, tok, self._progress,
@@ -1129,6 +1346,7 @@ class Launcher:
                                               should_cancel=self.should_cancel)
                         m['last_updated'] = up or m.get('last_updated')
                     m['last_downloaded'] = datetime.now().isoformat()
+                    done_ids.add(id(m))
                     m['update_available'] = False
                     if m.get('type') == 'unit':            # запомнить установленную базу
                         pk = self._get_packs(tok).get(f'{m["camp"]}/{m["unit"]}', {})
@@ -1148,15 +1366,63 @@ class Launcher:
                 except Exception as e:
                     self.log(f'ОШИБКА {m["name"]}: {e}')
             if desc_idx:
-                self._install_desc_set(desc_idx, mods_dir, tok)
+                self._install_desc_set(desc_idx, mods_dir, tok, done_ids)
             self.log('Готово')
+            self._post(self._remove_installed, set(done_ids))
+            self._update_index_after_install(mods_dir, tok)   # сразу в индекс, без перечтения
             self._post(self._end_op, 'Готово')
         except core.OperationCancelled:
             self.log('Установка отменена.')
+            self._post(self._remove_installed, set(done_ids))
+            self._update_index_after_install(mods_dir, tok)   # учесть успевшее установиться
             self._post(self._end_op, 'Отменено')
         except Exception as e:
             self.log(f'ОШИБКА установки: {e}')
+            self._post(self._remove_installed, set(done_ids))
             self._post(self._end_op, 'Ошибка')
+
+    def _update_index_after_install(self, mods_dir, tok):
+        """Обновить индекс дисковых модов СРАЗУ после установки, переиспользуя
+        отпечатки, посчитанные при записи файлов (sha_cache) — без повторного чтения
+        с диска. Так последующая «🗂 Индексация» не идёт «с нуля»."""
+        cache = getattr(self, '_inst_sha', None)
+        if not cache:
+            return
+        try:
+            self.log('Обновляю индекс установленных модов…')
+            self._has_parts = False          # дать _progress рисовать % индексации
+            self._pack_ctx = ''
+            try:
+                cat = self._get_catalog(self._repo(), tok) or {}
+            except Exception:
+                cat = {}
+            idx = core.index_disk_mods(mods_dir, cat, prev_index=self._disk_index,
+                                       sha_cache=cache, log=self.log,
+                                       progress_cb=self._progress,
+                                       should_cancel=self.should_cancel)
+            core.save_disk_index(mods_dir, idx)
+            self._disk_index = idx
+            self.config['skip_index_offer'] = True
+            self._post(self._save_config)
+            self._post(self._refresh_list)
+            self.log(f'Индекс обновлён: всего {idx["count"]}, знакомых {idx["known"]}, '
+                     f'не в каталоге {idx["unknown"]}.')
+        except core.OperationCancelled:
+            self.log('Индексация после установки пропущена (отмена).')
+        except Exception as e:
+            self.log(f'[warn] индекс после установки не обновлён: {e}')
+        finally:
+            self._inst_sha = {}
+
+    def _remove_installed(self, done_ids):
+        """Убрать из очереди (📋) записи, которые успешно установились — они
+        «превратились» в стоящие на диске (видны через скан Mods)."""
+        if not done_ids:
+            return
+        self.profile['mods'] = [m for m in self.profile['mods']
+                                if id(m) not in done_ids]
+        self._save_profile()
+        self._refresh_list()
 
     def _desc_sel(self, m):
         if m.get('url'):
@@ -1166,7 +1432,7 @@ class Launcher:
             sel['source'] = m['source']
         return sel
 
-    def _install_desc_set(self, desc_idx, mods_dir, tok):
+    def _install_desc_set(self, desc_idx, mods_dir, tok, done_ids=None):
         """Разрешить набор дескрипторов (зависимости+конфликты) и установить."""
         mods = self.profile['mods']
         repo = mods[desc_idx[0]].get('repo', 'ArtYudin89/sr-mods-aggregator')
@@ -1194,7 +1460,10 @@ class Launcher:
             index = core.load_chunk_index(url=idx_url, repo=repo, token=tok)
             results = core.install_set(plan, mods_dir, index, token=tok,
                                        log=self.log, tmp_dir=HERE,
-                                       should_cancel=self.should_cancel)
+                                       should_cancel=self.should_cancel,
+                                       part_cb=self._part_progress,
+                                       byte_cb=self._byte_progress,
+                                       sha_sink=getattr(self, '_sha_sink', None))
         except Exception as e:
             self.log(f'ОШИБКА установки набора: {e}')
             return
@@ -1207,6 +1476,8 @@ class Launcher:
                 m['installed_version'] = plan['mods'][mid].get('version')
                 m['last_updated'] = m['installed_version']
             m['last_downloaded'] = now
+            if done_ids is not None:
+                done_ids.add(id(m))
         self._post(self._save_profile)
         self._post(self._refresh_list)
         self.log(f'Набор установлен: {len(results)} модов')
