@@ -158,6 +158,16 @@ function wireUI() {
     $(id).onclick = (e) => { if (e.target === $(id)) $(id).classList.add('hidden'); });
   $('infoCloseBtn').onclick = () => hide('infoOverlay');
   $('compatCloseBtn').onclick = () => hide('compatOverlay');
+  // Esc закрывает верхнюю открытую модалку / поповер
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (!$('filterPop').classList.contains('hidden')) { $('filterPop').classList.add('hidden'); return; }
+    for (const id of ['infoOverlay', 'compatOverlay', 'addOverlay', 'profileOverlay', 'settingsOverlay']) {
+      if (!$(id).classList.contains('hidden')) { hide(id); return; }
+    }
+    if (!$('confirmOverlay').classList.contains('hidden')) { $('confirmCancel').click(); return; }
+    if (!$('mergeOverlay').classList.contains('hidden')) { $('mergeSkipBtn').click(); return; }
+  });
   // закрыть фильтр-поповер по клику вне
   document.addEventListener('click', (e) => {
     if (!$('filterPop').classList.contains('hidden') &&

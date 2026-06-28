@@ -1091,8 +1091,12 @@ class Api:
             if not desc:
                 self.log(f'Мод {mid} не найден в каталоге — обновить нечем.')
                 self._merge_next(); return
+            note = ''
+            if prefer and not str(info["source"]).startswith(prefer + '/'):
+                note = (f' — выбран по совпадению файлов на диске, не по базе ({prefer}); '
+                        f'это нормально: один мод может совпадать с версией из другого источника')
             self.log(f'Вариант: {info["source"]} (совпало {info["match"]}/{info["cover"]} '
-                     f'из {info["total"]})')
+                     f'из {info["total"]}){note}')
             snap = core.load_install_snapshot(mods_dir, desc.get('id'))
             index = core.load_chunk_index(desc=desc, repo=repo, token=tok)
             plan = core.plan_update_merge(desc, mods_dir, index, token=tok, log=self.log,
