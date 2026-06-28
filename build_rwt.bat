@@ -1,10 +1,11 @@
 @echo off
 REM ============================================================================
-REM  Build SRModsLauncher-RWT.exe  (RWT = Release With Tests)
+REM  Build SRModsLauncher-RWT.exe  (RWT = Release With Tests) — НОВЫЙ UI (webui).
 REM  Test build with the GitHub token BAKED IN so a non-technical tester does
 REM  not have to paste anything. The token is read from launcher_config.json
 REM  and written to embedded_secrets.py (gitignored, NEVER commit it).
-REM  Hand the resulting exe to the tester directly (do NOT publish it).
+REM  Result -> RWT-раздача\SRModsLauncher-RWT.exe. Hand it to the tester
+REM  directly (do NOT publish it; the public build has NO token).
 REM ============================================================================
 setlocal
 
@@ -21,15 +22,21 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo Building SRModsLauncher-RWT.exe ...
-pyinstaller --noconfirm --clean ^
-  --onefile --windowed ^
-  --name SRModsLauncher-RWT ^
-  --hidden-import embedded_secrets ^
-  --add-data "theme.json;." ^
-  launcher.py
+echo Building SRModsLauncher-RWT.exe (webui / pywebview) ...
+cd webui
+python -m PyInstaller --clean --noconfirm SRModsLauncher-RWT.spec
+if errorlevel 1 (
+    echo FAILED to build
+    cd ..
+    exit /b 1
+)
+cd ..
+
+echo Copying to RWT-раздача\ ...
+if not exist "RWT-раздача" mkdir "RWT-раздача"
+copy /Y "webui\dist\SRModsLauncher-RWT.exe" "RWT-раздача\SRModsLauncher-RWT.exe" >nul
 
 echo.
-echo Done: dist\SRModsLauncher-RWT.exe   (token embedded, RWT)
+echo Done: RWT-раздача\SRModsLauncher-RWT.exe   (token embedded, RWT)
 echo Hand this file to the tester directly. Do NOT upload to a public release.
 endlocal
