@@ -186,6 +186,13 @@ input,select{font-family:inherit;}
 .info-modal .i-v{color:var(--fg);font-size:13px;line-height:1.5;word-break:break-word;}
 .info-modal .i-v code{background:var(--panel-2);border-radius:5px;padding:1px 6px;font-size:12px;}
 .info-modal .chip{display:inline-block;background:var(--chip);color:var(--fg);border-radius:6px;padding:2px 8px;font-size:12px;margin:1px 0;}
+/* отчёт совместимости */
+.compat-row{display:grid;grid-template-columns:22px 1fr;gap:8px;align-items:start;padding:7px 0;border-bottom:1px solid var(--line);font-size:13px;line-height:1.45;color:var(--fg);}
+.compat-row:last-child{border-bottom:none;}
+.compat-row .ci{text-align:center;font-weight:700;}
+.compat-row.ok .ci{color:var(--ok);}
+.compat-row.warn .ci{color:var(--warn);}
+.compat-row.info .ci{color:var(--accent);}
 
 ::-webkit-scrollbar{width:10px;height:10px;}
 ::-webkit-scrollbar-thumb{background:var(--line);border-radius:6px;}

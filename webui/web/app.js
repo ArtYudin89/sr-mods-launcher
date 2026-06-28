@@ -97,7 +97,12 @@ function wireUI() {
   $('collapseBtn').onclick = collapseAll;
   $('indexBtn').onclick = doReindex;
   $('clearModsBtn').onclick = doClearMods;
-  $('refreshBtn').onclick = () => { api().get_state().then((s) => { STATE = s; applyState(); }); refreshTree(); };
+  $('refreshBtn').onclick = async () => {
+    toast('Обновляю список с сервера…', 'ok');
+    try { await api().refresh_remote(); } catch (e) {}
+    const s = await api().get_state(); STATE = s; applyState();
+    refreshTree();                          // tree_dirty придёт ещё раз, когда каталог догрузится
+  };
 
   // фильтр
   $('filterBtn').onclick = (e) => { e.stopPropagation(); $('filterPop').classList.toggle('hidden'); };
@@ -149,9 +154,10 @@ function wireUI() {
 
   // закрытие по клику на фон — только для «безопасных» модалок
   // (confirm/merge завязаны на состояние бэкенда → закрываются только кнопками)
-  ['settingsOverlay', 'profileOverlay', 'addOverlay', 'infoOverlay'].forEach((id) =>
+  ['settingsOverlay', 'profileOverlay', 'addOverlay', 'infoOverlay', 'compatOverlay'].forEach((id) =>
     $(id).onclick = (e) => { if (e.target === $(id)) $(id).classList.add('hidden'); });
   $('infoCloseBtn').onclick = () => hide('infoOverlay');
+  $('compatCloseBtn').onclick = () => hide('compatOverlay');
   // закрыть фильтр-поповер по клику вне
   document.addEventListener('click', (e) => {
     if (!$('filterPop').classList.contains('hidden') &&
@@ -406,13 +412,18 @@ async function doClearMods() {
 
 // ───────── совместимость ─────────
 async function checkCompat() {
-  appendLog('— Проверка совместимости —', 'acc');
-  const r = await api().check_compat();
-  const probs = r.problems || [], deps = r.missing_deps || [];
-  if (!probs.length && !deps.length) { toast('Проблем не найдено ✓', 'ok'); appendLog('Совместимость: проблем нет.', 'ok'); return; }
-  probs.forEach((p) => appendLog('• ' + (p.message || p), 'warn'));
-  deps.forEach((d) => appendLog('• не хватает зависимости: ' + (d.name || d), 'warn'));
-  toast(`Найдено замечаний: ${probs.length + deps.length}`, 'err');
+  $('compatBody').innerHTML = '<div class="sub">Проверяю…</div>';
+  show('compatOverlay');
+  let r;
+  try { r = await api().check_compat(); }
+  catch (e) { $('compatBody').innerHTML = '<div class="sub">Ошибка проверки.</div>'; return; }
+  const items = (r && r.items) || [];
+  const ic = { ok: '✓', warn: '⚠', info: 'ⓘ' };
+  $('compatBody').innerHTML = items.map((it) =>
+    `<div class="compat-row ${it.level}"><span class="ci">${ic[it.level] || '•'}</span>
+       <span>${esc(it.text)}</span></div>`).join('');
+  const warns = items.filter((it) => it.level === 'warn').length;
+  toast(warns ? `Замечаний: ${warns}` : 'Проблем не найдено ✓', warns ? 'err' : 'ok');
 }
 
 // ───────── ModCFG ─────────

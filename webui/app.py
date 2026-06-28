@@ -1231,6 +1231,9 @@ class Api:
 
     # ───────── совместимость (показ) ─────────
     def check_compat(self):
+        """Отчёт о совместимости для модалки: список {level, text}. level —
+        ok|warn|info. Собирается из структурной проверки паков (check_pack_
+        compatibility возвращает СЛОВАРЬ, не список!) + проверки зависимостей с диска."""
         tok = self._token()
         try:
             packs = self._get_packs(tok)
@@ -1242,13 +1245,50 @@ class Api:
             base = core.detect_installed_base(self._mods_dir())
         except Exception:
             base = None
-        problems = core.check_pack_compatibility(
-            units, packs, installed_base=(base or {}).get('name') if base else None)
+        base_name = base.get('base') if base else None      # detect_* отдаёт ключ 'base'
         try:
-            deps = core.check_disk_dependencies(self._mods_dir())
+            rep = core.check_pack_compatibility(units, packs, installed_base=base_name) or {}
+        except Exception as e:
+            rep = {}
+            self.log(f'Совместимость: ошибка проверки паков ({e})')
+        try:
+            deps = core.check_disk_dependencies(self._mods_dir()) or []
         except Exception:
             deps = []
-        return {'problems': problems or [], 'missing_deps': deps or []}
+        items = []
+        nm = lambda u: (packs.get(u) or {}).get('name', u)
+        if base_name:
+            items.append({'level': 'ok', 'text': f'База установлена: {base_name}'})
+        if rep.get('missing_base'):
+            items.append({'level': 'warn',
+                          'text': 'Не выбрана база (нужна для модов/фиксов) — добавьте базовый пак.'})
+        if rep.get('base_conflict'):
+            names = ', '.join(nm(b) for b in rep.get('bases', []))
+            items.append({'level': 'warn', 'text': f'В сборке несколько баз ({names}) — оставьте одну.'})
+        if rep.get('save_warning'):
+            items.append({'level': 'warn', 'text': rep['save_warning']})
+        for fix, parent in rep.get('fix_orphans', []):
+            items.append({'level': 'warn',
+                          'text': f'Фикс «{nm(fix)}» требует родительский пак «{parent}», которого нет в сборке.'})
+        if rep.get('mandatory'):
+            names = ', '.join(nm(u) for u in rep['mandatory'])
+            items.append({'level': 'info', 'text': f'Обязательны к обновлению (база/фикс): {names}'})
+        for d in deps:
+            items.append({'level': 'warn',
+                          'text': f'Моду «{d.get("name", d.get("mod"))}» не хватает: {", ".join(d.get("missing", []))}'})
+        if not items:
+            items.append({'level': 'ok', 'text': 'Проблем не найдено.'})
+        return {'ok': True, 'items': items, 'base': base_name}
+
+    def refresh_remote(self):
+        """Сбросить кэши каталога/packs/описаний и перезагрузить с GitHub (кнопка ⟳).
+        Каталог тянется заново → видны свежие данные после пуша агрегатора."""
+        self._catalog_cache = None
+        self._packs_cache = None
+        self._descs = {}
+        self._sections = {}
+        self._lazy_load_catalog()
+        return {'ok': True}
 
 
 def main():
