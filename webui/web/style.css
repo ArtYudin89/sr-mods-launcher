@@ -28,6 +28,9 @@ body{
 }
 button{font-family:inherit;cursor:pointer;border:none;color:inherit;}
 input,select{font-family:inherit;}
+/* выделение/копирование текста: в теле модалок и журнале (остальной UI — «нативный», без выделения) */
+.modal .m-body,.modal .m-body *,.log,.log *{-webkit-user-select:text;user-select:text;}
+.info-modal .i-v{cursor:text;}
 
 /* ============ ШАПКА ============ */
 .topbar{
