@@ -40,6 +40,10 @@
           <button data-mode="folder" class="on">По папкам</button>
           <button data-mode="section">По разделам</button>
         </div>
+        <div class="seg" id="nameSeg" title="Что показывать как имя мода: имя папки на диске или поле Name из ModuleInfo (как в самой игре)">
+          <button data-nmode="folder" class="on">Имя: папка</button>
+          <button data-nmode="module">как в игре</button>
+        </div>
         <div class="pop-host">
           <button class="btn ghost" id="filterBtn" title="Показать только нужные состояния и подключения">⚲ Фильтр <span class="fcount" id="filterCount"></span></button>
           <div class="popover hidden" id="filterPop">
@@ -63,10 +67,10 @@
         <span class="queue-lbl" id="queueLbl"></span>
         <div class="spacer"></div>
         <input class="search" id="searchInp" placeholder="🔎 поиск мода…">
-        <button class="icon-btn" id="expandBtn" title="Развернуть всё">⊕</button>
-        <button class="icon-btn" id="collapseBtn" title="Свернуть всё">⊖</button>
-        <button class="icon-btn" id="indexBtn" title="Индексировать: просканировать установленные моды и сверить с каталогом (без скачивания)">🗂</button>
-        <button class="icon-btn" id="refreshBtn" title="Обновить список и проверить обновления">⟳</button>
+        <button class="icon-btn" id="expandBtn" title="Развернуть все группы">⊕</button>
+        <button class="icon-btn" id="collapseBtn" title="Свернуть все группы">⊖</button>
+        <button class="btn ghost" id="indexBtn" title="Просканировать установленные моды и сверить с каталогом (без скачивания). Нужно после ручной установки модов мимо лаунчера.">🗂 Индексировать</button>
+        <button class="btn ghost" id="refreshBtn" title="Перечитать каталог с сервера и проверить обновления">⟳ Обновить</button>
       </div>
 
       <!-- легенда состояний (скрыта по умолчанию) -->
@@ -147,18 +151,19 @@
             <button class="btn" id="setBrowseBtn">Обзор…</button>
           </div>
         </div>
-        <div class="m-row">
-          <label>База сборки</label>
-          <div class="sub">Какую версию игры берём за основу. Менять посреди партии нельзя — старые сохранения не подойдут.</div>
-          <select id="setBase">
-            <option value="">— не выбрано —</option>
-            <option value="redux">redux</option>
-            <option value="universe">universe</option>
-            <option value="original">original</option>
-          </select>
-        </div>
         <details>
-          <summary style="cursor:pointer;color:var(--muted);font-size:12.5px;margin:6px 0">Дополнительно (репозиторий и токен) — обычно менять не нужно</summary>
+          <summary style="cursor:pointer;color:var(--muted);font-size:12.5px;margin:6px 0">Дополнительно (база, репозиторий и токен) — обычно менять не нужно</summary>
+          <div class="m-row">
+            <label>База сборки (необязательно)</label>
+            <div class="sub">Лагерь определяется автоматически по файлам в папке Mods и показан над списком.
+              Здесь его можно задать вручную — только как пометку для <b>переносимой сборки</b>, когда игра ещё не установлена. На установку не влияет.</div>
+            <select id="setBase">
+              <option value="">— авто (по диску) —</option>
+              <option value="redux">redux</option>
+              <option value="universe">universe</option>
+              <option value="original">original</option>
+            </select>
+          </div>
           <div class="m-row">
             <label>Репозиторий</label>
             <input id="setRepo" placeholder="ArtYudin89/sr-mods-aggregator">

@@ -69,6 +69,8 @@ function applyState() {
   $('setupHint').style.display = STATE.game_path ? 'none' : 'flex';
   document.querySelectorAll('#viewSeg button').forEach((b) =>
     b.classList.toggle('on', b.dataset.mode === STATE.tree_mode));
+  document.querySelectorAll('#nameSeg button').forEach((b) =>
+    b.classList.toggle('on', b.dataset.nmode === (STATE.name_mode || 'folder')));
   updateColHeader();
   $('verBadge').textContent = STATE.is_rwt ? 'тестовая сборка (RWT)' : 'SR Mods Launcher';
   $('repoDot').classList.toggle('on', !!STATE.repo);
@@ -92,6 +94,7 @@ function wireUI() {
   $('profileMenuBtn').onclick = openProfiles;
 
   document.querySelectorAll('#viewSeg button').forEach((b) => b.onclick = () => setViewMode(b.dataset.mode));
+  document.querySelectorAll('#nameSeg button').forEach((b) => b.onclick = () => setNameMode(b.dataset.nmode));
   $('searchInp').oninput = renderTree;
   $('expandBtn').onclick = () => { collapsed.clear(); renderTree(); };
   $('collapseBtn').onclick = collapseAll;
@@ -249,7 +252,8 @@ function renderTree() {
     return;
   }
   const q = ($('searchInp').value || '').trim().toLowerCase();
-  const visible = (n) => passFilter(n) && (!q || n.label.toLowerCase().includes(q));
+  const visible = (n) => passFilter(n) &&
+    (!q || n.label.toLowerCase().includes(q) || (n.name || '').toLowerCase().includes(q));
 
   const rows = [];
   for (const camp of camps) {
@@ -305,9 +309,13 @@ function leafRow(n, lvl) {
   const info = n.has_info
     ? `<span class="info-btn" data-mid="${esc(n.mid)}" title="Подробнее о моде">ⓘ</span>` : '';
   const desc = n.desc ? `<div class="mdesc">${esc(n.desc)}</div>` : '';
+  const disp = (STATE.name_mode === 'module' && n.name) ? n.name : n.label;
+  // во втором режиме рядом показываем папку мелким, чтобы не терять ориентир
+  const alt = (STATE.name_mode === 'module' && n.name && n.name !== n.label)
+    ? `<span class="alt-name" title="имя папки на диске">${esc(n.label)}</span>` : '';
   return `<div class="row leaf lvl${lvl}${sel}" data-iid="${esc(n.iid)}">
     <div class="name"><span class="tw">·</span>
-      <span class="label-wrap"><span class="label">${esc(n.label)}</span>${desc}</span>${info}</div>
+      <span class="label-wrap"><span class="label">${esc(disp)}${alt}</span>${desc}</span>${info}</div>
     <div class="cell">${esc(colValue(n) || '')}</div>
     <div class="cell">${inGame}</div>
     <div class="cell">${inProf}</div>
@@ -350,26 +358,84 @@ function updateActionButtons() {
   $('compatBtn').disabled = busy;
 }
 
-// ───────── оптимистичный toggle «в сборке» (без лага) ─────────
-function onToggleClick(el) {
-  const mid = el.dataset.mid;
-  const on = el.dataset.on !== '1';
-  // мгновенно меняем вид
-  el.classList.toggle('on', on);
-  el.textContent = on ? '✓' : '';
-  el.dataset.on = on ? '1' : '0';
-  // обновляем модель в памяти (все узлы с этим mid)
+// ───────── toggle «в сборке» с проверкой зависимостей/конфликтов ─────────
+function setToggleVisual(mid, on) {
+  // обновить все строки/узлы с этим mid (модель в памяти + DOM)
   for (const k in NODE) if (NODE[k].mid === mid) NODE[k].in_profile = on;
   (TREE.camps || []).forEach((c) => {
     [...c.mods, ...c.packs.flatMap((p) => p.mods)].forEach((n) => { if (n.mid === mid) n.in_profile = on; });
   });
-  api().toggle_enabled(mid, on);          // в фоне, без ожидания
-  // отложенная сверка (для строк e:<mid> — модов сборки не на диске)
-  clearTimeout(reconcileTimer);
-  reconcileTimer = setTimeout(refreshTree, 600);
+  document.querySelectorAll(`.toggle.click[data-mid="${cssEsc(mid)}"]`).forEach((t) => {
+    t.classList.toggle('on', on); t.textContent = on ? '✓' : ''; t.dataset.on = on ? '1' : '0';
+  });
+}
+function applyToggleNow(mid, on, add, disable) {
+  setToggleVisual(mid, on);
+  (add || []).forEach((m) => setToggleVisual(m, true));
+  (disable || []).forEach((m) => setToggleVisual(m, false));
+  api().toggle_enabled(mid, on, add || [], disable || []).then(refreshTree);
+}
+function onToggleClick(el) {
+  const mid = el.dataset.mid;
+  const on = el.dataset.on !== '1';
+  if (on) {
+    // включение: каскад зависимостей/конфликтов/нехватки
+    api().plan_enable(mid).then((r) => {
+      const c = r && r.cascade;
+      if (!c) { applyToggleNow(mid, true); return; }
+      showCascade(mid, c);
+    }).catch(() => applyToggleNow(mid, true));
+  } else {
+    // выключение: каскад зависящих модов (их надо отключить следом)
+    api().plan_disable(mid).then((r) => {
+      const c = r && r.cascade;
+      if (!c) { applyToggleNow(mid, false); return; }
+      showDisableCascade(mid, c);
+    }).catch(() => applyToggleNow(mid, false));
+  }
 }
 
-async function toggleEnabledRow() {}  // (оставлено для совместимости)
+function showCascade(mid, c) {
+  const myName = nameOfMid(mid);
+  let body = `Подключение мода <b>${esc(myName)}</b> повлечёт изменения:`;
+  if (c.add && c.add.length) {
+    const names = c.add.map((m, i) => esc((c.add_names && c.add_names[i]) || m));
+    body += `<div class="csc add"><b>➕ подключатся (зависимости):</b><br>${names.join(', ')}</div>`;
+  }
+  if (c.disable && c.disable.length) {
+    const names = c.disable.map((m, i) => esc((c.disable_names && c.disable_names[i]) || m));
+    body += `<div class="csc del"><b>➖ отключатся (конфликт):</b><br>${names.join(', ')}</div>`;
+  }
+  if (c.missing && c.missing.length) {
+    body += `<div class="note" style="border-left-color:var(--danger);margin-top:8px">
+      ⛔ Невозможно подключить: отсутствует необходимый мод — <b>${esc(c.missing.join(', '))}</b>.<br>
+      Сначала добавьте его в сборку или установите.</div>`;
+  }
+  if (c.block) {                           // обязательной зависимости нет нигде — блок
+    confirmBox('Нельзя подключить мод', body, null, null,
+      { okHidden: true, cancelLabel: 'Понятно' });
+    return;
+  }
+  body += `<div style="margin-top:10px">Продолжить?</div>`;
+  confirmBox('Подключить мод?', body, () => applyToggleNow(mid, true, c.add, c.disable));
+}
+
+function showDisableCascade(mid, c) {
+  const myName = nameOfMid(mid);
+  const names = (c.disable || []).map((m, i) => esc((c.disable_names && c.disable_names[i]) || m));
+  const body = `Отключение мода <b>${esc(myName)}</b> повлечёт изменения:
+    <div class="csc del"><b>➖ также отключатся (зависят от него):</b><br>${names.join(', ')}</div>
+    <div style="margin-top:10px">Продолжить?</div>`;
+  confirmBox('Отключить мод?', body, () => applyToggleNow(mid, false, [], c.disable));
+}
+
+function nameOfMid(mid) {
+  for (const k in NODE) if (NODE[k].mid === mid) {
+    return (STATE.name_mode === 'module' && NODE[k].name) ? NODE[k].name : NODE[k].label;
+  }
+  return mid.split('/').pop();
+}
+function cssEsc(s) { return String(s).replace(/["\\]/g, '\\$&'); }
 
 // ───────── действия установки/удаления ─────────
 function installSelected() {
@@ -502,6 +568,12 @@ async function setViewMode(mode) {
   STATE.tree_mode = mode; updateColHeader();
   await api().set_tree_mode(mode);
   refreshTree();
+}
+async function setNameMode(mode) {
+  document.querySelectorAll('#nameSeg button').forEach((b) => b.classList.toggle('on', b.dataset.nmode === mode));
+  STATE.name_mode = mode;
+  await api().set_name_mode(mode);
+  renderTree();                         // имя уже есть в узлах — перерисовки достаточно
 }
 
 // ───────── добавление мода ─────────
@@ -721,11 +793,16 @@ async function openModInfo(mid) {
 // ───────── утилиты ─────────
 function show(id) { $(id).classList.remove('hidden'); }
 function hide(id) { $(id).classList.add('hidden'); }
-function confirmBox(title, html, onOk, onCancel) {
+function confirmBox(title, html, onOk, onCancel, opts) {
+  opts = opts || {};
   $('confirmTitle').textContent = title;
   $('confirmBody').innerHTML = html;
+  const ok = $('confirmOk');
+  ok.style.display = opts.okHidden ? 'none' : '';
+  ok.textContent = opts.okLabel || 'Продолжить';
+  $('confirmCancel').textContent = opts.cancelLabel || 'Отмена';
   show('confirmOverlay');
-  $('confirmOk').onclick = () => { hide('confirmOverlay'); onOk(); };
+  ok.onclick = () => { hide('confirmOverlay'); if (onOk) onOk(); };
   $('confirmCancel').onclick = () => { hide('confirmOverlay'); if (onCancel) onCancel(); };
 }
 function toast(msg, kind) {

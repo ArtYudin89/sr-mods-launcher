@@ -49,7 +49,7 @@ IS_RWT = bool(EMBEDDED_TOKEN)
 DEFAULT_CONFIG = {
     'last_profile': 'default', 'profiles': ['default'], 'github_token': '',
     'repo': EMBEDDED_REPO or 'ArtYudin89/sr-mods-aggregator',
-    'tree_mode': 'folder', 'theme': 'dark', 'log_verbose': False,
+    'tree_mode': 'folder', 'name_mode': 'folder', 'theme': 'dark', 'log_verbose': False,
 }
 
 
@@ -119,6 +119,7 @@ class Api:
         self._packs_cache = None
         self._fixparent = {}
         self._sections = {}
+        self._names = {}
         self._descs = {}
         self._disk_index = None
         self._dl_bytes = 0
@@ -224,6 +225,7 @@ class Api:
         return {
             'theme': self.config.get('theme', 'dark'),
             'tree_mode': self.config.get('tree_mode', 'folder'),
+            'name_mode': self.config.get('name_mode', 'folder'),
             'log_verbose': self.config.get('log_verbose', False),
             'profiles': self.config.get('profiles', ['default']),
             'current_profile': self.current_profile,
@@ -244,6 +246,20 @@ class Api:
             p = self._mods_dir() / mid.replace('/', os.sep) / 'ModuleInfo.txt'
             self._sections[mid] = core.read_module_section(p) if p.exists() else ''
         return self._sections[mid]
+
+    def _name_of(self, mid):
+        """Имя мода как в игре — поле Name из ModuleInfo (диск, кэш). Фолбэк:
+        имя варианта из каталога, затем имя папки. Для режима «Имя из ModuleInfo»."""
+        if mid not in self._names:
+            p = self._mi_path(mid)
+            nm = ''
+            if p.exists():
+                nm = (core.module_card(p) or {}).get('name', '')
+            if not nm:
+                ce = self._catalog_entry(mid)
+                nm = (ce.get('name') if ce else '') or ''
+            self._names[mid] = core._strip_color(nm) if nm else mid.split('/')[-1]
+        return self._names[mid]
 
     def _mi_path(self, mid):
         return self._mods_dir() / mid.replace('/', os.sep) / 'ModuleInfo.txt'
@@ -409,6 +425,7 @@ class Api:
                 continue
             node = {
                 'iid': iid, 'label': label, 'kind': kind,
+                'name': (self._name_of(mid) if mid else label),
                 'status_class': sc, 'status': st,
                 'in_game': bool(mid and mid in modcfg),
                 'in_profile': bool(mid and mid in enabled),
@@ -441,6 +458,7 @@ class Api:
                      if inst_base else None),
             'queue': self._queue_summary(),
             'tree_mode': self._tree_mode(),
+            'name_mode': self.config.get('name_mode', 'folder'),
         }
 
     def _queue_summary(self):
@@ -494,6 +512,13 @@ class Api:
 
     def set_tree_mode(self, mode):
         self.config['tree_mode'] = mode
+        self._save_config()
+        return True
+
+    def set_name_mode(self, mode):
+        """Что показывать как имя мода в списке: 'folder' (имя папки) либо
+        'module' (поле Name из ModuleInfo — как в самой игре)."""
+        self.config['name_mode'] = 'module' if mode == 'module' else 'folder'
         self._save_config()
         return True
 
@@ -555,12 +580,60 @@ class Api:
         self._save_config()
         return {'ok': True, 'state': self.get_state()}
 
-    def toggle_enabled(self, mid, on):
+    def plan_enable(self, mid):
+        """Каскад при включении мода mid (как подтверждение в игре): какие
+        зависимости подключатся, какие конфликтующие отключатся, чего не хватает.
+        Возвращает {'ok', 'cascade': {add[], disable[], missing[], block} | None}.
+        cascade=None — каталог ещё не загружен (тогда фронт просто переключит)."""
+        cat = self._catalog_cache
+        if not cat:
+            return {'ok': True, 'cascade': None}
+        enabled = set(self.profile.get('enabled', []))
+        disk = set(self._disk_mods())
+        try:
+            c = core.plan_enable(mid, enabled, disk, cat, self._mods_dir(),
+                                 name_of=self._name_of)
+        except Exception as e:
+            return {'ok': True, 'cascade': None, 'error': str(e)}
+        # без изменений (нет зависимостей/конфликтов/недостающего) — каскад не нужен
+        if not (c['add'] or c['disable'] or c['missing']):
+            return {'ok': True, 'cascade': None}
+        nm = lambda m: self._name_of(m)
+        c['add_names'] = [nm(m) for m in c['add']]
+        c['disable_names'] = [nm(m) for m in c['disable']]
+        return {'ok': True, 'cascade': c}
+
+    def plan_disable(self, mid):
+        """Каскад при выключении мода mid: какие включённые моды зависят от него
+        (транзитивно) и отключатся следом. {'ok','cascade':{disable[],disable_names[]}|None}.
+        cascade=None — отключать нечего (никто не зависит)."""
+        enabled = set(self.profile.get('enabled', []))
+        try:
+            c = core.plan_disable(mid, enabled, self._catalog_cache or {},
+                                  self._mods_dir(), name_of=self._name_of)
+        except Exception as e:
+            return {'ok': True, 'cascade': None, 'error': str(e)}
+        if not c['disable']:
+            return {'ok': True, 'cascade': None}
+        c['disable_names'] = [self._name_of(m) for m in c['disable']]
+        return {'ok': True, 'cascade': c}
+
+    def toggle_enabled(self, mid, on, add=None, disable=None):
+        """Включить/выключить мод в сборке. При включении: add — зависимости к
+        подключению, disable — конфликтующие к отключению (plan_enable). При
+        выключении: disable — зависящие моды, отключаемые следом (plan_disable)."""
         en = self.profile.setdefault('enabled', [])
-        if on and mid not in en:
-            en.append(mid)
-        elif not on and mid in en:
-            en.remove(mid)
+        if on:
+            for m in [mid] + list(add or []):
+                if m not in en:
+                    en.append(m)
+            for m in (disable or []):
+                if m in en:
+                    en.remove(m)
+        else:
+            for m in [mid] + list(disable or []):
+                if m in en:
+                    en.remove(m)
         self._save_profile()
         return True
 
@@ -1257,12 +1330,21 @@ class Api:
         except Exception as e:
             rep = {}
             self.log(f'Совместимость: ошибка проверки паков ({e})')
+        # проверка набора «в сборке» по зависимостям/конфликтам (Name-aware)
+        enabled = set(self.profile.get('enabled', []))
         try:
-            deps = core.check_disk_dependencies(self._mods_dir()) or []
+            disk = set(self._disk_mods())
         except Exception:
-            deps = []
+            disk = set()
+        try:
+            setrep = core.check_enabled_compat(enabled, disk, self._catalog_cache or {},
+                                               self._mods_dir(), name_of=self._name_of) or {}
+        except Exception as e:
+            setrep = {}
+            self.log(f'Совместимость: ошибка проверки набора ({e})')
         items = []
         nm = lambda u: (packs.get(u) or {}).get('name', u)
+        mn = lambda m: (self._name_of(m) if m else m)   # имя мода как в игре
         if base_name:
             items.append({'level': 'ok', 'text': f'База установлена: {base_name}'})
         if rep.get('missing_base'):
@@ -1279,9 +1361,18 @@ class Api:
         if rep.get('mandatory'):
             names = ', '.join(nm(u) for u in rep['mandatory'])
             items.append({'level': 'info', 'text': f'Обязательны к обновлению (база/фикс): {names}'})
-        for d in deps:
+        # направление 1/2: у включённого мода есть зависимость не в сборке
+        for d in setrep.get('dep_issues', []):
+            if d.get('available'):
+                items.append({'level': 'warn',
+                              'text': f'Моду «{d.get("name")}» нужен «{d.get("dep")}», но он не в сборке — подключите его (или включение мода подтянет его само).'})
+            else:
+                items.append({'level': 'warn',
+                              'text': f'Моду «{d.get("name")}» нужен «{d.get("dep")}», которого нет ни в сборке, ни в каталоге, ни на диске.'})
+        # направление 2/2: два конфликтующих мода оба в сборке
+        for a, b in setrep.get('conflicts', []):
             items.append({'level': 'warn',
-                          'text': f'Моду «{d.get("name", d.get("mod"))}» не хватает: {", ".join(d.get("missing", []))}'})
+                          'text': f'Конфликт: «{mn(a)}» и «{mn(b)}» оба в сборке — оставьте один.'})
         if not items:
             items.append({'level': 'ok', 'text': 'Проблем не найдено.'})
         return {'ok': True, 'items': items, 'base': base_name}
@@ -1293,6 +1384,7 @@ class Api:
         self._packs_cache = None
         self._descs = {}
         self._sections = {}
+        self._names = {}
         self._lazy_load_catalog()
         return {'ok': True}
 

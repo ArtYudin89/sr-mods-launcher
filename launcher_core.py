@@ -850,6 +850,232 @@ def check_disk_dependencies(mods_dir, progress_cb=None, should_cancel=None):
     return out
 
 
+def _catalog_entry(catalog, mid):
+    """Запись каталога по mid (точно или по короткому имени-листу). None если нет."""
+    if mid in catalog:
+        return catalog[mid]
+    leaf = mid.split('/')[-1]
+    return next((v for k, v in catalog.items() if k.split('/')[-1] == leaf), None)
+
+
+def _name_token_fns(catalog, mods_dir, name_of=None):
+    """Вернуть (name_fn, tokens_fn) для опознания мода. tokens(mid) = {имя папки,
+    Name из ModuleInfo} — depends/conflicts ссылаются по Name (PolDomiks), а id/папка
+    могут быть другими (ShuDomiks). name_of — внешний кэш-резолвер mid->Name (опц.)."""
+    _ncache = {}
+
+    def _name(m):
+        if name_of:
+            try:
+                return name_of(m) or ''
+            except Exception:
+                return ''
+        if m not in _ncache:
+            p = Path(mods_dir) / m.replace('/', os.sep) / 'ModuleInfo.txt'
+            nm = (module_card(p) or {}).get('name', '') if p.is_file() else ''
+            if not nm:
+                ent = _catalog_entry(catalog, m)
+                nm = (ent.get('name') if ent else '') or ''
+            _ncache[m] = _strip_color(nm) if nm else ''
+        return _ncache[m]
+
+    def _tokens(m):
+        t = {m.split('/')[-1]}
+        nm = _name(m)
+        if nm:
+            t.add(nm)
+        return t
+
+    return _name, _tokens
+
+
+def _ref_in(ref, toks):
+    """Ссылка depends/conflicts совпала с набором токенов (по полному или листу)."""
+    return ref in toks or ref.split('/')[-1] in toks
+
+
+def _mod_reqs(mid, catalog, mods_dir):
+    """(depends, conflicts) короткими именами для мода mid. Источник: ModuleInfo
+    с диска (если мод установлен), иначе вариант из каталога. depends/conflicts в
+    игре указываются короткими именами мода — так и возвращаем."""
+    p = Path(mods_dir) / mid.replace('/', os.sep) / 'ModuleInfo.txt'
+    if p.is_file():
+        c = module_card(p)
+        return c.get('requires', []), c.get('conflicts', [])
+    ent = _catalog_entry(catalog, mid)
+    if ent:
+        var = (ent.get('variants') or [{}])[0]
+        return list(var.get('depends', [])), list(var.get('conflicts', []))
+    return [], []
+
+
+def plan_enable(mid, enabled, disk_mids, catalog, mods_dir, name_of=None):
+    """Каскад при ВКЛЮЧЕНИИ мода mid в сборку — как запрос подтверждения в игре.
+    enabled: текущий набор включённых mid; disk_mids: моды физически на диске;
+    catalog: load_catalog() (может быть пустым — тогда каскад минимален);
+    name_of: callable mid->Name (поле Name из ModuleInfo) с кэшем; если None —
+    читаем ModuleInfo/каталог сами.
+    Возвращает {'add': [...], 'disable': [...], 'missing': [...], 'block': bool}:
+      add     — зависимости (Dependence), которые подключатся (замыкание);
+      disable — уже включённые моды, конфликтующие с mid или его зависимостями;
+      missing — обязательные зависимости, которых нет нигде (каталог/диск) → block.
+    ВАЖНО: depends/conflicts в ModuleInfo ссылаются по ПОЛЮ Name (напр. PolDomiks),
+    а не по имени папки (ShuDomiks) — Pol*/Shu*-моды этим и отличаются. Поэтому
+    каждый мод опознаётся по НАБОРУ токенов {имя папки, Name из ModuleInfo}, и
+    ссылка сопоставляется с любым из них (иначе зависимость ложно «отсутствует»).
+
+    «Удовлетворена» зависимость, только если мод УЖЕ В СБОРКЕ (enabled) — мод на
+    диске, но не в сборке, игре не активирован, поэтому его НАДО подключить (add).
+    «Доступна» (можно подключить) = есть в каталоге ИЛИ на диске; нет нигде → block."""
+    catalog = catalog or {}
+    enabled = set(enabled)
+    disk_mids = set(disk_mids)
+    _name, _tokens = _name_token_fns(catalog, mods_dir, name_of)
+
+    # токен (имя папки ИЛИ Name) -> mid; каталог в приоритете для резолва зависимостей
+    token_to_mid = {}
+    for m in list(catalog.keys()) + list(disk_mids):
+        for t in _tokens(m):
+            token_to_mid.setdefault(t, m)
+    avail_tokens = set(token_to_mid)          # можно подключить (каталог ∪ диск)
+    present_tokens = set()                     # уже удовлетворено = только в сборке
+    for m in enabled:
+        present_tokens |= _tokens(m)
+
+    def _resolve(ref):
+        return token_to_mid.get(ref) or token_to_mid.get(ref.split('/')[-1])
+
+    add, missing, seen, add_tokens = [], [], set(), set()
+    queue = [mid]
+    while queue:
+        cur = queue.pop(0)
+        if cur in seen:
+            continue
+        seen.add(cur)
+        deps, _ = _mod_reqs(cur, catalog, mods_dir)
+        for d in deps:
+            if _ref_in(d, present_tokens) or _ref_in(d, add_tokens):
+                continue                       # уже есть/уже добавили
+            if not _ref_in(d, avail_tokens):
+                if d not in missing:
+                    missing.append(d)          # обязательной зависимости нет нигде
+                continue
+            did = _resolve(d)
+            if did and did not in enabled:
+                add.append(did)
+                add_tokens |= _tokens(did)
+                queue.append(did)
+
+    # конфликты: какие из УЖЕ включённых нужно выключить из-за mid и его зависимостей
+    newly = {mid} | set(add)
+    new_tokens = set()
+    for m in newly:
+        new_tokens |= _tokens(m)
+    disable = set()
+    for e in enabled:
+        if e == mid:
+            continue
+        etok = _tokens(e)
+        _, ecf = _mod_reqs(e, catalog, mods_dir)
+        # двунаправленно: новый конфликтует с включённым ИЛИ включённый с новым
+        e_conf_new = any(_ref_in(c, new_tokens) for c in ecf)
+        new_conf_e = False
+        for m in newly:
+            _, mcf = _mod_reqs(m, catalog, mods_dir)
+            if any(_ref_in(c, etok) for c in mcf):
+                new_conf_e = True
+                break
+        if e_conf_new or new_conf_e:
+            disable.add(e)
+
+    # транзитив: включённые моды, зависящие от выключаемых-по-конфликту, гаснут следом
+    # (иначе остались бы в сборке с битой зависимостью). Тот же приём, что в plan_disable.
+    changed = True
+    while changed:
+        changed = False
+        dis_tokens = set()
+        for r in disable:
+            dis_tokens |= _tokens(r)
+        for e in enabled:
+            if e == mid or e in disable:
+                continue
+            deps_e, _ = _mod_reqs(e, catalog, mods_dir)
+            if any(_ref_in(d, dis_tokens) for d in deps_e):
+                disable.add(e)
+                changed = True
+
+    return {'add': sorted(set(add)), 'disable': sorted(disable),
+            'missing': sorted(set(missing)), 'block': bool(missing)}
+
+
+def plan_disable(mid, enabled, catalog, mods_dir, name_of=None):
+    """Каскад при ВЫКЛЮЧЕНИИ мода mid из сборки: какие включённые моды зависят от
+    него (Dependence) и должны отключиться следом — ТРАНЗИТИВНО (зависящие от
+    зависящих). Возвращает {'disable': [...]} (без самого mid). Матч по токенам
+    {имя папки, Name}. Работает и без каталога — deps берутся из ModuleInfo на диске."""
+    catalog = catalog or {}
+    enabled = set(enabled)
+    _name, _tokens = _name_token_fns(catalog, mods_dir, name_of)
+    edeps = {m: _mod_reqs(m, catalog, mods_dir)[0] for m in enabled}
+
+    removed = {mid}
+    changed = True
+    while changed:
+        changed = False
+        rem_tokens = set()
+        for r in removed:
+            rem_tokens |= _tokens(r)
+        for e in enabled:
+            if e in removed:
+                continue
+            if any(_ref_in(d, rem_tokens) for d in edeps.get(e, [])):
+                removed.add(e)
+                changed = True
+    removed.discard(mid)
+    return {'disable': sorted(removed)}
+
+
+def check_enabled_compat(enabled, disk_mids, catalog, mods_dir, name_of=None):
+    """Проверка НАБОРА «в сборке» (enabled) по ModuleInfo Dependence/Conflict, матч по
+    токенам {имя папки, Name} (как plan_enable). Два направления:
+      'dep_issues': [{'mod','name','dep','available'}] — у включённого мода есть
+         зависимость, которой НЕТ в сборке. available=True — её можно подключить
+         (есть в каталоге/на диске); False — отсутствует везде (тогда никак).
+      'conflicts': [(mid_a, mid_b)] — два конфликтующих мода ОБА в сборке.
+    Это статический отчёт по уже собранному набору (в отличие от plan_enable —
+    каскада на ОДНО включение)."""
+    catalog = catalog or {}
+    enabled = set(enabled)
+    disk_mids = set(disk_mids)
+    _name, _tokens = _name_token_fns(catalog, mods_dir, name_of)
+
+    present_tokens = set()                     # токены того, что в сборке
+    tok_to_enabled = {}                        # токен -> включённый mid (для пар)
+    for m in enabled:
+        for t in _tokens(m):
+            present_tokens.add(t)
+            tok_to_enabled.setdefault(t, m)
+    avail_tokens = set()                        # что вообще можно подключить
+    for m in list(catalog.keys()) + list(disk_mids):
+        avail_tokens |= _tokens(m)
+
+    dep_issues, conflicts, seen = [], [], set()
+    for m in sorted(enabled):
+        deps, confs = _mod_reqs(m, catalog, mods_dir)
+        for d in deps:
+            if not _ref_in(d, present_tokens):
+                dep_issues.append({'mod': m, 'name': _name(m) or m.split('/')[-1],
+                                   'dep': d, 'available': _ref_in(d, avail_tokens)})
+        for c in confs:
+            other = tok_to_enabled.get(c) or tok_to_enabled.get(c.split('/')[-1])
+            if other and other != m:
+                pair = tuple(sorted((m, other)))
+                if pair not in seen:
+                    seen.add(pair)
+                    conflicts.append(pair)
+    return {'dep_issues': dep_issues, 'conflicts': conflicts}
+
+
 def scan_installed_mods(mods_dir):
     """Найти физически установленные моды в папке Mods игры — каталоги с ModuleInfo.txt.
     Возвращает список mod_id (путь после последнего 'Mods/' до папки мода, напр.
