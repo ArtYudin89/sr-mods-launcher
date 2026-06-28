@@ -5,8 +5,10 @@
 /webui/dist/
 /webui/_*.log
 # spec нового UI — коммитим (рецепт сборки), остальные .spec игнорируем
+# (секрета в spec нет — токен в gitignored embedded_secrets.py)
 *.spec
 !/webui/SRModsLauncher.spec
+!/webui/SRModsLauncher-RWT.spec
 
 # Артефакт релиза (пересобирается, кладётся в GitHub Release)
 /SRModsLauncher-source.zip
