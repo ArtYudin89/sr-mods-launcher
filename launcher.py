@@ -299,7 +299,7 @@ class Launcher:
         ttk.Label(r1, text='База:', background=self.theme['panel']).pack(side=tk.LEFT)
         self.base_var = tk.StringVar(value=self.profile.get('base', ''))
         base_cb = ttk.Combobox(r1, textvariable=self.base_var, width=10,
-                               values=['', 'redux', 'universe', 'shared'])
+                               values=['', 'original', 'redux', 'universe'])
         base_cb.pack(side=tk.LEFT, padx=6)
         base_cb.bind('<<ComboboxSelected>>', lambda e: (self._save_profile(), self._refresh_list()))
         _Tooltip(base_cb, 'База НАБОРА (переносимая часть профиля). База в папке игры '

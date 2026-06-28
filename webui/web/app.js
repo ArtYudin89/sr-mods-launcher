@@ -142,14 +142,16 @@ function wireUI() {
   $('addOkBtn').onclick = doAdd;
   $('addCamp').onchange = onAddCamp;
   $('addPack').onchange = onAddPack;
+  $('addMod').onchange = onAddModSel;
   // обновление
   $('mergeApplyBtn').onclick = doMergeApply;
   $('mergeSkipBtn').onclick = () => { hide('mergeOverlay'); api().merge_skip(); };
 
   // закрытие по клику на фон — только для «безопасных» модалок
   // (confirm/merge завязаны на состояние бэкенда → закрываются только кнопками)
-  ['settingsOverlay', 'profileOverlay', 'addOverlay'].forEach((id) =>
+  ['settingsOverlay', 'profileOverlay', 'addOverlay', 'infoOverlay'].forEach((id) =>
     $(id).onclick = (e) => { if (e.target === $(id)) $(id).classList.add('hidden'); });
+  $('infoCloseBtn').onclick = () => hide('infoOverlay');
   // закрыть фильтр-поповер по клику вне
   document.addEventListener('click', (e) => {
     if (!$('filterPop').classList.contains('hidden') &&
@@ -255,6 +257,8 @@ function renderTree() {
   body.querySelectorAll('.row.leaf').forEach((el) => el.onclick = (e) => onLeafClick(e, el.dataset.iid));
   body.querySelectorAll('.toggle.click').forEach((el) =>
     el.onclick = (e) => { e.stopPropagation(); onToggleClick(el); });
+  body.querySelectorAll('.info-btn').forEach((el) =>
+    el.onclick = (e) => { e.stopPropagation(); openModInfo(el.dataset.mid); });
   updateActionButtons();
 }
 
@@ -274,8 +278,12 @@ function leafRow(n, lvl) {
   const inProf = n.mid
     ? `<span class="toggle click${n.in_profile ? ' on' : ''}" data-mid="${esc(n.mid)}" data-on="${n.in_profile ? 1 : 0}" title="нажмите, чтобы включить/выключить в сборке">${n.in_profile ? '✓' : ''}</span>`
     : '';
+  const info = n.has_info
+    ? `<span class="info-btn" data-mid="${esc(n.mid)}" title="Подробнее о моде">ⓘ</span>` : '';
+  const desc = n.desc ? `<div class="mdesc">${esc(n.desc)}</div>` : '';
   return `<div class="row leaf lvl${lvl}${sel}" data-iid="${esc(n.iid)}">
-    <div class="name"><span class="tw">·</span><span class="label">${esc(n.label)}</span></div>
+    <div class="name"><span class="tw">·</span>
+      <span class="label-wrap"><span class="label">${esc(n.label)}</span>${desc}</span>${info}</div>
     <div class="cell">${esc(colValue(n) || '')}</div>
     <div class="cell">${inGame}</div>
     <div class="cell">${inProf}</div>
@@ -517,6 +525,16 @@ async function onAddPack() {
   $('addMod').disabled = false;
   $('addStatus').textContent = `Модов в паке: ${(r.mods || []).length}`;
 }
+async function onAddModSel() {
+  const mid = $('addMod').value;
+  if (!mid || mid === '_base') { $('addStatus').textContent = mid ? 'Общие файлы игры' : ''; return; }
+  $('addStatus').textContent = '…';
+  let r; try { r = await api().get_mod_info(mid); } catch (e) { r = null; }
+  const i = r && r.ok ? r.info : null;
+  $('addStatus').innerHTML = i && (i.small || i.full)
+    ? `<b>${esc(i.name || mid.split('/').pop())}</b> — ${esc(i.small || i.full).replace(/\n/g, ' ')}`
+    : esc(mid);
+}
 async function doAdd() {
   const mode = $('addOverlay').dataset.mode || 'src';
   let payload;
@@ -629,6 +647,32 @@ function appendLog(msg, cls) {
   line.textContent = msg;
   box.appendChild(line);
   box.scrollTop = box.scrollHeight;
+}
+
+// ───────── окно (i): информация о моде ─────────
+async function openModInfo(mid) {
+  if (!mid) return;
+  $('infoTitle').textContent = mid.split('/').pop();
+  $('infoBody').innerHTML = '<div class="sub">Загрузка…</div>';
+  show('infoOverlay');
+  let r;
+  try { r = await api().get_mod_info(mid); } catch (e) { r = null; }
+  if (!r || !r.ok) { $('infoBody').innerHTML = '<div class="sub">Нет информации (ModuleInfo не найден).</div>'; return; }
+  const i = r.info;
+  $('infoTitle').textContent = i.name || mid.split('/').pop();
+  const para = (t) => esc(t).replace(/\n/g, '<br>');
+  const chips = (arr) => (arr && arr.length)
+    ? arr.map((x) => `<span class="chip">${esc(x)}</span>`).join(' ') : '<span class="sub">—</span>';
+  const rows = [];
+  if (i.authors) rows.push(`<div class="i-row"><div class="i-k">Авторы</div><div class="i-v">${para(i.authors)}</div></div>`);
+  if (i.small) rows.push(`<div class="i-row"><div class="i-k">Кратко</div><div class="i-v">${para(i.small)}</div></div>`);
+  if (i.full) rows.push(`<div class="i-row"><div class="i-k">Описание</div><div class="i-v">${para(i.full)}</div></div>`);
+  if (i.requires && i.requires.length) rows.push(`<div class="i-row"><div class="i-k">Требует</div><div class="i-v">${chips(i.requires)}</div></div>`);
+  if (i.conflicts && i.conflicts.length) rows.push(`<div class="i-row"><div class="i-k">Конфликтует</div><div class="i-v">${chips(i.conflicts)}</div></div>`);
+  if (i.section) rows.push(`<div class="i-row"><div class="i-k">Раздел</div><div class="i-v">${esc(i.section)}</div></div>`);
+  rows.push(`<div class="i-row"><div class="i-k">Расположение</div><div class="i-v"><code>${esc(i.location || '')}</code></div></div>`);
+  if (!i.installed) rows.push('<div class="note" style="margin-top:8px">Мод ещё не установлен — показаны данные из каталога (без описания).</div>');
+  $('infoBody').innerHTML = rows.join('');
 }
 
 // ───────── утилиты ─────────

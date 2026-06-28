@@ -119,6 +119,7 @@ class Api:
         self._packs_cache = None
         self._fixparent = {}
         self._sections = {}
+        self._descs = {}
         self._disk_index = None
         self._dl_bytes = 0
         self._dl_lock = threading.Lock()
@@ -244,6 +245,56 @@ class Api:
             self._sections[mid] = core.read_module_section(p) if p.exists() else ''
         return self._sections[mid]
 
+    def _mi_path(self, mid):
+        return self._mods_dir() / mid.replace('/', os.sep) / 'ModuleInfo.txt'
+
+    def _catalog_entry(self, mid):
+        """Запись каталога по mid (точно или по короткому имени). None если нет."""
+        cat = self._catalog_cache or {}
+        if mid in cat:
+            return cat[mid]
+        leaf = mid.split('/')[-1]
+        return next((v for k, v in cat.items() if k.split('/')[-1] == leaf), None)
+
+    def _desc_of(self, mid):
+        """Краткое описание мода: с диска (ModuleInfo, кэш), фолбэк на каталог
+        (для модов сборки, ещё не установленных). '' если нигде нет."""
+        if mid not in self._descs:
+            p = self._mi_path(mid)
+            card = core.module_card(p) if p.exists() else {}
+            self._descs[mid] = card.get('small', '')
+        if self._descs[mid]:
+            return self._descs[mid]
+        ce = self._catalog_entry(mid)               # живой фолбэк (каталог грузится лениво)
+        return (ce.get('description') or '') if ce else ''
+
+    def get_mod_info(self, mid):
+        """Полная карточка мода для окна (i): из локального ModuleInfo, фолбэк на
+        каталог (description/full_description теперь есть и там)."""
+        info, mi_ok = {}, False
+        if mid:
+            p = self._mi_path(mid)
+            if p.exists():
+                info = core.module_card(p) or {}
+                mi_ok = bool(info)
+        if not mi_ok and mid:                       # фолбэк из каталога
+            ce = self._catalog_entry(mid)
+            if ce:
+                var = (ce.get('variants') or [{}])[0]
+                info = {'name': ce.get('name', ''), 'authors': ce.get('author', ''),
+                        'small': ce.get('description', ''),
+                        'full': ce.get('full_description', ''),
+                        'requires': var.get('depends', []),
+                        'conflicts': var.get('conflicts', []),
+                        'section': ce.get('section', ''), 'priority': ''}
+        if not info:
+            return {'ok': False}
+        info.setdefault('name', mid.split('/')[-1] if mid else '')
+        info['id'] = mid or ''
+        info['location'] = (mid or '').replace('/', '\\')   # как в игре: Категория\Имя
+        info['installed'] = mi_ok
+        return {'ok': True, 'info': info}
+
     def _mod_group(self, mid):
         folder = mid.split('/')[0] if '/' in mid else None
         if self._tree_mode() == 'section':
@@ -365,6 +416,8 @@ class Api:
                 'selectable': bool(iid),
                 'folder': (mid.split('/')[0] if mid and '/' in mid else ''),
                 'section': (self._section_of(mid) if mid else ''),
+                'desc': (self._desc_of(mid) if mid else ''),
+                'has_info': bool(mid),
                 'mergeable': bool(iid and (iid.startswith('d:') or iid in desc_iids)),
             }
             co = camp_obj(camp)

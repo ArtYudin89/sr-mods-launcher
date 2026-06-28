@@ -689,15 +689,24 @@ def load_packs(ref='state/packs.json', repo=None, token=None):
 
 def camp_packs(packs):
     """{лагерь: [{'key':'camp/unit','unit':..,'name':..,'tier':..}]} для выпадающих списков.
-    Сортировка по load_order."""
+    Сортировка по load_order.
+
+    Лагерь 'shared' — НЕ отдельная база (люди путались, что ставить): его юниты
+    подмешиваются в каждый реальный лагерь. Реальный key/camp ('shared/...')
+    сохраняется, чтобы установка тянула манифесты из mods/shared/<unit>/; флаг
+    'shared': True помечает такие записи для UI."""
     out = {}
+    shared = []
     for key, p in packs.items():
-        out.setdefault(p['camp'], []).append({
+        entry = {
             'key': key, 'camp': p['camp'], 'unit': p['name'], 'tier': p['tier'],
             'name': p.get('display_name', p['name']),
             'load_order': p.get('load_order', 999),
-        })
+            'shared': p['camp'] == 'shared',
+        }
+        (shared if entry['shared'] else out.setdefault(p['camp'], [])).append(entry)
     for camp in out:
+        out[camp].extend(shared)                 # shared доступен в каждой базе
         out[camp].sort(key=lambda x: (x['load_order'], x['unit']))
     return out
 
@@ -707,7 +716,7 @@ BASE_MARKERS = [
     ('redux_base_installer', 'redux', ['Den', 'Solyanka', 'FairansVision', 'AnotherMods']),
     ('universe_community', 'universe',
      ['Tweaks/CheatsOff', 'Evolution/EvoFreeInflation', 'PlanetaryBattles/PBHelpFromAbove']),
-    ('original_installer', 'redux',
+    ('original_installer', 'original',
      ['Tweaks/SR2Balance', 'Revolution/RevBomber', 'Tweaks/UIRecolor_ShuKlissan']),
 ]
 
@@ -755,6 +764,38 @@ def read_module_info(modinfo_path):
 def read_module_section(modinfo_path):
     """Поле Section из ModuleInfo.txt. '' если нет."""
     return read_module_info(modinfo_path).get('Section', '')
+
+
+def _strip_color(s):
+    """Убрать игровую разметку <color=...>...</color> для показа текста."""
+    return re.sub(r'</?color[^>]*>', '', s or '').strip()
+
+
+def module_card(modinfo_path):
+    """Карточка мода из ModuleInfo.txt для показа в лаунчере (как в самой игре):
+    краткое/полное описание, авторы, требования, конфликты, раздел. Русские поля
+    с фолбэком на английские; цветовая разметка <color> убирается. {} если файла нет."""
+    mi = read_module_info(modinfo_path)
+    if not mi:
+        return {}
+
+    def g(*keys):
+        for k in keys:
+            v = mi.get(k)
+            if v:
+                return _strip_color(v)
+        return ''
+
+    return {
+        'name': g('Name'),
+        'authors': g('Author', 'Autor'),
+        'small': g('SmallDescription', 'SmallDescriptionEng'),
+        'full': g('FullDescription', 'FullDescriptionEng'),
+        'requires': _split_modlist(mi.get('Dependence', '')),
+        'conflicts': _split_modlist(mi.get('Conflict', '')),
+        'section': g('Section', 'SectionEng'),
+        'priority': g('Priority'),
+    }
 
 
 def _split_modlist(val):

@@ -27,3 +27,6 @@ launcher_config.json
 _dl.zip
 _chunk_*
 _*_code.zip
+
+# Локальная раздача RWT (exe со вшитым токеном) — НЕ коммитить
+/RWT-раздача/
