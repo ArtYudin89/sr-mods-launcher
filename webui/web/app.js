@@ -158,9 +158,15 @@ function wireUI() {
     $(id).onclick = (e) => { if (e.target === $(id)) $(id).classList.add('hidden'); });
   $('infoCloseBtn').onclick = () => hide('infoOverlay');
   $('compatCloseBtn').onclick = () => hide('compatOverlay');
+  // контекстное меню (ПКМ)
+  $('ctxOpenMod').onclick = () => { if (ctxMid) api().open_mod_folder(ctxMid); hideCtxMenu(); };
+  $('ctxOpenMods').onclick = () => { api().open_mods_folder(); hideCtxMenu(); };
+  document.addEventListener('click', hideCtxMenu);
+  document.addEventListener('scroll', hideCtxMenu, true);
   // Esc закрывает верхнюю открытую модалку / поповер
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
+    if (!$('ctxMenu').classList.contains('hidden')) { hideCtxMenu(); return; }
     if (!$('filterPop').classList.contains('hidden')) { $('filterPop').classList.add('hidden'); return; }
     for (const id of ['infoOverlay', 'compatOverlay', 'addOverlay', 'profileOverlay', 'settingsOverlay']) {
       if (!$(id).classList.contains('hidden')) { hide(id); return; }
@@ -275,6 +281,8 @@ function renderTree() {
     el.onclick = (e) => { e.stopPropagation(); onToggleClick(el); });
   body.querySelectorAll('.info-btn').forEach((el) =>
     el.onclick = (e) => { e.stopPropagation(); openModInfo(el.dataset.mid); });
+  body.querySelectorAll('.row.leaf').forEach((el) =>
+    el.oncontextmenu = (e) => { e.preventDefault(); openCtxMenu(e, el.dataset.iid); });
   updateActionButtons();
 }
 
@@ -669,6 +677,20 @@ function appendLog(msg, cls) {
   box.appendChild(line);
   box.scrollTop = box.scrollHeight;
 }
+
+// ───────── контекстное меню (ПКМ по моду) ─────────
+let ctxMid = null;
+function openCtxMenu(e, iid) {
+  const n = NODE[iid];
+  ctxMid = (n && n.mid) || null;
+  $('ctxOpenMod').style.display = ctxMid ? '' : 'none';
+  const menu = $('ctxMenu');
+  menu.classList.remove('hidden');
+  const w = menu.offsetWidth || 200, h = menu.offsetHeight || 80;
+  menu.style.left = Math.min(e.clientX, window.innerWidth - w - 6) + 'px';
+  menu.style.top = Math.min(e.clientY, window.innerHeight - h - 6) + 'px';
+}
+function hideCtxMenu() { $('ctxMenu').classList.add('hidden'); }
 
 // ───────── окно (i): информация о моде ─────────
 async function openModInfo(mid) {

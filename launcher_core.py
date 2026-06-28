@@ -409,22 +409,36 @@ def list_unit_mods(repo, camp, unit, token):
 
 def reconstruct_unit(repo, camp, unit, mods_dir, token, progress_cb=None,
                      log=print, tmp_dir=None, dry_run=False, mod=None, should_cancel=None,
-                     part_cb=None, byte_cb=None, sha_sink=None):
+                     part_cb=None, byte_cb=None, sha_sink=None, skip_present=False):
     """Собрать юнит (или один мод mod=mod_key) из HF: код И ассеты берутся из
     content-addressed чанков asset_index по code.manifest + assets.manifest.
     mod=None -> весь юнит; mod='Кат/Имя' или '_base' -> только этот мод.
-    dry_run: посчитать и проверить без скачивания/записи. Возвращает stats."""
+    dry_run: посчитать и проверить без скачивания/записи. Возвращает stats.
+    skip_present: «починка» — файлы, которые УЖЕ есть на диске с верным sha,
+    не скачиваются (части без единого недостающего блоба пропускаются целиком).
+    Это сверяет хеши на диске (без сети) и качает только отличия/недостающее."""
     mods_dir = Path(mods_dir)
     tmp = Path(tmp_dir or mods_dir.parent)
     tmp.mkdir(parents=True, exist_ok=True)
     stats = {'code_files': 0, 'asset_files': 0, 'chunks': [], 'missing': 0,
-             'mod': mod, 'updated': None}
+             'mod': mod, 'updated': None, 'skipped': 0}
 
     index = json.loads(repo_file_bytes(repo, 'state/asset_index.json', token))
     code_man = _load_manifest(repo, f'mods/{camp}/{unit}/code.manifest.json', token)
     asset_man = _load_manifest(repo, f'mods/{camp}/{unit}/assets.manifest.json', token)
     if not code_man and not asset_man:
         raise RuntimeError(f'нет манифестов для {camp}/{unit} в {repo}')
+
+    if skip_present:
+        log('Проверяю, что уже на диске (сверка хешей, без скачивания)…')
+
+    def _on_disk_ok(relpath, sh):
+        """Файл уже лежит на диске по своему маршруту с верным sha?"""
+        where, rel = install_route(relpath)
+        if where is None:
+            return False
+        tgt = (mods_dir if where == 'mods' else mods_dir.parent) / rel
+        return tgt.is_file() and file_sha256(tgt) == sh
 
     # Сгруппировать нужные блобы по чанкам. Один sha может вести к нескольким
     # путям (дубли) и из обоих манифестов — храним список (relpath, kind).
@@ -434,11 +448,19 @@ def reconstruct_unit(repo, camp, unit, mods_dir, token, progress_cb=None,
             if mod is not None and mod_key(relpath) != mod:
                 continue
             sh = meta['sha256']
+            if skip_present:
+                _check_cancel(should_cancel)
+                if _on_disk_ok(relpath, sh):
+                    stats['skipped'] += 1
+                    continue
             b = index['blobs'].get(sh)
             if not b:
                 stats['missing'] += 1
                 continue
             need.setdefault(b['chunk'], {}).setdefault(sh, []).append((relpath, kind))
+
+    if skip_present and stats['skipped']:
+        log(f'Уже на диске и совпадает: {stats["skipped"]} файлов — скачивать не нужно.')
 
     stats['chunks'] = list(need.keys())
     for shamap in need.values():

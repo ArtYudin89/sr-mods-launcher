@@ -193,6 +193,12 @@ input,select{font-family:inherit;}
 .compat-row.ok .ci{color:var(--ok);}
 .compat-row.warn .ci{color:var(--warn);}
 .compat-row.info .ci{color:var(--accent);}
+/* контекстное меню (ПКМ) */
+.ctx-menu{position:fixed;z-index:60;min-width:200px;background:var(--panel);border:1px solid var(--line);
+  border-radius:9px;box-shadow:var(--shadow);padding:5px;display:flex;flex-direction:column;}
+.ctx-menu.hidden{display:none;}
+.ctx-menu button{text-align:left;padding:8px 11px;border-radius:6px;font-size:13px;color:var(--fg);background:transparent;}
+.ctx-menu button:hover{background:var(--row-hover);}
 
 ::-webkit-scrollbar{width:10px;height:10px;}
 ::-webkit-scrollbar-thumb{background:var(--line);border-radius:6px;}

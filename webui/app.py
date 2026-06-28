@@ -757,7 +757,8 @@ class Api:
                 core.reconstruct_unit(
                     m['repo'], p['camp'], p['name'], mods_dir, tok,
                     self._progress, self.log, tmp_dir=ROOT, should_cancel=self.should_cancel,
-                    part_cb=self._part_progress, byte_cb=self._byte_progress)
+                    part_cb=self._part_progress, byte_cb=self._byte_progress,
+                    skip_present=True)         # докачивать только недостающее/изменённое
                 if p.get('tier') == 'base':
                     self.profile['installed_base'] = p['name']
         elif m.get('type') == 'unit':
@@ -766,7 +767,8 @@ class Api:
                 m['repo'], m['camp'], m['unit'], mods_dir, tok,
                 self._progress, self.log, tmp_dir=ROOT, mod=m.get('mod') or None,
                 should_cancel=self.should_cancel,
-                part_cb=self._part_progress, byte_cb=self._byte_progress)
+                part_cb=self._part_progress, byte_cb=self._byte_progress,
+                skip_present=True)             # «починка»: сверка хешей, качаем только отличия
         elif m.get('type') == 'desc':
             idx = core.load_chunk_index(repo=self._repo(), token=tok)
             desc = core.descriptor_for({'id': m['id']} if not m.get('url') else {'url': m['url']},
