@@ -16,7 +16,8 @@ def put(data: bytes) -> str:
     return sh
 
 
-def fake_fetch_blobs(index, shas, token, tmp, log=print, progress_cb=None, should_cancel=None):
+def fake_fetch_blobs(index, shas, token, tmp, log=print, progress_cb=None, should_cancel=None,
+                     **kwargs):
     return {s: BLOBS[s] for s in set(shas) if s in BLOBS}
 
 

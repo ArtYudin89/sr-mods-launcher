@@ -1387,6 +1387,7 @@ class Api:
         self._cancel.clear()
         self._merge_queue = targets
         self._merge_remember = {}          # запомненные решения конфликтов (status -> code)
+        self._merge_remember_on = False    # «больше не спрашивать» до конца серии
         self._emit('op_begin', {'name': 'Обновление'})
         if skipped:
             self.log(f'Пропущено {skipped} (паки/лагеря — через «Установить»).')
@@ -1436,19 +1437,17 @@ class Api:
         self._emit('merge_plan', self._serialize_plan(plan))
 
     def _remembered_decisions(self, plan):
-        """decisions для всех конфликтов плана, покрытых памятью (self._merge_remember).
-        None — если есть конфликт, тип которого не запомнен (нужен диалог). Пустой
-        dict (нет конфликтов при непустой памяти) → авто-применение без вопросов."""
-        rem = getattr(self, '_merge_remember', None)
-        if not rem:
+        """Если игрок выбрал «Запомнить» (self._merge_remember_on) — применяем все
+        следующие моды БЕЗ диалога: конфликты решаются запомненным выбором по типу,
+        а не покрытые типы — дефолтом; add/update и так авто. Иначе (None) — диалог."""
+        if not getattr(self, '_merge_remember_on', False):
             return None
+        rem = getattr(self, '_merge_remember', {})
+        has_snap = plan.get('has_snapshot', True)
         dec = {}
         for r in plan['actions']:
             if r['status'] in CONFLICT_OPTIONS:
-                code = rem.get(r['status'])
-                if not code:
-                    return None
-                dec[r['relpath']] = code
+                dec[r['relpath']] = rem.get(r['status']) or core.default_decision(r['status'], has_snap)
         return dec
 
     def _serialize_plan(self, plan):
@@ -1542,8 +1541,10 @@ class Api:
         self._pending_merge = None
         decisions = decisions or {}
         if remember:
-            # запомнить выбор по ТИПУ конфликта (текст/бинарь/удалён) до конца очереди:
-            # для каждого конфликта плана сохраняем выбранный (или дефолтный) код
+            # «больше не спрашивать до конца серии»: дальше моды применяются авто.
+            # Запоминаем ВЫБОР по типу конфликта (текст/бинарь/удалён); для не покрытых
+            # типов в следующих модах применится дефолт. Добавления/обновления и так авто.
+            self._merge_remember_on = True
             self._merge_remember = getattr(self, '_merge_remember', {})
             has_snap = pm['plan'].get('has_snapshot', True)
             for r in pm['plan']['actions']:
@@ -1566,11 +1567,15 @@ class Api:
     def _apply_merge_worker(self, pm, decisions):
         mods_dir = self._mods_dir()
         desc, plan, index, target = pm['desc'], pm['plan'], pm['index'], pm['target']
+        self._pack_ctx = f'обновление: {(desc or {}).get("id", "")}'
+        self._dl_bytes = 0
         try:
             stats = core.apply_update_plan(desc, plan, decisions, mods_dir, index,
                                            token=self._token(), log=self.log,
                                            tmp_dir=ROOT, progress_cb=self._progress,
-                                           should_cancel=self.should_cancel)
+                                           should_cancel=self.should_cancel,
+                                           byte_cb=self._byte_progress,
+                                           part_cb=self._part_progress)
             self.log(f'Применено: {stats}')
             # мод обновлён → снять пометку «⬆ обновление» (строка станет «✅ установлен»)
             upd_mid = target[1] if target[0] == 'disk' else (desc.get('id') if desc else None)

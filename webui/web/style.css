@@ -207,8 +207,16 @@ input,select{font-family:inherit;}
 
 /* фильтр-поповер */
 .pop-host{position:relative;}
-.fcount{background:var(--accent);color:var(--accent-fg);border-radius:999px;padding:0 6px;font-size:10.5px;font-weight:700;margin-left:2px;}
+/* счётчик фильтра — абсолютный бейдж на углу кнопки: не меняет её ширину,
+   поэтому соседние кнопки тулбара не «прыгают» при включении фильтра */
+#filterBtn{position:relative;}
+.fcount{position:absolute;top:-6px;right:-6px;min-width:9px;height:15px;line-height:15px;
+  text-align:center;background:var(--accent);color:var(--accent-fg);border-radius:999px;
+  padding:0 5px;font-size:10px;font-weight:700;box-shadow:0 0 0 2px var(--panel);}
 .fcount:empty{display:none;}
+/* во время операции интерактив тулбара/таблицы заблокирован (прокрутка остаётся) */
+body.busy .seg button,body.busy .icon-btn{opacity:.5;pointer-events:none;}
+body.busy .toggle.click{pointer-events:none;opacity:.5;}
 .popover{
   position:absolute;top:calc(100% + 6px);left:0;z-index:40;width:268px;
   background:var(--panel);border:1px solid var(--line);border-radius:11px;

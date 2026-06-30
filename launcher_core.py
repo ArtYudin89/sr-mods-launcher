@@ -1515,7 +1515,7 @@ def save_snapshot_from_desc(mods_dir, desc, snap_dir=None):
 
 
 def fetch_blobs(index, shas, token, tmp, log=print, progress_cb=None, should_cancel=None,
-                byte_cb=None):
+                byte_cb=None, part_cb=None):
     """Скачать блобы по sha256 из content-addressed чанков. -> {sha: bytes}.
     Чанк скачивается один раз, из него извлекаются все нужные блобы."""
     tmp = Path(tmp)
@@ -1544,6 +1544,7 @@ def fetch_blobs(index, shas, token, tmp, log=print, progress_cb=None, should_can
     workers = max(1, min(PARALLEL_DOWNLOADS, len(chunks)))
     ex = ThreadPoolExecutor(max_workers=workers)
     futs = {ex.submit(fetch, c): c for c in chunks}
+    done = 0
     try:
         for fut in as_completed(futs):
             _check_cancel(should_cancel)
@@ -1555,6 +1556,9 @@ def fetch_blobs(index, shas, token, tmp, log=print, progress_cb=None, should_can
                     except KeyError:
                         log(f'[!] файл {sh[:12]} не найден в части')
             cpath.unlink(missing_ok=True)
+            done += 1
+            if part_cb:
+                part_cb(done, len(chunks))
     except BaseException:
         for f in futs:
             f.cancel()
@@ -1746,7 +1750,7 @@ def summarize_plan(actions):
 
 def apply_update_plan(desc, plan, decisions, mods_dir, index, token=None, log=print,
                       snap_dir=None, tmp_dir=None, progress_cb=None, dry_run=False,
-                      should_cancel=None):
+                      should_cancel=None, byte_cb=None, part_cb=None):
     """Применить план обновления. decisions: {relpath: решение} для conflict_*:
       conflict_text/binary -> 'mine' | 'theirs' | 'both' (both: новая рядом как .srnew)
       conflict_deleted     -> 'keep' | 'delete'
@@ -1767,7 +1771,8 @@ def apply_update_plan(desc, plan, decisions, mods_dir, index, token=None, log=pr
             need_theirs.add(tsha)
     need_theirs.discard(None)
     blobs = ({} if dry_run else
-             fetch_blobs(index, need_theirs, token, tmp, log, progress_cb, should_cancel))
+             fetch_blobs(index, need_theirs, token, tmp, log, progress_cb, should_cancel,
+                         byte_cb=byte_cb, part_cb=part_cb))
 
     stats = {'written': 0, 'merged': 0, 'kept': 0, 'deleted': 0,
              'sidecar': 0, 'conflict': 0, 'skipped': 0}

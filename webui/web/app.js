@@ -323,7 +323,7 @@ function leafRow(n, lvl) {
     <div class="cell"><span class="badge b-${n.status_class}">${esc(n.status)}</span></div></div>`;
 }
 
-function toggleCollapse(key) { collapsed.has(key) ? collapsed.delete(key) : collapsed.add(key); renderTree(); }
+function toggleCollapse(key) { if (busy) return; collapsed.has(key) ? collapsed.delete(key) : collapsed.add(key); renderTree(); }
 function collapseAll() {
   (TREE.camps || []).forEach((c) => {
     collapsed.add(groupKey(c.label, null));
@@ -385,6 +385,7 @@ function applyToggleNow(mid, on, add, disable) {
   api().toggle_enabled(mid, on, add || [], disable || []).then(refreshTree);
 }
 function onToggleClick(el) {
+  if (busy) return;                       // во время операции не трогаем подключение
   const mid = el.dataset.mid;
   const on = el.dataset.on !== '1';
   if (on) {
@@ -759,21 +760,30 @@ function doMergeApply() {
 }
 
 // ───────── прогресс/лог ─────────
+// контролы таблицы/тулбара, блокируемые на время операции (прокрутку не трогаем)
+const BUSY_CTRLS = ['addBtn', 'installBtn', 'installSetBtn', 'mergeBtn', 'compatBtn', 'removeBtn',
+  'launchBtn', 'indexBtn', 'clearModsBtn', 'refreshBtn', 'searchInp', 'expandBtn', 'collapseBtn', 'filterBtn'];
+function setBusyControls(on) {
+  document.body.classList.toggle('busy', on);
+  BUSY_CTRLS.forEach((id) => { const e = $(id); if (e) e.disabled = on; });
+  document.querySelectorAll('#viewSeg button, #nameSeg button').forEach((b) => b.disabled = on);
+  if (on) $('filterPop').classList.add('hidden');     // закрыть фильтр, чтобы не меняли
+}
 function onOpBegin() {
   busy = true;
+  setBusyControls(true);
   $('progressCard').classList.remove('hidden');
   $('progBar').classList.add('pulse');
   $('progText').textContent = 'Подготовка…';
   $('progRight').textContent = '';
-  ['addBtn', 'installBtn', 'installSetBtn', 'mergeBtn', 'compatBtn', 'removeBtn', 'launchBtn', 'indexBtn', 'clearModsBtn'].forEach((id) => $(id).disabled = true);
 }
 function onOpEnd(d) {
   busy = false;
+  setBusyControls(false);
   $('progBar').classList.remove('pulse');
   $('progBar').querySelector('i').style.width = '100%';
   $('progText').textContent = (d && d.status) || 'Готово';
   setTimeout(() => $('progressCard').classList.add('hidden'), 1600);
-  ['launchBtn', 'indexBtn', 'clearModsBtn'].forEach((id) => $(id).disabled = false);
   updateActionButtons();
   toast((d && d.status) || 'Готово', (d && d.status === 'Ошибка') ? 'err' : 'ok');
 }
