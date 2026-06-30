@@ -1421,7 +1421,7 @@ class Api:
                     'display': core.install_relpath(r['relpath']),
                     'status': r['status'],
                     'options': [{'label': l, 'code': c} for l, c in CONFLICT_OPTIONS[r['status']]],
-                    'default': core.DECISION_DEFAULTS.get(r['status']),
+                    'default': core.default_decision(r['status'], plan.get('has_snapshot', True)),
                 })
         return {
             'id': plan.get('id'), 'version_old': plan.get('version_old'),
@@ -1503,9 +1503,10 @@ class Api:
             # запомнить выбор по ТИПУ конфликта (текст/бинарь/удалён) до конца очереди:
             # для каждого конфликта плана сохраняем выбранный (или дефолтный) код
             self._merge_remember = getattr(self, '_merge_remember', {})
+            has_snap = pm['plan'].get('has_snapshot', True)
             for r in pm['plan']['actions']:
                 if r['status'] in CONFLICT_OPTIONS:
-                    code = decisions.get(r['relpath']) or core.DECISION_DEFAULTS.get(r['status'])
+                    code = decisions.get(r['relpath']) or core.default_decision(r['status'], has_snap)
                     if code:
                         self._merge_remember[r['status']] = code
         threading.Thread(target=self._apply_merge_worker, args=(pm, decisions),

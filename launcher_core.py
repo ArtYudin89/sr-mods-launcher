@@ -1614,6 +1614,17 @@ DECISION_DEFAULTS = {
 }
 
 
+def default_decision(status, has_snapshot=True):
+    """Дефолтное решение конфликта. БЕЗ снимка (готовая сборка — базы 3-way нет, и
+    каждый отличающийся файл выглядит конфликтом) «обновить» означает взять НОВУЮ
+    версию, иначе обновление ничего не изменит. Со снимком конфликт настоящий (и
+    игрок, и мод правили один файл) → бережём правку игрока ('mine'). Удалённый в
+    новой версии файл не трогаем в любом случае ('keep')."""
+    if not has_snapshot and status in ('conflict_text', 'conflict_binary'):
+        return 'theirs'
+    return DECISION_DEFAULTS.get(status)
+
+
 def plan_update_merge(desc, mods_dir, index, token=None, log=print, snapshot=None,
                       snap_dir=None, tmp_dir=None, progress_cb=None, should_cancel=None):
     """Спланировать обновление мода с 3-way merge (НЕ пишет на диск).
@@ -1719,11 +1730,12 @@ def apply_update_plan(desc, plan, decisions, mods_dir, index, token=None, log=pr
     tmp = Path(tmp_dir or mods_dir.parent)
     decisions = decisions or {}
     actions = plan['actions']
+    has_snap = plan.get('has_snapshot', True)
 
     need_theirs = set()
     for r in actions:
         st, rp, tsha = r['status'], r['relpath'], r.get('theirs')
-        dec = decisions.get(rp, DECISION_DEFAULTS.get(st))
+        dec = decisions.get(rp, default_decision(st, has_snap))
         if st in ('add', 'update'):
             need_theirs.add(tsha)
         elif st in ('conflict_text', 'conflict_binary') and dec in ('theirs', 'both'):
@@ -1737,7 +1749,7 @@ def apply_update_plan(desc, plan, decisions, mods_dir, index, token=None, log=pr
     for r in actions:
         st, rp, tsha = r['status'], r['relpath'], r.get('theirs')
         fp = mods_dir / install_relpath(rp)
-        dec = decisions.get(rp, DECISION_DEFAULTS.get(st))
+        dec = decisions.get(rp, default_decision(st, has_snap))
 
         if st in ('add', 'update'):
             data = blobs.get(tsha)
