@@ -282,7 +282,7 @@ class Api:
         if key not in self._fork_man_cache:
             path = f'mods/{camp}/{unit}/{which}.manifest.json'
             try:
-                self._fork_man_cache[key] = core._fetch_json(path, repo, tok) or {}
+                self._fork_man_cache[key] = core._load_manifest(repo, path, tok) or {}
             except Exception:
                 self._fork_man_cache[key] = {}
         return self._fork_man_cache[key]
@@ -330,11 +330,11 @@ class Api:
                 raise core.OperationCancelled()
             c, u = p.get('camp'), p.get('name')
             try:
-                cm = core._fetch_json(f'mods/{c}/{u}/code.manifest.json', repo, tok)
+                cm = core._load_manifest(repo, f'mods/{c}/{u}/code.manifest.json', tok)
             except Exception:
                 cm = {}
             try:
-                am = core._fetch_json(f'mods/{c}/{u}/assets.manifest.json', repo, tok)
+                am = core._load_manifest(repo, f'mods/{c}/{u}/assets.manifest.json', tok)
             except Exception:
                 am = {}
             ff, _fidx = self._fork_unit_overlay(c, u)
