@@ -744,19 +744,24 @@ def pick_disk_variant(catalog, mod_id, mods_dir, repo=None, token=None, prefer_c
     info['reason'] при неудаче: 'not_in_catalog' | 'load_failed'."""
     catalog = catalog or {}
     ent = catalog.get(mod_id)
-    if not ent:                                  # fallback: матч по короткому имени
+    # варианты mod_id + его Pol/Shu-сиблингов (mod_id@<Name>): одна дисковая папка
+    # (ShusRangers/X) может нести genuine X ИЛИ X@PolX (redux_base кладёт Pol-контент
+    # под тем же путём). Кандидаты ОБЯЗАНЫ включать сиблингов — иначе на redux-сборке
+    # выбирается чужой genuine-вариант и затирает Pol-папку (вечная «нужда в обновлении»).
+    variants = list(ent['variants']) if ent else []
+    for k, e in catalog.items():
+        if k != mod_id and k.startswith(mod_id + '@'):
+            variants.extend(e.get('variants', []))
+    if not variants:                             # fallback: матч по короткому имени
         leaf = mod_id.split('/')[-1]
         cands = [k for k in catalog if k.split('/')[-1] == leaf]
-        if len(cands) == 1:
-            ent = catalog[cands[0]]
-        elif not cands:
+        if not cands:
             return None, {'reason': 'not_in_catalog'}
-        else:                                    # неоднозначно — берём с тем же лагерем
-            ent = catalog[cands[0]]
+        variants = list(catalog[cands[0]]['variants'])   # неоднозначно — берём первый
     mods_dir = Path(mods_dir)
     best, best_desc, best_info = None, None, None
     load_errors = 0
-    for v in ent['variants']:
+    for v in variants:
         _check_cancel(should_cancel)
         try:
             desc = load_descriptor(v['path'], repo, token)

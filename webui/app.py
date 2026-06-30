@@ -125,6 +125,7 @@ class Api:
         self._idx_by_repo = {}             # repo -> chunk-index (кэш индексов форков)
         self._fork_man_cache = {}          # (repo,camp,unit,which) -> манифест форка
         self._pub_cache = {}               # camp -> {install_rel: sha} (опубликованные файлы)
+        self._pub_cache_all = None         # [(source, {install_rel: sha})] по ВСЕМ лагерям
         self._updates = {}                 # mid -> {changed, added} (найденные обновления)
         self._fixparent = {}
         self._sections = {}
@@ -345,12 +346,48 @@ class Api:
         self._pub_cache[camp] = out
         return out
 
+    def _all_unit_maps(self):
+        """Список (source='camp/unit', {install_rel: sha}) по ВСЕМ лагерям (+форки).
+        Кэш на сессию. Детект ОБЯЗАН выбирать вариант среди ВСЕХ источников — как
+        обновление (pick_disk_variant). Иначе кросс-лагерные моды вечно «нуждаются в
+        обновлении»: genuine Shu* живут в universe/original, а redux_base несёт Pol*-
+        контент под теми же путями ShusRangers/* → сверка с базовым лагерем всегда
+        расходится, а обновление пишет другой вариант → они никогда не сходятся."""
+        if self._pub_cache_all is not None:
+            return self._pub_cache_all
+        repo, tok = self._repo(), self._token()
+        packs = self._get_packs(tok)
+        out = []
+        for p in packs.values():
+            if self.should_cancel():
+                raise core.OperationCancelled()
+            c, u = p.get('camp'), p.get('name')
+            try:
+                cm = core._load_manifest(repo, f'mods/{c}/{u}/code.manifest.json', tok)
+            except Exception:
+                cm = {}
+            try:
+                am = core._load_manifest(repo, f'mods/{c}/{u}/assets.manifest.json', tok)
+            except Exception:
+                am = {}
+            ff, _fidx = self._fork_unit_overlay(c, u)
+            fmap = core.published_files(cm, am, ff)
+            if fmap:
+                out.append((f'{c}/{u}', fmap))
+        self._pub_cache_all = out
+        return out
+
     @staticmethod
-    def _best_unit_files(mid, unit_maps, disk):
-        """Файлы мода mid из юнита, лучше всего совпадающего с диском (cover, затем
-        match) — аналог pick_disk_variant, но по кэшированным манифестам. {rel:sha}|None."""
+    def _best_unit_files(mid, unit_maps, disk, allowed_sources=None):
+        """Файлы мода mid из источника, лучше всего совпадающего с диском (cover, затем
+        match) — аналог pick_disk_variant, но по кэшированным манифестам. allowed_sources
+        (множество 'camp/unit' = варианты мода в каталоге) ограничивает выбор логическими
+        вариантами: иначе Pol*-контент под путём Shu*/ в redux_base посчитался бы тем же
+        модом (матч по пути), и сверка ушла бы на чужой вариант. {rel:sha}|None."""
         best, best_score = None, (-1, -1)
-        for _label, fmap in unit_maps:
+        for label, fmap in unit_maps:
+            if allowed_sources is not None and label not in allowed_sources:
+                continue
             sub = {r: s for r, s in fmap.items() if r == mid or r.startswith(mid + '/')}
             if not sub:
                 continue
@@ -388,8 +425,17 @@ class Api:
             if not camp:
                 self.log('Не удалось определить базу в Mods — сверять не с чем.')
                 self._finish_check(); return
-            self.log(f'Сверяю с опубликованной версией ({camp})…')
-            unit_maps = self._unit_maps(camp)
+            self.log(f'Сверяю с опубликованными вариантами (база: {camp})…')
+            unit_maps = self._all_unit_maps()
+            # источники по логическому id + его Pol/Shu-сиблингам (id@<Name>): дисковая
+            # папка ShusRangers/X может нести genuine X ИЛИ X@PolX (redux_base кладёт
+            # Pol-контент под тем же путём) — кандидаты ОБЯЗАНЫ включать сиблингов, иначе
+            # на redux-сборке Pol-папка вечно «обновляется» к чужому genuine-варианту.
+            src_by_base = {}
+            for k, e in cat.items():
+                bid = k.split('@', 1)[0]
+                src_by_base.setdefault(bid, set()).update(
+                    v['source'] for v in e.get('variants', []))
             # доступные на сервере блобы: файлы, которых нет на HF, скачать нельзя →
             # не считаем их обновлением (иначе вечный ложный «⬆ обновление»)
             avail = set()
@@ -406,9 +452,17 @@ class Api:
                 if self.should_cancel():
                     raise core.OperationCancelled()
                 disk = {rel: f['sha'] for rel, f in (m.get('files') or {}).items()}
-                theirs = self._best_unit_files(mid, unit_maps, disk)
+                allowed = src_by_base.get(mid)
+                if not allowed:                    # фолбэк по короткому имени (как в index_disk_mods)
+                    leaf = mid.split('/')[-1]
+                    cands = [k for k in cat if k.split('/')[-1] == leaf]
+                    if len(cands) == 1:
+                        allowed = src_by_base.get(cands[0].split('@', 1)[0])
+                if not allowed:
+                    continue                       # мода нет в каталоге → сверять не с чем
+                theirs = self._best_unit_files(mid, unit_maps, disk, allowed)
                 if not theirs:
-                    continue                       # мод не из этого лагеря/нет в публикации
+                    continue                       # ни один логический вариант не лёг на диск
                 unavail += sum(1 for s in theirs.values() if s not in avail)
                 theirs = {r: s for r, s in theirs.items() if s in avail}
                 if not theirs:
@@ -821,6 +875,7 @@ class Api:
         self._idx_by_repo = {}
         self._fork_man_cache = {}
         self._pub_cache = {}
+        self._pub_cache_all = None
         self._updates = {}
         self._cat_loading = False
 
@@ -1522,7 +1577,12 @@ class Api:
                         f'это нормально: один мод может совпадать с версией из другого источника')
             self.log(f'Вариант: {info["source"]} (совпало {info["match"]}/{info["cover"]} '
                      f'из {info["total"]}){note}')
-            snap = core.load_install_snapshot(mods_dir, desc.get('id'))
+            # дисковая папка mid — стабильная идентичность мода. Если подобран Pol/Shu-
+            # сиблинг (id вида ShusRangers/X@PolX), ставим его контент, но снимок и детект
+            # ключуются по mid (папке), а не по id варианта — иначе снимок не находится.
+            if desc.get('id') != mid:
+                desc = dict(desc); desc['id'] = mid
+            snap = core.load_install_snapshot(mods_dir, mid)
             desc, index = self._overlay_theirs(desc, info.get('source'))
             plan = core.plan_update_merge(desc, mods_dir, index, token=tok, log=self.log,
                                           snapshot=snap, tmp_dir=ROOT,
