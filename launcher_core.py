@@ -24,6 +24,12 @@ from pathlib import Path
 import requests
 
 API = 'https://api.github.com'
+# Сырой доступ к файлам публичного репозитория. В отличие от Contents API
+# (api.github.com) у него НЕТ анонимного лимита 60 запросов/час — критично, когда
+# репо публичный и токена нет (каталог + сотни дескрипторов набора). Приватные
+# репо raw не отдаёт, поэтому при наличии токена остаёмся на Contents API.
+RAW = 'https://raw.githubusercontent.com'
+DEFAULT_BRANCH = 'master'
 
 # Сколько частей качать одновременно. На канале с большой задержкой/DPI один поток
 # не насыщает полосу (предел = окно/RTT) — параллель даёт основной выигрыш (как у
@@ -93,13 +99,19 @@ def gh_json(url, token, params=None, should_cancel=None):
     return _with_retries(do, should_cancel=should_cancel)
 
 
-def repo_file_bytes(repo, path, token, should_cancel=None):
-    """Сырой файл из репозитория (contents API, работает и для приватных).
+def repo_file_bytes(repo, path, token, should_cancel=None, branch=None):
+    """Сырой файл из репозитория. С токеном — Contents API (работает и для
+    приватных). Без токена (публичный репо) — raw.githubusercontent.com, чтобы не
+    упереться в анонимный лимит 60 запросов/час у api.github.com.
     С ретраями: нестабильная сеть/DPI рвут TLS — раньше падало по таймауту."""
+    branch = branch or DEFAULT_BRANCH
     def do():
-        r = requests.get(f'{API}/repos/{repo}/contents/{path}',
-                         headers=_headers(token, 'application/vnd.github.raw'),
-                         timeout=(10, 60))
+        if token:
+            r = _SESSION.get(f'{API}/repos/{repo}/contents/{path}',
+                             headers=_headers(token, 'application/vnd.github.raw'),
+                             timeout=(10, 60))
+        else:
+            r = _SESSION.get(f'{RAW}/{repo}/{branch}/{path}', timeout=(10, 60))
         r.raise_for_status()
         return r.content
     return _with_retries(do, should_cancel=should_cancel)
@@ -409,7 +421,8 @@ def list_unit_mods(repo, camp, unit, token):
 
 def reconstruct_unit(repo, camp, unit, mods_dir, token, progress_cb=None,
                      log=print, tmp_dir=None, dry_run=False, mod=None, should_cancel=None,
-                     part_cb=None, byte_cb=None, sha_sink=None, skip_present=False):
+                     part_cb=None, byte_cb=None, sha_sink=None, skip_present=False,
+                     fork_files=None, fork_index=None):
     """Собрать юнит (или один мод mod=mod_key) из HF: код И ассеты берутся из
     content-addressed чанков asset_index по code.manifest + assets.manifest.
     mod=None -> весь юнит; mod='Кат/Имя' или '_base' -> только этот мод.
@@ -440,24 +453,33 @@ def reconstruct_unit(repo, camp, unit, mods_dir, token, progress_cb=None,
         tgt = (mods_dir if where == 'mods' else mods_dir.parent) / rel
         return tgt.is_file() and file_sha256(tgt) == sh
 
-    # Сгруппировать нужные блобы по чанкам. Один sha может вести к нескольким
-    # путям (дубли) и из обоих манифестов — храним список (relpath, kind).
-    need = {}    # chunk -> {sha256: [(relpath, kind), ...]}
+    # Эффективный набор файлов пака: основной + наложение форков (переопределение
+    # существующих путей и добавление файлов форка к модам этого пака).
+    eff = {}    # relpath -> (sha256, kind)
     for kind, man in (('code', code_man), ('asset', asset_man)):
         for relpath, meta in man.items():
             if mod is not None and mod_key(relpath) != mod:
                 continue
-            sh = meta['sha256']
-            if skip_present:
-                _check_cancel(should_cancel)
-                if _on_disk_ok(relpath, sh):
-                    stats['skipped'] += 1
-                    continue
-            b = index['blobs'].get(sh)
-            if not b:
-                stats['missing'] += 1
+            eff[relpath] = (meta['sha256'], kind)
+    if fork_files:
+        eff = overlay_manifest(eff, fork_files)
+        index = merge_chunk_indexes([fork_index, index])   # форки приоритетнее
+        log('Наложение форков на пак включено.')
+
+    # Сгруппировать нужные блобы по чанкам. Один sha может вести к нескольким
+    # путям (дубли) и из обоих манифестов — храним список (relpath, kind).
+    need = {}    # chunk -> {sha256: [(relpath, kind), ...]}
+    for relpath, (sh, kind) in eff.items():
+        if skip_present:
+            _check_cancel(should_cancel)
+            if _on_disk_ok(relpath, sh):
+                stats['skipped'] += 1
                 continue
-            need.setdefault(b['chunk'], {}).setdefault(sh, []).append((relpath, kind))
+        b = index['blobs'].get(sh)
+        if not b:
+            stats['missing'] += 1
+            continue
+        need.setdefault(b['chunk'], {}).setdefault(sh, []).append((relpath, kind))
 
     if skip_present and stats['skipped']:
         log(f'Уже на диске и совпадает: {stats["skipped"]} файлов — скачивать не нужно.')
@@ -567,6 +589,125 @@ def descriptor_for(sel, catalog=None, repo=None, token=None):
     if not path:
         return None
     return load_descriptor(path, repo, token)
+
+
+# ---------------------------------------------------------------------------
+# Наложение форков (дополнительных репозиториев) на основной.
+# Мод существует, только если он есть в ОСНОВНОМ каталоге (форк не добавляет новые
+# моды). Разрешение источника файлов — ПОФАЙЛОВОЕ: набор путей объединяется в
+# рамках мода, и для каждого пути выигрывает самый приоритетный репозиторий, где
+# этот путь присутствует (форки бьют основной). Каждый файл скачивается из HF
+# того репозитория, чей дескриптор «выиграл» (через объединённый chunk-index).
+# ---------------------------------------------------------------------------
+
+def _fileset_version(files):
+    """Версия мода = хэш слитого набора path->sha256 (рецепт как у агрегатора)."""
+    flat = {}
+    for kind in ('code', 'assets'):
+        for rp, meta in (files.get(kind) or {}).items():
+            flat[rp] = meta.get('sha256')
+    payload = json.dumps(sorted(flat.items()), ensure_ascii=False)
+    return hashlib.sha256(payload.encode('utf-8')).hexdigest()[:16]
+
+
+def merge_descriptors(descs):
+    """Слить дескрипторы ОДНОГО мода из нескольких репо в эффективный (наложение).
+    descs — в порядке приоритета, ВЫСШИЙ первым: [форк_верх, ..., форк_низ, основной].
+    Идентичность/метаданные (id/source/name/depends/conflicts) берутся из ОСНОВНОГО
+    (последнего) — он задаёт «что это за мод». Файлы объединяются в рамках мода:
+    для каждого пути выигрывает первый (приоритетный) дескриптор, где путь есть;
+    version пересчитывается по слитому набору. Исходники не мутируются.
+    [] -> None; один дескриптор -> он же без изменений."""
+    descs = [d for d in descs if d]
+    if not descs:
+        return None
+    if len(descs) == 1:
+        return descs[0]
+    merged = dict(descs[-1])                      # основной — носитель идентичности
+    files = {'code': {}, 'assets': {}}
+    for d in reversed(descs):                     # низший приоритет первым → высший перезапишет
+        for kind in ('code', 'assets'):
+            for rp, meta in (d.get('files', {}).get(kind) or {}).items():
+                files[kind][rp] = meta
+    merged['files'] = files
+    merged['version'] = _fileset_version(files)
+    merged['overlaid'] = True
+    return merged
+
+
+def merge_chunk_indexes(indexes):
+    """Объединить несколько asset_index (по одному на репо) в один.
+    indexes — в порядке приоритета, ВЫСШИЙ первым. Блобы адресуются по sha256
+    (контент идентичен при равном sha), поэтому при коллизии достаточно взять
+    первый. Имена частей у разных репо могут совпадать при разном url — поэтому
+    ключ части в объединённом индексе неймспейсится номером источника.
+    -> {'blobs': {sha:{chunk}}, 'chunks': {chunk:{url,store}}}."""
+    indexes = [i for i in indexes if i]
+    if not indexes:
+        return {'blobs': {}, 'chunks': {}}
+    if len(indexes) == 1:
+        return indexes[0]
+    blobs, chunks = {}, {}
+    for n, idx in enumerate(indexes):            # высший приоритет первым
+        for sh, b in (idx.get('blobs') or {}).items():
+            if sh in blobs:
+                continue                          # приоритетный источник уже дал этот блоб
+            cname = b.get('chunk')
+            key = f'{n}:{cname}'                  # неймспейс по источнику — без коллизий имён
+            blobs[sh] = {'chunk': key}
+            cm = (idx.get('chunks') or {}).get(cname)
+            if cm is not None:
+                chunks[key] = cm
+    return {'blobs': blobs, 'chunks': chunks}
+
+
+def _mod_roots(relpaths):
+    """Корни модов пака = папки, содержащие ModuleInfo.txt (по путям манифеста)."""
+    roots = set()
+    for rp in relpaths:
+        parts = rp.replace('\\', '/').split('/')
+        if parts[-1].lower() == 'moduleinfo.txt':
+            roots.add('/'.join(parts[:-1]))
+    return roots
+
+
+def overlay_manifest(main_map, fork_files):
+    """Наложить файлы форков на манифест пака (для bulk-установки лагеря/пака).
+    main_map / fork_files: {relpath: (sha256, kind)}. fork_files уже слиты по
+    приоритету (высший выиграл). Правило:
+      * путь есть в основном  -> ПЕРЕОПРЕДЕЛИТЬ файлом форка;
+      * пути нет, но он внутри мода, ПРИСУТСТВУЮЩЕГО в этом паке (под папкой с
+        ModuleInfo.txt) -> ДОБАВИТЬ (объединение в рамках мода);
+      * иначе (мод не из этого пака) -> игнорировать (форк не добавляет новые моды).
+    Возвращает эффективный {relpath: (sha256, kind)}."""
+    eff = dict(main_map)
+    roots = _mod_roots(main_map)
+    for rp, val in fork_files.items():
+        if rp in main_map:
+            eff[rp] = val                        # переопределение
+        else:
+            nrp = rp.replace('\\', '/')
+            if any(nrp.startswith(r + '/') for r in roots):
+                eff[rp] = val                    # добавление к моду этого пака
+    return eff
+
+
+def published_files(code_man, asset_man, fork_files=None):
+    """Карта опубликованных файлов пака {install_rel: sha256} (только то, что ложится
+    в Mods) — для пофайловой сверки обновлений с диском. Форки накладываются
+    (overlay_manifest). install_rel — путь относительно Mods (как ключи дискового
+    индекса), root/игровые файлы пропускаются (их нет в индексе модов)."""
+    main_map = {}
+    for kind, man in (('code', code_man or {}), ('asset', asset_man or {})):
+        for rp, meta in man.items():
+            main_map[rp] = (meta['sha256'], kind)
+    eff = overlay_manifest(main_map, fork_files) if fork_files else main_map
+    out = {}
+    for rp, (sha, _kind) in eff.items():
+        where, rel = install_route(rp)
+        if where == 'mods':
+            out[rel.replace('\\', '/')] = sha
+    return out
 
 
 def pick_disk_variant(catalog, mod_id, mods_dir, repo=None, token=None, prefer_camp=None,

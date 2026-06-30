@@ -173,6 +173,17 @@
             <div class="sub">Нужен только для приватного репозитория. Оставьте пустым, если не знаете, что это.</div>
             <input id="setToken" type="password" placeholder="оставьте пустым, если не требуется">
           </div>
+          <div class="m-row">
+            <label>Дополнительные репозитории (форки)</label>
+            <div class="sub">Накладываются <b>поверх</b> основного по приоритету (верхний — выше). Форк может
+              заменить или добавить отдельные файлы мода; моды, которых нет в основном репозитории, не ставятся.</div>
+            <div id="forkList"></div>
+            <div style="display:flex;gap:8px;margin-top:6px">
+              <input id="forkRepo" style="flex:1" placeholder="owner/repo — дополнительный репозиторий-агрегатор">
+              <input id="forkToken" type="password" style="width:150px" placeholder="токен (если приватный)">
+              <button class="btn" id="forkAddBtn" type="button">Добавить</button>
+            </div>
+          </div>
         </details>
       </div>
       <div class="m-foot">
@@ -272,6 +283,10 @@
         <div id="mergeConflicts"></div>
       </div>
       <div class="m-foot">
+        <label style="margin-right:auto;display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--muted)"
+               title="Применять выбранные решения по типам конфликтов ко всем оставшимся модам этого обновления, не спрашивая по каждому">
+          <input type="checkbox" id="mergeRemember"> Запомнить решения для остальных модов
+        </label>
         <button class="btn ghost" id="mergeSkipBtn" title="Не применять — перейти к следующему / закончить">Пропустить</button>
         <button class="btn primary" id="mergeApplyBtn">Применить</button>
       </div>

@@ -49,6 +49,10 @@ IS_RWT = bool(EMBEDDED_TOKEN)
 DEFAULT_CONFIG = {
     'last_profile': 'default', 'profiles': ['default'], 'github_token': '',
     'repo': EMBEDDED_REPO or 'ArtYudin89/sr-mods-aggregator',
+    # Дополнительные репозитории-форки, накладываются ПОВЕРХ основного по приоритету
+    # (первый = высший). Каждый: {'repo':'owner/name', 'token':''}. Форк не добавляет
+    # новые моды (мод обязан быть в основном), а переопределяет/дополняет ФАЙЛЫ модов.
+    'forks': [],
     'tree_mode': 'folder', 'name_mode': 'folder', 'theme': 'dark', 'log_verbose': False,
 }
 
@@ -117,6 +121,11 @@ class Api:
         self._cancel = threading.Event()
         self._catalog_cache = None
         self._packs_cache = None
+        self._cat_by_repo = {}             # repo -> catalog (кэш каталогов форков)
+        self._idx_by_repo = {}             # repo -> chunk-index (кэш индексов форков)
+        self._fork_man_cache = {}          # (repo,camp,unit,which) -> манифест форка
+        self._pub_cache = {}               # camp -> {install_rel: sha} (опубликованные файлы)
+        self._updates = {}                 # mid -> {changed, added} (найденные обновления)
         self._fixparent = {}
         self._sections = {}
         self._names = {}
@@ -170,6 +179,230 @@ class Api:
     def _repo(self):
         return (self.config.get('repo', '').strip() or EMBEDDED_REPO
                 or 'ArtYudin89/sr-mods-aggregator')
+
+    # ───────── форки (дополнительные репозитории) ─────────
+    def _forks(self):
+        """Список форков из конфига: [{'repo','token'}], в порядке приоритета."""
+        out = []
+        for f in self.config.get('forks', []) or []:
+            repo = (f.get('repo') or '').strip()
+            if repo:
+                out.append({'repo': repo, 'token': (f.get('token') or '').strip() or None})
+        return out
+
+    def _sources(self):
+        """Источники в порядке приоритета (ВЫСШИЙ первым): форки + основной последним.
+        Основной задаёт, какие моды вообще существуют; форки переопределяют файлы."""
+        return self._forks() + [{'repo': self._repo(), 'token': self._token()}]
+
+    def _catalog_for(self, repo, token):
+        """Каталог конкретного репо (с кэшем). Для основного — общий self._catalog_cache."""
+        if repo == self._repo():
+            if self._catalog_cache is None:
+                self._catalog_cache = core.load_catalog(
+                    'descriptors/catalog.json', repo, token) or {}
+            return self._catalog_cache
+        if repo not in self._cat_by_repo:
+            try:
+                self._cat_by_repo[repo] = core.load_catalog(
+                    'descriptors/catalog.json', repo, token) or {}
+            except Exception as e:
+                self.log(f'⚠ форк {repo}: каталог не загружен ({e})')
+                self._cat_by_repo[repo] = {}
+        return self._cat_by_repo[repo]
+
+    def _index_for(self, repo, token, desc=None):
+        """chunk-index конкретного репо (с кэшем)."""
+        if repo not in self._idx_by_repo:
+            self._idx_by_repo[repo] = core.load_chunk_index(
+                desc=desc, repo=repo, token=token)
+        return self._idx_by_repo[repo]
+
+    def _overlay(self, mod_id, source=None):
+        """Эффективный дескриптор мода с наложением форков + объединённый индекс.
+        Мод обязан быть в ОСНОВНОМ каталоге (форк не добавляет новые моды) — иначе
+        (None, None). Без форков эквивалентно обычной установке по дескриптору."""
+        sources = self._sources()
+        main = sources[-1]
+        main_cat = self._catalog_for(main['repo'], main['token'])
+        if mod_id not in main_cat:
+            return None, None              # нет в основном -> не ставим
+        descs, indexes = [], []
+        for src in sources:
+            repo, tok = src['repo'], src['token']
+            cat = main_cat if src is main else self._catalog_for(repo, tok)
+            if mod_id not in cat:
+                continue                   # этот репо не содержит мод -> пропустить
+            sel = {'id': mod_id}
+            if src is main and source:
+                sel['source'] = source
+            try:
+                d = core.descriptor_for(sel, cat, repo, tok)
+            except Exception as e:
+                self.log(f'⚠ {repo}: дескриптор {mod_id} не загружен ({e})')
+                d = None
+            if not d:
+                continue
+            descs.append(d)
+            try:
+                indexes.append(self._index_for(repo, tok, desc=d))
+            except Exception as e:
+                self.log(f'⚠ {repo}: индекс частей не загружен ({e})')
+        if not descs:
+            return None, None
+        return core.merge_descriptors(descs), core.merge_chunk_indexes(indexes)
+
+    def _overlay_plan(self, plan):
+        """Наложить форки на каждый мод плана набора (resolve_set). Мутирует
+        plan['mods'] эффективными дескрипторами, возвращает объединённый chunk-index.
+        Если форков нет — None (вызывающий грузит индекс как раньше)."""
+        if not self._forks():
+            return None
+        indexes = []
+        for mid, d in list(plan['mods'].items()):
+            odesc, oidx = self._overlay(mid, d.get('source'))
+            if odesc:
+                plan['mods'][mid] = odesc
+                if oidx:
+                    indexes.append(oidx)
+        return core.merge_chunk_indexes(indexes) if indexes else None
+
+    def _overlay_theirs(self, desc, source, allow=True):
+        """Для merge: «новая версия» мода с наложением форков. -> (desc, index).
+        Без форков (или allow=False, напр. форк-по-URL) — исходный desc + его индекс."""
+        if allow and self._forks() and desc.get('id'):
+            o_desc, o_index = self._overlay(desc.get('id'), source)
+            if o_desc:
+                return o_desc, o_index
+        return desc, core.load_chunk_index(desc=desc, repo=self._repo(), token=self._token())
+
+    def _fork_manifest(self, repo, tok, camp, unit, which):
+        """Манифест форка для пака camp/unit (which='code'|'assets'). {} если нет."""
+        key = (repo, camp, unit, which)
+        if key not in self._fork_man_cache:
+            path = f'mods/{camp}/{unit}/{which}.manifest.json'
+            try:
+                self._fork_man_cache[key] = core._fetch_json(path, repo, tok) or {}
+            except Exception:
+                self._fork_man_cache[key] = {}
+        return self._fork_man_cache[key]
+
+    def _fork_unit_overlay(self, camp, unit):
+        """Наложение форков на пак camp/unit для bulk-установки. Форк должен держать
+        файлы под тем же путём пака (mods/camp/unit/*.manifest.json). Возвращает
+        (fork_files {relpath:(sha,kind)}, fork_index) или (None, None) если форков/
+        совпадений нет. Приоритет: высший форк выигрывает по совпавшему пути."""
+        forks = self._forks()
+        if not forks:
+            return None, None
+        merged = {}
+        indexes = []
+        for src in forks:                          # высший приоритет первым
+            repo, tok = src['repo'], src['token']
+            cm = self._fork_manifest(repo, tok, camp, unit, 'code')
+            am = self._fork_manifest(repo, tok, camp, unit, 'assets')
+            if not cm and not am:
+                continue
+            for kind, man in (('code', cm), ('asset', am)):
+                for rp, meta in (man or {}).items():
+                    if rp not in merged:           # высший приоритет уже занял путь
+                        merged[rp] = (meta['sha256'], kind)
+            try:
+                indexes.append(self._index_for(repo, tok))
+            except Exception as e:
+                self.log(f'⚠ форк {repo}: индекс частей не загружен ({e})')
+        if not merged:
+            return None, None
+        return merged, core.merge_chunk_indexes(indexes)
+
+    def _published_map(self, camp):
+        """{install_rel: sha} опубликованной версии лагеря (все его юниты + shared,
+        с наложением форков). Кэш на сессию. Для пофайловой сверки обновлений."""
+        if camp in self._pub_cache:
+            return self._pub_cache[camp]
+        repo, tok = self._repo(), self._token()
+        packs = self._get_packs(tok)
+        units = [p for p in packs.values()
+                 if p.get('camp') == camp or p.get('camp') == 'shared']
+        pub = {}
+        for p in units:
+            if self.should_cancel():
+                raise core.OperationCancelled()
+            c, u = p.get('camp'), p.get('name')
+            try:
+                cm = core._fetch_json(f'mods/{c}/{u}/code.manifest.json', repo, tok)
+            except Exception:
+                cm = {}
+            try:
+                am = core._fetch_json(f'mods/{c}/{u}/assets.manifest.json', repo, tok)
+            except Exception:
+                am = {}
+            ff, _fidx = self._fork_unit_overlay(c, u)
+            pub.update(core.published_files(cm, am, ff))
+        self._pub_cache[camp] = pub
+        return pub
+
+    def check_updates(self):
+        """Проверить обновления ПОФАЙЛОВОЙ сверкой: хеши файлов на диске (из индекса)
+        против опубликованных манифестов (+форки). Запускается фоном."""
+        if self.busy:
+            return {'ok': False, 'error': 'Уже идёт операция.'}
+        if self._game_root() is None:
+            return {'ok': False, 'error': 'Сначала укажите папку игры.'}
+        self.busy = True
+        self._cancel.clear()
+        self._emit('op_begin', {'name': 'Проверка обновлений'})
+        threading.Thread(target=self._check_updates_worker, daemon=True).start()
+        return {'ok': True}
+
+    def _check_updates_worker(self):
+        try:
+            mods_dir = self._mods_dir()
+            cat = self._catalog_for(self._repo(), self._token())
+            self.log('Хеширую файлы на диске (инкрементально)…')
+            idx = core.index_disk_mods(mods_dir, cat, prev_index=self._disk_index,
+                                       log=self.log, progress_cb=self._progress,
+                                       should_cancel=self.should_cancel)
+            core.save_disk_index(mods_dir, idx)
+            self._disk_index = idx
+            base = idx.get('base')
+            camp = base.get('camp') if base else None
+            if not camp:
+                self.log('Не удалось определить базу в Mods — сверять не с чем.')
+                self._finish_check(); return
+            self.log(f'Сверяю с опубликованной версией ({camp})…')
+            pub = self._published_map(camp)
+            ups = {}
+            for mid, m in idx.get('mods', {}).items():
+                if self.should_cancel():
+                    raise core.OperationCancelled()
+                disk = {rel: f['sha'] for rel, f in (m.get('files') or {}).items()}
+                ch = ad = 0
+                for rel, sha in pub.items():
+                    if rel == mid or rel.startswith(mid + '/'):
+                        d = disk.get(rel)
+                        if d is None:
+                            ad += 1
+                        elif d != sha:
+                            ch += 1
+                if ch + ad:
+                    ups[mid] = {'changed': ch, 'added': ad}
+            self._updates = ups
+            for pm in self.profile.get('mods', []):
+                if pm.get('type') == 'desc':
+                    pm['update_available'] = bool(pm.get('id') in ups)
+            self.log(f'Готово. Модов с обновлением: {len(ups)}'
+                     + (': ' + ', '.join(sorted(ups)[:20]) if ups else '.'))
+            self._emit('tree_dirty')
+        except core.OperationCancelled:
+            self.log('Проверка обновлений отменена.')
+        except Exception as e:
+            self.log(f'ОШИБКА проверки обновлений: {e}')
+        self._finish_check()
+
+    def _finish_check(self):
+        self.busy = False
+        self._emit('op_end', {'status': 'Готово'})
 
     def _game_root(self):
         gp = (self.profile.get('game_path') or '').strip()
@@ -233,6 +466,7 @@ class Api:
             'base': self.profile.get('base', ''),
             'repo': self._repo(),
             'has_token': bool(self._token()),
+            'forks': self._forks_public(),
             'is_rwt': IS_RWT,
             'busy': self.busy,
         }
@@ -395,7 +629,12 @@ class Api:
                 continue
             seen.add(mid)
             unknown = (idx_mods.get(mid) or {}).get('status') == 'unknown'
-            sc, st = ('unknown', '❓ не в каталоге') if unknown else ('ok', '✅ установлен')
+            if mid in self._updates:
+                sc, st = ('upd', '⬆ обновление')
+            elif unknown:
+                sc, st = ('unknown', '❓ не в каталоге')
+            else:
+                sc, st = ('ok', '✅ установлен')
             rows.append((camp_disk, self._mod_group(mid), 'мод',
                          mid.split('/')[-1], sc, st, ts, 'd:' + mid, mid))
 
@@ -541,7 +780,36 @@ class Api:
     def _invalidate_remote_cache(self):
         self._catalog_cache = None
         self._packs_cache = None
+        self._cat_by_repo = {}
+        self._idx_by_repo = {}
+        self._fork_man_cache = {}
+        self._pub_cache = {}
+        self._updates = {}
         self._cat_loading = False
+
+    def set_forks(self, forks):
+        """Сохранить список форков (доп. репозиториев). forks: [{'repo','token'}].
+        Приоритет = порядок в списке (первый — высший)."""
+        prev = {f.get('repo'): (f.get('token') or '')
+                for f in self.config.get('forks', []) or []}
+        clean = []
+        for f in (forks or []):
+            repo = (f.get('repo') or '').strip()
+            if not repo:
+                continue
+            tok = (f.get('token') or '').strip()
+            if not tok and repo in prev:
+                tok = prev[repo]          # токен не вводили заново -> сохранить прежний
+            clean.append({'repo': repo, 'token': tok})
+        self.config['forks'] = clean
+        self._invalidate_remote_cache()
+        self._save_config()
+        return {'ok': True, 'forks': self._forks_public()}
+
+    def _forks_public(self):
+        """Форки для UI: токен не отдаём целиком, только признак наличия."""
+        return [{'repo': f['repo'], 'has_token': bool(f['token'])}
+                for f in self._forks()]
 
     def switch_profile(self, name):
         if name == self.current_profile:
@@ -827,26 +1095,35 @@ class Api:
             for k, p in enumerate(units, 1):
                 self._pack_ctx = f'пак {k}/{ntot} · {p["name"]}'
                 self.log(f'--- {p["name"]} ({p["tier"]}) ---')
+                ff, fidx = self._fork_unit_overlay(p['camp'], p['name'])
                 core.reconstruct_unit(
                     m['repo'], p['camp'], p['name'], mods_dir, tok,
                     self._progress, self.log, tmp_dir=ROOT, should_cancel=self.should_cancel,
                     part_cb=self._part_progress, byte_cb=self._byte_progress,
-                    skip_present=True)         # докачивать только недостающее/изменённое
+                    skip_present=True,         # докачивать только недостающее/изменённое
+                    fork_files=ff, fork_index=fidx)
                 if p.get('tier') == 'base':
                     self.profile['installed_base'] = p['name']
         elif m.get('type') == 'unit':
             self._pack_ctx = m.get('name', m.get('unit', ''))
+            ff, fidx = self._fork_unit_overlay(m['camp'], m['unit'])
             core.reconstruct_unit(
                 m['repo'], m['camp'], m['unit'], mods_dir, tok,
                 self._progress, self.log, tmp_dir=ROOT, mod=m.get('mod') or None,
                 should_cancel=self.should_cancel,
                 part_cb=self._part_progress, byte_cb=self._byte_progress,
-                skip_present=True)             # «починка»: сверка хешей, качаем только отличия
+                skip_present=True,             # «починка»: сверка хешей, качаем только отличия
+                fork_files=ff, fork_index=fidx)
         elif m.get('type') == 'desc':
-            idx = core.load_chunk_index(repo=self._repo(), token=tok)
-            desc = core.descriptor_for({'id': m['id']} if not m.get('url') else {'url': m['url']},
-                                       self._catalog_cache, self._repo(), tok)
+            if m.get('url'):               # явный форк одного мода по URL (старое поведение)
+                idx = core.load_chunk_index(repo=self._repo(), token=tok)
+                desc = core.descriptor_for({'url': m['url']}, self._catalog_cache,
+                                           self._repo(), tok)
+            else:                          # наложение форков поверх основного (по файлам)
+                desc, idx = self._overlay(m['id'], m.get('source'))
             if desc:
+                if desc.get('overlaid'):
+                    self.log('  (с наложением форков)')
                 core.install_descriptor(
                     desc, mods_dir, idx, tok, self._progress, self.log,
                     tmp_dir=ROOT, should_cancel=self.should_cancel,
@@ -951,9 +1228,13 @@ class Api:
                 except Exception as e:
                     self.log(f'ОШИБКА {m.get("name", "?")}: {e}')
             if plan and plan.get('order'):        # каталожные моды + зависимости
-                idx_url = next((d.get('chunk_index_url') for d in plan['mods'].values()
-                                if d.get('chunk_index_url')), None)
-                index = core.load_chunk_index(url=idx_url, repo=repo, token=tok)
+                ov_index = self._overlay_plan(plan)   # наложить форки на каждый мод плана
+                if ov_index is not None:
+                    index = ov_index
+                else:
+                    idx_url = next((d.get('chunk_index_url') for d in plan['mods'].values()
+                                    if d.get('chunk_index_url')), None)
+                    index = core.load_chunk_index(url=idx_url, repo=repo, token=tok)
                 self._pack_ctx = 'набор модов'
                 core.install_set(plan, mods_dir, index, token=tok, log=self.log,
                                  tmp_dir=ROOT, should_cancel=self.should_cancel,
@@ -1068,6 +1349,7 @@ class Api:
         self.busy = True
         self._cancel.clear()
         self._merge_queue = targets
+        self._merge_remember = {}          # запомненные решения конфликтов (status -> code)
         self._emit('op_begin', {'name': 'Обновление'})
         if skipped:
             self.log(f'Пропущено {skipped} (паки/лагеря — через «Установить»).')
@@ -1098,7 +1380,34 @@ class Api:
             self._merge_next()
             return
         self._pending_merge = {'target': target, 'desc': desc, 'plan': plan, 'index': index}
+        # «Запомнить решения до конца обновления»: если все конфликты этого мода
+        # покрыты ранее запомненными решениями (по типу конфликта) — применяем без
+        # диалога, чтобы не спрашивать по каждому моду.
+        auto = self._remembered_decisions(plan)
+        if auto is not None:
+            self.log(f'{plan.get("id")}: применяю запомненные решения конфликтов.')
+            pm = self._pending_merge
+            self._pending_merge = None
+            threading.Thread(target=self._apply_merge_worker, args=(pm, auto),
+                             daemon=True).start()
+            return
         self._emit('merge_plan', self._serialize_plan(plan))
+
+    def _remembered_decisions(self, plan):
+        """decisions для всех конфликтов плана, покрытых памятью (self._merge_remember).
+        None — если есть конфликт, тип которого не запомнен (нужен диалог). Пустой
+        dict (нет конфликтов при непустой памяти) → авто-применение без вопросов."""
+        rem = getattr(self, '_merge_remember', None)
+        if not rem:
+            return None
+        dec = {}
+        for r in plan['actions']:
+            if r['status'] in CONFLICT_OPTIONS:
+                code = rem.get(r['status'])
+                if not code:
+                    return None
+                dec[r['relpath']] = code
+        return dec
 
     def _serialize_plan(self, plan):
         groups = {}
@@ -1137,7 +1446,7 @@ class Api:
             if snap is None:
                 self.log('Нет снимка прошлой установки — сначала установите мод лаунчером один раз.')
                 self._merge_next(); return
-            index = core.load_chunk_index(desc=desc, repo=repo, token=tok)
+            desc, index = self._overlay_theirs(desc, desc.get('source'), allow=not m.get('url'))
             plan = core.plan_update_merge(desc, mods_dir, index, token=tok, log=self.log,
                                           snapshot=snap, tmp_dir=ROOT,
                                           progress_cb=self._progress,
@@ -1173,7 +1482,7 @@ class Api:
             self.log(f'Вариант: {info["source"]} (совпало {info["match"]}/{info["cover"]} '
                      f'из {info["total"]}){note}')
             snap = core.load_install_snapshot(mods_dir, desc.get('id'))
-            index = core.load_chunk_index(desc=desc, repo=repo, token=tok)
+            desc, index = self._overlay_theirs(desc, info.get('source'))
             plan = core.plan_update_merge(desc, mods_dir, index, token=tok, log=self.log,
                                           snapshot=snap, tmp_dir=ROOT,
                                           progress_cb=self._progress,
@@ -1184,12 +1493,22 @@ class Api:
             self.log(f'ОШИБКА планирования: {e}'); self._merge_next(); return
         self._emit_plan_or_skip(('disk', mid), desc, plan, index)
 
-    def apply_merge(self, decisions):
+    def apply_merge(self, decisions, remember=False):
         pm = getattr(self, '_pending_merge', None)
         if not pm:
             return {'ok': False, 'error': 'Нет плана для применения.'}
         self._pending_merge = None
-        threading.Thread(target=self._apply_merge_worker, args=(pm, decisions or {}),
+        decisions = decisions or {}
+        if remember:
+            # запомнить выбор по ТИПУ конфликта (текст/бинарь/удалён) до конца очереди:
+            # для каждого конфликта плана сохраняем выбранный (или дефолтный) код
+            self._merge_remember = getattr(self, '_merge_remember', {})
+            for r in pm['plan']['actions']:
+                if r['status'] in CONFLICT_OPTIONS:
+                    code = decisions.get(r['relpath']) or core.DECISION_DEFAULTS.get(r['status'])
+                    if code:
+                        self._merge_remember[r['status']] = code
+        threading.Thread(target=self._apply_merge_worker, args=(pm, decisions),
                          daemon=True).start()
         return {'ok': True}
 
@@ -1378,15 +1697,15 @@ class Api:
         return {'ok': True, 'items': items, 'base': base_name}
 
     def refresh_remote(self):
-        """Сбросить кэши каталога/packs/описаний и перезагрузить с GitHub (кнопка ⟳).
-        Каталог тянется заново → видны свежие данные после пуша агрегатора."""
-        self._catalog_cache = None
-        self._packs_cache = None
+        """Кнопка ⟳: сбросить кэши, перетянуть каталог с GitHub И запустить пофайловую
+        проверку обновлений (хеши диска ↔ опубликованные манифесты, фоном)."""
+        self._invalidate_remote_cache()    # каталог/packs/форки/опубликованные/обновления
         self._descs = {}
         self._sections = {}
         self._names = {}
         self._lazy_load_catalog()
-        return {'ok': True}
+        self.check_updates()               # фоновая сверка → бейджи «⬆ обновление»
+        return {'ok': True, 'checking': True}
 
 
 def main():

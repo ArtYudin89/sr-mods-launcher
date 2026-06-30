@@ -101,10 +101,10 @@ function wireUI() {
   $('indexBtn').onclick = doReindex;
   $('clearModsBtn').onclick = doClearMods;
   $('refreshBtn').onclick = async () => {
-    toast('Обновляю список с сервера…', 'ok');
+    toast('Обновляю каталог и проверяю обновления…', 'ok');
     try { await api().refresh_remote(); } catch (e) {}
     const s = await api().get_state(); STATE = s; applyState();
-    refreshTree();                          // tree_dirty придёт ещё раз, когда каталог догрузится
+    refreshTree();                          // бейджи «⬆ обновление» придут с tree_dirty по завершении сверки
   };
 
   // фильтр
@@ -139,6 +139,7 @@ function wireUI() {
   $('setCancelBtn').onclick = () => hide('settingsOverlay');
   $('setSaveBtn').onclick = saveSettings;
   $('setBrowseBtn').onclick = async () => { const p = await api().browse_game(); if (p) $('setGamePath').value = p; };
+  $('forkAddBtn').onclick = addFork;
   // профили
   $('createProfBtn').onclick = createProfile;
   $('deleteProfBtn').onclick = deleteProfile;
@@ -550,17 +551,52 @@ async function deleteProfile() {
   if (!r.ok) { toast(r.error, 'err'); return; }
   STATE = r.state; applyState(); selected.clear(); refreshTree(); hide('profileOverlay'); toast('Сборка удалена', 'ok');
 }
+let FORKS = [];   // [{repo, token?, has_token}] — редактируемая копия списка форков
+function renderForks() {
+  const box = $('forkList');
+  if (!FORKS.length) { box.innerHTML = '<div class="sub" style="opacity:.7">Форки не добавлены.</div>'; return; }
+  box.innerHTML = FORKS.map((f, i) => `
+    <div class="fork-row" style="display:flex;align-items:center;gap:6px;margin:4px 0">
+      <span style="opacity:.6;width:18px;text-align:right">${i + 1}.</span>
+      <span style="flex:1;font-family:monospace">${esc(f.repo)}${f.has_token ? ' 🔒' : ''}</span>
+      <button class="btn ghost" data-fk="up" data-i="${i}" title="Выше (приоритетнее)" ${i === 0 ? 'disabled' : ''}>↑</button>
+      <button class="btn ghost" data-fk="down" data-i="${i}" title="Ниже" ${i === FORKS.length - 1 ? 'disabled' : ''}>↓</button>
+      <button class="btn ghost danger" data-fk="del" data-i="${i}" title="Удалить">✕</button>
+    </div>`).join('');
+  box.querySelectorAll('button[data-fk]').forEach((b) => b.onclick = () => {
+    const i = +b.dataset.i, act = b.dataset.fk;
+    if (act === 'del') FORKS.splice(i, 1);
+    else if (act === 'up' && i > 0) { [FORKS[i - 1], FORKS[i]] = [FORKS[i], FORKS[i - 1]]; }
+    else if (act === 'down' && i < FORKS.length - 1) { [FORKS[i + 1], FORKS[i]] = [FORKS[i], FORKS[i + 1]]; }
+    renderForks();
+  });
+}
+function addFork() {
+  const repo = $('forkRepo').value.trim();
+  if (!repo) { toast('Укажите owner/repo дополнительного репозитория', 'err'); return; }
+  if (FORKS.some((f) => f.repo === repo)) { toast('Такой репозиторий уже в списке', 'err'); return; }
+  const token = $('forkToken').value.trim();
+  FORKS.push({ repo, token, has_token: !!token });
+  $('forkRepo').value = ''; $('forkToken').value = '';
+  renderForks();
+}
 function openSettings() {
   $('setGamePath').value = STATE.game_path || '';
   $('setBase').value = STATE.base || '';
   $('setRepo').value = STATE.repo || '';
   $('setToken').value = '';
+  $('forkRepo').value = ''; $('forkToken').value = '';
+  FORKS = (STATE.forks || []).map((f) => ({ repo: f.repo, has_token: f.has_token, token: '' }));
+  renderForks();
   show('settingsOverlay');
 }
 async function saveSettings() {
   const token = $('setToken').value;
+  // форки сохраняем отдельным вызовом; пустой token сохранит ранее введённый (бэкенд)
+  const fr = await api().set_forks(FORKS.map((f) => ({ repo: f.repo, token: f.token || '' })));
   STATE = await api().save_settings($('setGamePath').value, $('setRepo').value,
     token === '' ? null : token, $('setBase').value);
+  if (fr && fr.forks) STATE.forks = fr.forks;
   applyState(); refreshTree(); hide('settingsOverlay'); toast('Настройки сохранены', 'ok');
 }
 async function setViewMode(mode) {
@@ -693,13 +729,15 @@ function onMergePlan(plan) {
           </select>
         </div>`).join('')
     : '';
+  $('mergeRemember').checked = false;
   show('mergeOverlay');
 }
 function doMergeApply() {
   const decisions = {};
   $('mergeConflicts').querySelectorAll('select').forEach((s) => { decisions[s.dataset.relpath] = s.value; });
+  const remember = $('mergeRemember').checked;
   hide('mergeOverlay');
-  api().apply_merge(decisions);
+  api().apply_merge(decisions, remember);
 }
 
 // ───────── прогресс/лог ─────────
