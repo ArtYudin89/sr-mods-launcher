@@ -1529,11 +1529,16 @@ class Api:
                                            tmp_dir=ROOT, progress_cb=self._progress,
                                            should_cancel=self.should_cancel)
             self.log(f'Применено: {stats}')
+            # мод обновлён → снять пометку «⬆ обновление» (строка станет «✅ установлен»)
+            upd_mid = target[1] if target[0] == 'disk' else (desc.get('id') if desc else None)
+            if upd_mid:
+                self._updates.pop(upd_mid, None)
             if target[0] == 'profile':
                 m = self.profile['mods'][target[1]]
                 m['installed_version'] = plan.get('version_new')
                 m['update_available'] = False
                 self._save_profile()
+            self._emit('tree_dirty')
         except core.OperationCancelled:
             self.log('Применение отменено (часть файлов могла записаться).')
         except Exception as e:
