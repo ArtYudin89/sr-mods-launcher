@@ -315,16 +315,17 @@ class Api:
             return None, None
         return merged, core.merge_chunk_indexes(indexes)
 
-    def _published_map(self, camp):
-        """{install_rel: sha} опубликованной версии лагеря (все его юниты + shared,
-        с наложением форков). Кэш на сессию. Для пофайловой сверки обновлений."""
+    def _unit_maps(self, camp):
+        """Список (метка_юнита, {install_rel: sha}) для лагеря (его юниты + shared,
+        с наложением форков). Кэш на сессию. По юнитам (а не плоско) — чтобы детект
+        мог подобрать лучший вариант мода, как делает обновление (pick_disk_variant)."""
         if camp in self._pub_cache:
             return self._pub_cache[camp]
         repo, tok = self._repo(), self._token()
         packs = self._get_packs(tok)
         units = [p for p in packs.values()
                  if p.get('camp') == camp or p.get('camp') == 'shared']
-        pub = {}
+        out = []
         for p in units:
             if self.should_cancel():
                 raise core.OperationCancelled()
@@ -338,9 +339,26 @@ class Api:
             except Exception:
                 am = {}
             ff, _fidx = self._fork_unit_overlay(c, u)
-            pub.update(core.published_files(cm, am, ff))
-        self._pub_cache[camp] = pub
-        return pub
+            fmap = core.published_files(cm, am, ff)
+            if fmap:
+                out.append((f'{c}/{u}', fmap))
+        self._pub_cache[camp] = out
+        return out
+
+    @staticmethod
+    def _best_unit_files(mid, unit_maps, disk):
+        """Файлы мода mid из юнита, лучше всего совпадающего с диском (cover, затем
+        match) — аналог pick_disk_variant, но по кэшированным манифестам. {rel:sha}|None."""
+        best, best_score = None, (-1, -1)
+        for _label, fmap in unit_maps:
+            sub = {r: s for r, s in fmap.items() if r == mid or r.startswith(mid + '/')}
+            if not sub:
+                continue
+            cover = sum(1 for r in sub if r in disk)
+            match = sum(1 for r, s in sub.items() if disk.get(r) == s)
+            if (cover, match) > best_score:
+                best_score, best = (cover, match), sub
+        return best
 
     def check_updates(self):
         """Проверить обновления ПОФАЙЛОВОЙ сверкой: хеши файлов на диске (из индекса)
@@ -371,22 +389,24 @@ class Api:
                 self.log('Не удалось определить базу в Mods — сверять не с чем.')
                 self._finish_check(); return
             self.log(f'Сверяю с опубликованной версией ({camp})…')
-            pub = self._published_map(camp)
+            unit_maps = self._unit_maps(camp)
             ups = {}
             for mid, m in idx.get('mods', {}).items():
                 if self.should_cancel():
                     raise core.OperationCancelled()
                 disk = {rel: f['sha'] for rel, f in (m.get('files') or {}).items()}
-                ch = ad = 0
-                for rel, sha in pub.items():
-                    if rel == mid or rel.startswith(mid + '/'):
-                        d = disk.get(rel)
-                        if d is None:
-                            ad += 1
-                        elif d != sha:
-                            ch += 1
-                if ch + ad:
-                    ups[mid] = {'changed': ch, 'added': ad}
+                theirs = self._best_unit_files(mid, unit_maps, disk)
+                if not theirs:
+                    continue                       # мод не из этого лагеря/нет в публикации
+                # снимок (если ставили лаунчером) — чтобы НЕ считать правки игрока обновлением
+                base = {}
+                snap = core.load_install_snapshot(mods_dir, mid)
+                if snap:
+                    base = {core.install_relpath(rp): sha
+                            for rp, sha in (snap.get('files') or {}).items()}
+                n = core.plan_actionable_sha(theirs, base, disk)
+                if n:
+                    ups[mid] = {'n': n}
             self._updates = ups
             for pm in self.profile.get('mods', []):
                 if pm.get('type') == 'desc':
@@ -1377,6 +1397,11 @@ class Api:
                       + s.get('conflicts', 0))
         if actionable == 0:
             self.log(f'{plan.get("id")}: обновлять нечего (всё актуально / только ваши правки).')
+            # согласованность с детектом: раз обновлять нечего — снять бейдж «обновление»
+            upd_mid = target[1] if target[0] == 'disk' else (desc.get('id') if desc else None)
+            if upd_mid:
+                self._updates.pop(upd_mid, None)
+                self._emit('tree_dirty')
             self._merge_next()
             return
         self._pending_merge = {'target': target, 'desc': desc, 'plan': plan, 'index': index}

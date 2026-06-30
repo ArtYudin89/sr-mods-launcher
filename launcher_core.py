@@ -710,6 +710,31 @@ def published_files(code_man, asset_man, fork_files=None):
     return out
 
 
+def plan_actionable_sha(theirs, base, disk):
+    """Сколько файлов реально требуют обновления — та же классификация, что в
+    plan_update_merge, но ТОЛЬКО по sha (без скачивания), для детекта обновлений.
+    theirs/base/disk: {install_rel: sha}. Считаются add/update/конфликт; player_only
+    (мод не менял, правил игрок) и unchanged — НЕ считаются. Без снимка (base пуст)
+    любое отличие = обновление (как конфликт)."""
+    n = 0
+    for rel, tsha in theirs.items():
+        bsha = base.get(rel)
+        msha = disk.get(rel)
+        if msha is None:
+            n += 1                       # add: файла новой версии нет на диске
+        elif msha == tsha:
+            pass                         # unchanged
+        elif bsha is None:
+            n += 1                       # нет базы → отличие = обновление
+        elif msha == bsha:
+            n += 1                       # update: мод изменил, игрок не трогал
+        elif tsha == bsha:
+            pass                         # player_only: мод не менял → не обновление
+        else:
+            n += 1                       # both changed → конфликт
+    return n
+
+
 def pick_disk_variant(catalog, mod_id, mods_dir, repo=None, token=None, prefer_camp=None,
                       log=print, should_cancel=None):
     """Подобрать вариант мода из каталога, лучше всего совпадающий с тем, что лежит
