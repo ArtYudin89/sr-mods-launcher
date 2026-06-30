@@ -349,12 +349,20 @@ function selectedPidx() {
 }
 function updateActionButtons() {
   const pidx = selectedPidx();
-  const mergeable = [...selected].some((i) => NODE[i] && NODE[i].mergeable);
+  const mergeSel = [...selected].some((i) => NODE[i] && NODE[i].mergeable);
+  const hasUpdates = Object.keys(NODE).some((i) => NODE[i].mergeable && NODE[i].status_class === 'upd');
   const hasSet = !!(TREE && TREE.queue && TREE.queue.count);
   $('addBtn').disabled = busy;
   $('installBtn').disabled = busy || !pidx.length;
   $('removeBtn').disabled = busy || !pidx.length;
-  $('mergeBtn').disabled = busy || !mergeable;
+  const mb = $('mergeBtn');
+  if (mergeSel) {                                  // есть выделение → обновить выбранные
+    mb.textContent = '🔀 Обновить выбранные';
+    mb.disabled = busy;
+  } else {                                         // нет выделения → обновить все с обновлением
+    mb.textContent = '🔀 Обновить все';
+    mb.disabled = busy || !hasUpdates;
+  }
   $('installSetBtn').disabled = busy || !hasSet;
   $('compatBtn').disabled = busy;
 }
@@ -693,10 +701,20 @@ async function doAdd() {
 
 // ───────── обновление с сохранением правок ─────────
 function startMerge() {
-  const iids = [...selected].filter((i) => NODE[i] && NODE[i].mergeable);
+  let iids = [...selected].filter((i) => NODE[i] && NODE[i].mergeable);
   if (!iids.length) {
-    toast('Выберите мод из сборки (добавленный из каталога/по ссылке) или из «Установлено в игре»', 'err');
-    return;
+    // ничего не выбрано → обновить ВСЕ моды с обновлением (значок ⬆), без дублей по mid
+    const seen = new Set();
+    iids = Object.keys(NODE).filter((i) => {
+      const n = NODE[i];
+      if (!(n.mergeable && n.status_class === 'upd')) return false;
+      if (n.mid) { if (seen.has(n.mid)) return false; seen.add(n.mid); }
+      return true;
+    });
+    if (!iids.length) {
+      toast('Обновлений не найдено. Нажмите «⟳ Обновить», чтобы проверить.', 'err');
+      return;
+    }
   }
   api().start_merge(iids).then((r) => { if (!r.ok) toast(r.error, 'err'); });
 }
