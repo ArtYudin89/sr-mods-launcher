@@ -390,7 +390,18 @@ class Api:
                 self._finish_check(); return
             self.log(f'Сверяю с опубликованной версией ({camp})…')
             unit_maps = self._unit_maps(camp)
+            # доступные на сервере блобы: файлы, которых нет на HF, скачать нельзя →
+            # не считаем их обновлением (иначе вечный ложный «⬆ обновление»)
+            avail = set()
+            try:
+                cidx = core.load_chunk_index(repo=self._repo(), token=self._token())
+                avail |= set(cidx.get('blobs', {}))
+            except Exception as e:
+                self.log(f'⚠ индекс частей не загружен ({e})')
+            for fidx in self._idx_by_repo.values():
+                avail |= set((fidx or {}).get('blobs', {}))
             ups = {}
+            unavail = 0
             for mid, m in idx.get('mods', {}).items():
                 if self.should_cancel():
                     raise core.OperationCancelled()
@@ -398,6 +409,10 @@ class Api:
                 theirs = self._best_unit_files(mid, unit_maps, disk)
                 if not theirs:
                     continue                       # мод не из этого лагеря/нет в публикации
+                unavail += sum(1 for s in theirs.values() if s not in avail)
+                theirs = {r: s for r, s in theirs.items() if s in avail}
+                if not theirs:
+                    continue                       # нечего скачать с сервера
                 # снимок (если ставили лаунчером) — чтобы НЕ считать правки игрока обновлением
                 base = {}
                 snap = core.load_install_snapshot(mods_dir, mid)
@@ -408,6 +423,8 @@ class Api:
                 if n:
                     ups[mid] = {'n': n}
             self._updates = ups
+            if unavail:
+                self.log(f'(на сервере пока нет {unavail} файлов — они не учитываются)')
             for pm in self.profile.get('mods', []):
                 if pm.get('type') == 'desc':
                     pm['update_available'] = bool(pm.get('id') in ups)
