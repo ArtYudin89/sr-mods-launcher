@@ -14,7 +14,7 @@
     <div class="field">Сборка:
       <select id="profileSel" title="Сборка — это сохранённый набор модов. Можно держать несколько и переключаться."></select>
     </div>
-    <button class="icon-btn" id="profileMenuBtn" title="Создать / удалить сборку">⋯</button>
+    <button class="icon-btn" id="profileMenuBtn" title="Создать сборку и управлять списком">＋</button>
     <div class="game-path" id="gamePath" title="Папка, куда установлена игра. Нажмите, чтобы выбрать.">Папка игры не выбрана</div>
     <div class="spacer"></div>
     <button class="icon-btn" id="themeBtn" title="Светлая / тёмная тема">🌙</button>
@@ -64,13 +64,14 @@
           </div>
         </div>
         <button class="btn ghost" id="legendBtn" title="Что означают значки состояний">ⓘ Обозначения</button>
+        <div class="camp-chips" id="campChips" title="Быстрый фильтр по метке лагеря"></div>
         <span class="queue-lbl" id="queueLbl"></span>
         <div class="spacer"></div>
         <input class="search" id="searchInp" placeholder="🔎 поиск мода…">
         <button class="icon-btn" id="expandBtn" title="Развернуть все группы">⊕</button>
         <button class="icon-btn" id="collapseBtn" title="Свернуть все группы">⊖</button>
         <button class="btn ghost" id="indexBtn" title="Просканировать установленные моды и сверить с каталогом (без скачивания). Нужно после ручной установки модов мимо лаунчера.">🗂 Индексировать</button>
-        <button class="btn ghost" id="refreshBtn" title="Перечитать каталог с сервера и проверить обновления">⟳ Обновить</button>
+        <button class="btn ghost" id="refreshBtn" title="Перечитать каталог с сервера и проверить, для каких модов вышли новые версии (только проверка, ничего не скачивается)">⟳ Проверить обновления</button>
       </div>
 
       <!-- легенда состояний (скрыта по умолчанию) -->
@@ -93,9 +94,8 @@
       <!-- действия -->
       <div class="actions">
         <button class="btn primary" id="addBtn" title="Добавить мод, пак или целый лагерь в эту сборку">➕ Добавить мод</button>
-        <button class="btn" id="installBtn" title="Скачать и установить ТОЛЬКО выделенные в списке строки">⬇ Установить выбранное</button>
-        <button class="btn" id="installSetBtn" title="Скачать и установить ВСЁ, что добавлено в сборку (📋), целиком">🧩 Установить всю сборку</button>
-        <button class="btn" id="mergeBtn" title="Обновить до новой версии, сохранив ваши ручные правки файлов. Без выделения — все моды с обновлением; с выделением — только выбранные.">🔀 Обновить все</button>
+        <button class="btn" id="installBtn" title="Скачать и установить. Без выделения — всю сборку (📋) целиком; с выделением — только выбранные строки.">🧩 Установить все</button>
+        <button class="btn" id="mergeBtn" title="Скачать и применить новые версии (после «Проверить обновления»), сохранив ваши ручные правки файлов. Без выделения — все моды с обновлением; с выделением — только выбранные.">🔀 Обновить все</button>
         <button class="btn" id="compatBtn" title="Проверить, всё ли совместимо: есть ли база, фиксы, конфликты">🛡 Совместимость</button>
         <div class="spacer"></div>
         <button class="btn ghost danger" id="removeBtn" title="Убрать выбранное из сборки (файлы на диске не трогает)">🗑 Убрать из сборки</button>
@@ -159,9 +159,9 @@
               Здесь его можно задать вручную — только как пометку для <b>переносимой сборки</b>, когда игра ещё не установлена. На установку не влияет.</div>
             <select id="setBase">
               <option value="">— авто (по диску) —</option>
-              <option value="redux">redux</option>
-              <option value="universe">universe</option>
-              <option value="original">original</option>
+              <option value="universe">Space Rangers Universe (Community)</option>
+              <option value="redux">ПБ «Свободная Бухта»</option>
+              <option value="original">Original</option>
             </select>
           </div>
           <div class="m-row">
@@ -211,16 +211,22 @@
       <h2>Сборки модов</h2>
       <div class="m-body">
         <div class="m-row">
+          <label>Ваши сборки</label>
+          <div class="sub">Нажмите на сборку, чтобы переключиться (текущая отмечена). Окно остаётся открытым.</div>
+          <div id="profList"></div>
+        </div>
+        <div class="m-row">
+          <label>Пресеты — быстрый старт</label>
+          <div class="sub">Добавить в текущую сборку все моды одной метки (целый лагерь). Потом — «Установить все».</div>
+          <div class="preset-row" id="presetRow"></div>
+        </div>
+        <div class="m-row">
           <label>Создать новую сборку</label>
           <div class="sub">Сборка — это переносимый набор: база + список модов. Можно отдать другому игроку.</div>
           <div style="display:flex;gap:8px">
-            <input id="newProfName" style="flex:1" placeholder="название, например «Моя redux-сборка»">
+            <input id="newProfName" style="flex:1" placeholder="название, например «Моя сборка»">
             <button class="btn primary" id="createProfBtn">Создать</button>
           </div>
-        </div>
-        <div class="note" id="delProfNote" style="border-left-color:var(--danger)">
-          Удалить текущую сборку «<b id="delProfName"></b>» — действие необратимо.
-          <div style="margin-top:8px"><button class="btn ghost danger" id="deleteProfBtn">Удалить эту сборку</button></div>
         </div>
       </div>
       <div class="m-foot">
@@ -235,11 +241,21 @@
       <h2>Добавить в сборку</h2>
       <div class="m-body">
         <div class="seg" id="addModeSeg" style="margin:4px 0 10px">
-          <button data-amode="src" class="on">Из каталога</button>
-          <button data-amode="fork">По ссылке (форк)</button>
+          <button data-amode="search" class="on">🔎 По названию</button>
+          <button data-amode="src">🗂 Лагерь → Пак → Мод</button>
+          <button data-amode="fork">🔗 По ссылке</button>
         </div>
 
-        <div id="addSrc">
+        <div id="addSearch">
+          <div class="m-row">
+            <label>Поиск мода по названию</label>
+            <div class="sub">Любой лагерь сразу. У каждого мода — метка лагеря.</div>
+            <input id="addSearchInp" placeholder="начните вводить название мода…">
+          </div>
+          <div id="addSearchList" class="add-list"></div>
+        </div>
+
+        <div id="addSrc" style="display:none">
           <div class="m-row">
             <label>Лагерь</label>
             <div class="sub">Какую ветку модов берём. Можно добавить весь лагерь целиком.</div>

@@ -792,12 +792,42 @@ def pick_disk_variant(catalog, mod_id, mods_dir, repo=None, token=None, prefer_c
 
 
 def _build_leaf_index(catalog):
-    """Индекс короткое-имя(лист id) -> [полные id]. depends/conflicts в ModuleInfo
-    ссылаются по короткому имени мода, а id каталога = 'Категория/Имя'."""
+    """Индекс короткое-имя -> [полные id]. depends/conflicts в ModuleInfo ссылаются по
+    короткому ИМЕНИ мода (поле Name), а id каталога = 'Категория/Имя'[@Вариант]. Поэтому
+    индексируем по: листу id, имени варианта после '@' (Pol*/Shu*) и полю name записи/
+    вариантов — иначе зависимость «PolMercs» (вариант ключа .../ShuMercs@PolMercs) не
+    находится. Имя -> несколько id (разные лагеря); выбор лагеря — в _pick_id_variant."""
     idx = {}
-    for mid in catalog:
-        idx.setdefault(mid.split('/')[-1], []).append(mid)
+    for mid, ent in catalog.items():
+        keys = {mid.split('/')[-1].split('@', 1)[0]}     # лист базового id (без @)
+        if '@' in mid:
+            keys.add(mid.split('@', 1)[1])               # имя варианта после @
+        if isinstance(ent, dict):
+            if ent.get('name'):
+                keys.add(ent['name'])
+            for v in ent.get('variants', []):
+                if v.get('name'):
+                    keys.add(v['name'])
+        for k in keys:
+            lst = idx.setdefault(k, [])
+            if mid not in lst:
+                lst.append(mid)
     return idx
+
+
+def _pick_id_variant(catalog, ids, prefer_camp=None):
+    """Из кандидатов ids выбрать (id, source), предпочитая лагерь prefer_camp (чтобы
+    зависимость наследовала метку требующего мода). Если в prefer_camp есть вариант —
+    берём его; иначе первый id и его default_source."""
+    if prefer_camp:
+        for mid in ids:
+            ent = catalog.get(mid) or {}
+            for v in ent.get('variants', []):
+                if (v.get('source') or '').split('/')[0] == prefer_camp:
+                    return mid, v['source']
+    mid = ids[0]
+    ent = catalog.get(mid) or {}
+    return mid, ent.get('default_source')
 
 
 def _resolve_ref_ids(catalog, leaf_index, ref):
@@ -833,13 +863,17 @@ def resolve_set(selections, catalog, repo=None, token=None):
             if not ids:
                 missing_deps.append(ref)
                 continue
-            mid0 = ids[0]                      # при неоднозначности берём первый
+            # зависимость наследует метку (лагерь) требующего мода: среди кандидатов
+            # выбираем вариант того же лагеря, если он есть (#2.2)
+            prefer = sel.get('_camp')
+            mid0, src0 = _pick_id_variant(catalog, ids, prefer)
             if mid0 in mods:
                 if not is_dep:
                     requested.add(mid0)
                 continue
-            desc = load_descriptor(_variant_path(catalog, mid0, sel.get('source')),
-                                   repo, token)
+            src = sel.get('source') or src0
+            desc = load_descriptor(_variant_path(catalog, mid0, src), repo, token)
+            sel = {**sel, 'source': src}       # запомнить выбранный source для камп-наследования
         mid = desc['id']
         if not is_dep:
             requested.add(mid)
@@ -848,23 +882,32 @@ def resolve_set(selections, catalog, repo=None, token=None):
         mods[mid] = desc
         if is_dep:
             added_deps.append(mid)
+        cur_camp = (sel.get('source') or '').split('/')[0] or sel.get('_camp')
         for dep in desc.get('depends', []):
-            queue.append(({'id': dep}, True))
+            queue.append(({'id': dep, '_camp': cur_camp}, True))
 
-    # конфликты внутри набора (по короткому имени, двунаправленно)
-    present_leaf = {}     # лист-имя -> id (для обратного мэппинга)
+    # конфликты внутри набора, ИГНОРИРУЯ метку (#2.2): конфликт «ShuMercs» исключает
+    # мод этой папки ЛЮБОЙ метки (ShuMercs, ShuMercs@PolMercs, …). Имя -> все
+    # присутствующие id (по базовому имени и имени варианта после @).
+    present_by_name = {}
     for mid in mods:
-        present_leaf[mid.split('/')[-1]] = mid
+        base_leaf = mid.split('/')[-1].split('@', 1)[0]
+        present_by_name.setdefault(base_leaf, set()).add(mid)
+        if '@' in mid:
+            present_by_name.setdefault(mid.split('@', 1)[1], set()).add(mid)
     conflicts = []
     seen_pairs = set()
     for mid, desc in mods.items():
         for c in desc.get('conflicts', []):
-            other = present_leaf.get(c) or (c if c in mods else None)
-            if other and other != mid:
-                pair = tuple(sorted((mid, other)))
-                if pair not in seen_pairs:
-                    seen_pairs.add(pair)
-                    conflicts.append(pair)
+            others = set(present_by_name.get(c, set()))
+            if c in mods:
+                others.add(c)
+            for other in others:
+                if other and other != mid:
+                    pair = tuple(sorted((mid, other)))
+                    if pair not in seen_pairs:
+                        seen_pairs.add(pair)
+                        conflicts.append(pair)
 
     order = sorted(mods)
     return {'mods': mods, 'order': order, 'requested': requested,
@@ -896,6 +939,8 @@ def camp_packs(packs):
             'name': p.get('display_name', p['name']),
             'load_order': p.get('load_order', 999),
             'shared': p['camp'] == 'shared',
+            # пак патчит файлы игры вне Mods (Rangers.exe/CFG/matrix) — пометка в UI
+            'game_root': bool(p.get('touches_game_root')),
         }
         (shared if entry['shared'] else out.setdefault(p['camp'], [])).append(entry)
     for camp in out:
@@ -960,8 +1005,31 @@ def read_module_section(modinfo_path):
 
 
 def _strip_color(s):
-    """Убрать игровую разметку <color=...>...</color> для показа текста."""
-    return re.sub(r'</?color[^>]*>', '', s or '').strip()
+    """Убрать игровую разметку (<color=...>, <clr>/<clrEnd>) для показа ПЛОСКОГО текста."""
+    s = re.sub(r'</?color[^>]*>', '', s or '')
+    s = re.sub(r'<\s*/?\s*clr(?:End)?[^>]*>', '', s, flags=re.I)
+    return s.strip()
+
+
+def color_to_html(text):
+    """Игровую разметку <clr>…<clrEnd> (и <color>…</color>) → безопасный HTML для
+    окна информации: текст экранируется, цветные участки оборачиваются в <span
+    class="sr-clr">, переводы строк → <br>. Одинокая строка-маркер вида
+    «<clr><clrEnd>» после экранирования становится пустой и работает как пустой
+    абзац-разделитель (а не показывается дословно)."""
+    import html as _html
+    if not text:
+        return ''
+    s = str(text)
+    OPEN, CLOSE = '\x00O\x00', '\x00C\x00'
+    s = re.sub(r'<\s*clrEnd\s*>', CLOSE, s, flags=re.I)
+    s = re.sub(r'<\s*/\s*clr\s*>', CLOSE, s, flags=re.I)
+    s = re.sub(r'<\s*clr(?:\s*=\s*[^>]*)?\s*>', OPEN, s, flags=re.I)
+    s = re.sub(r'<\s*color\s*=\s*[^>]*>', OPEN, s, flags=re.I)
+    s = re.sub(r'<\s*/\s*color\s*>', CLOSE, s, flags=re.I)
+    s = _html.escape(s, quote=False)
+    s = s.replace(OPEN, '<span class="sr-clr">').replace(CLOSE, '</span>')
+    return s.replace('\n', '<br>')
 
 
 def module_card(modinfo_path):
@@ -984,6 +1052,8 @@ def module_card(modinfo_path):
         'authors': g('Author', 'Autor'),
         'small': g('SmallDescription', 'SmallDescriptionEng'),
         'full': g('FullDescription', 'FullDescriptionEng'),
+        # сырое полное описание с цветовой разметкой (для рендера в HTML, см. color_to_html)
+        'full_raw': (mi.get('FullDescription') or mi.get('FullDescriptionEng') or ''),
         'requires': _split_modlist(mi.get('Dependence', '')),
         'conflicts': _split_modlist(mi.get('Conflict', '')),
         'section': g('Section', 'SectionEng'),

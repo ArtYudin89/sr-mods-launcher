@@ -32,8 +32,55 @@ else:
 import launcher_core as core  # noqa: E402
 
 WEB_DIR = BUNDLE / 'web'
-CONFIG_FILE = ROOT / 'launcher_config.json'
-PROFILES_DIR = ROOT / 'profiles'
+
+
+def _user_documents():
+    """Реальная папка «Документы» пользователя (учитывает локализацию и перенос в
+    OneDrive — так же, как их видит сама игра). Фолбэк — ~/Documents."""
+    try:
+        import winreg
+        with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r'Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders') as k:
+            val, _ = winreg.QueryValueEx(k, 'Personal')
+            p = Path(os.path.expandvars(val))
+            if str(p):
+                return p
+    except Exception:
+        pass
+    return Path(os.path.expanduser('~')) / 'Documents'
+
+
+# Данные лаунчера (конфиг, профили) — в Документы\SpaceRangersHD\Launcher, рядом с
+# сейвами/логами игры (а не возле .exe, который может лежать в Program Files без прав
+# на запись). DATA_DIR создаётся; при первом запуске переносим старые файлы из папки exe.
+DATA_DIR = _user_documents() / 'SpaceRangersHD' / 'Launcher'
+try:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+except Exception:
+    DATA_DIR = ROOT                                   # крайний фолбэк — рядом с exe
+CONFIG_FILE = DATA_DIR / 'launcher_config.json'
+PROFILES_DIR = DATA_DIR / 'profiles'
+
+
+def _migrate_legacy_data():
+    """Один раз перенести старые launcher_config.json/profiles из папки рядом с exe
+    (ROOT) в новый DATA_DIR, если в новом месте их ещё нет."""
+    if DATA_DIR == ROOT:
+        return
+    try:
+        import shutil
+        old_cfg = ROOT / 'launcher_config.json'
+        if old_cfg.exists() and not CONFIG_FILE.exists():
+            shutil.copy2(old_cfg, CONFIG_FILE)
+        old_prof = ROOT / 'profiles'
+        if old_prof.is_dir() and not PROFILES_DIR.exists():
+            shutil.copytree(old_prof, PROFILES_DIR)
+    except Exception as e:
+        print('migrate legacy data error:', e)
+
+
+_migrate_legacy_data()
 
 # Встроенный токен/репо для «тестовых» сборок RWT (release with tests). Файл
 # embedded_secrets.py НЕ коммитится (.gitignore) и кладётся только при RWT-сборке
@@ -46,6 +93,21 @@ except Exception:
     EMBEDDED_TOKEN = EMBEDDED_REPO = ''
 IS_RWT = bool(EMBEDDED_TOKEN)
 
+# Версия лаунчера. Проверка самообновления сравнивает её с state/launcher_release.json
+# из репозитория ({version, url?, notes?}). url можно оставить пустым — тогда показ без
+# ссылки на скачивание (просто «доступна новая версия»).
+# ВНИМАНИЕ: при релизе выставить реальный следующий номер (текущий публичный > 0.13.1).
+LAUNCHER_VERSION = '0.15.0'
+RELEASE_REF = 'state/launcher_release.json'
+
+
+def _ver_tuple(v):
+    out = []
+    for part in str(v or '').split('.'):
+        num = ''.join(ch for ch in part if ch.isdigit())
+        out.append(int(num) if num else 0)
+    return tuple(out)
+
 DEFAULT_CONFIG = {
     'last_profile': 'default', 'profiles': ['default'], 'github_token': '',
     'repo': EMBEDDED_REPO or 'ArtYudin89/sr-mods-aggregator',
@@ -53,7 +115,9 @@ DEFAULT_CONFIG = {
     # (первый = высший). Каждый: {'repo':'owner/name', 'token':''}. Форк не добавляет
     # новые моды (мод обязан быть в основном), а переопределяет/дополняет ФАЙЛЫ модов.
     'forks': [],
-    'tree_mode': 'folder', 'name_mode': 'folder', 'theme': 'dark', 'log_verbose': False,
+    # по умолчанию (при первом запуске) — группировка «По разделам» и имена «как в игре»;
+    # сохранённый конфиг пользователя накладывается поверх и эти значения не трогает.
+    'tree_mode': 'section', 'name_mode': 'module', 'theme': 'dark', 'log_verbose': False,
 }
 
 
@@ -78,6 +142,28 @@ CONFLICT_OPTIONS = {
 }
 ALL_CAMP = '★ весь лагерь'
 ALL_PACK = '★ весь пак'
+
+# Базовые моды, поставляемые с игрой (инсталлятор кладёт их в Mods и сохраняет при
+# переустановке через TempStorageFolder). При «Очистить Mods» их НЕ удаляем. Пути —
+# относительно папки Mods, в нижнем регистре (сравнение без учёта регистра, posix).
+BASE_GAME_KEEP = {
+    'modcfg.txt',
+    'tweaks/german', 'tweaks/spanish',
+    'tweaks/leodomikshipsupdate15', 'tweaks/leodomikshipsupdate30',
+    'tweaks/sr2loadingscreen', 'tweaks/sr2pqueststyle',
+}
+
+
+def _is_base_game_path(rel):
+    """rel — путь относительно Mods (posix). True, если это базовый мод игры, его
+    содержимое или родительская папка базового мода (напр. сам каталог Tweaks)."""
+    rel = rel.replace('\\', '/').lower()
+    for prot in BASE_GAME_KEEP:
+        if rel == prot or rel.startswith(prot + '/'):
+            return True                       # сам базовый мод или его файлы
+        if prot.startswith(rel + '/'):
+            return True                       # родительская папка (Tweaks) — не сносим
+    return False
 
 # Ссылку на нативное окно держим в МОДУЛЬНОЙ глобальной, НЕ как атрибут Api:
 # pywebview сериализует js_api-объект, и .NET-окно в нём уводит в бесконечную
@@ -121,6 +207,7 @@ class Api:
         self._cancel = threading.Event()
         self._catalog_cache = None
         self._packs_cache = None
+        self._camps_idx = None             # (by_base, by_leaf) -> множества лагерей мода
         self._cat_by_repo = {}             # repo -> catalog (кэш каталогов форков)
         self._idx_by_repo = {}             # repo -> chunk-index (кэш индексов форков)
         self._fork_man_cache = {}          # (repo,camp,unit,which) -> манифест форка
@@ -378,13 +465,15 @@ class Api:
         return out
 
     @staticmethod
-    def _best_unit_files(mid, unit_maps, disk, allowed_sources=None):
-        """Файлы мода mid из источника, лучше всего совпадающего с диском (cover, затем
-        match) — аналог pick_disk_variant, но по кэшированным манифестам. allowed_sources
-        (множество 'camp/unit' = варианты мода в каталоге) ограничивает выбор логическими
-        вариантами: иначе Pol*-контент под путём Shu*/ в redux_base посчитался бы тем же
-        модом (матч по пути), и сверка ушла бы на чужой вариант. {rel:sha}|None."""
-        best, best_score = None, (-1, -1)
+    def _best_unit_files(mid, unit_maps, disk, allowed_sources=None, prefer_camp=None):
+        """Файлы мода mid из источника, лучше всего совпадающего с диском. Критерий
+        ИДЕНТИЧЕН pick_disk_variant (путь обновления): (cover, match, same_camp) — иначе
+        детект и обновление выберут РАЗНЫЕ варианты и цикл «обновление» не сойдётся (Pol/
+        Shu). same_camp — лишь тайбрейкер (при равных cover+match предпочесть базу).
+        allowed_sources (множество 'camp/unit' = логические варианты мода) ограничивает
+        выбор: иначе Pol*-контент под путём Shu*/ в redux_base посчитался бы тем же модом.
+        {rel:sha}|None."""
+        best, best_score = None, (-1, -1, -1)
         for label, fmap in unit_maps:
             if allowed_sources is not None and label not in allowed_sources:
                 continue
@@ -393,8 +482,10 @@ class Api:
                 continue
             cover = sum(1 for r in sub if r in disk)
             match = sum(1 for r, s in sub.items() if disk.get(r) == s)
-            if (cover, match) > best_score:
-                best_score, best = (cover, match), sub
+            same_camp = bool(prefer_camp and label.split('/')[0] == prefer_camp)
+            score = (cover, match, same_camp)
+            if score > best_score:
+                best_score, best = score, sub
         return best
 
     def check_updates(self):
@@ -460,7 +551,15 @@ class Api:
                         allowed = src_by_base.get(cands[0].split('@', 1)[0])
                 if not allowed:
                     continue                       # мода нет в каталоге → сверять не с чем
-                theirs = self._best_unit_files(mid, unit_maps, disk, allowed)
+                # выбор варианта игроком (переключатель Pol/Shu): нацеливаемся ИМЕННО на
+                # выбранный вариант — если диск ему не соответствует, будет «обновление»
+                choice = (self.profile.get('variants') or {}).get(mid)
+                theirs = None
+                if choice and choice in cat:
+                    theirs = self._variant_files(
+                        mid, unit_maps, cat[choice].get('default_source'))
+                if not theirs:
+                    theirs = self._best_unit_files(mid, unit_maps, disk, allowed, prefer_camp=camp)
                 if not theirs:
                     continue                       # ни один логический вариант не лёг на диск
                 unavail += sum(1 for s in theirs.values() if s not in avail)
@@ -559,8 +658,22 @@ class Api:
             'has_token': bool(self._token()),
             'forks': self._forks_public(),
             'is_rwt': IS_RWT,
+            'version': LAUNCHER_VERSION,
             'busy': self.busy,
         }
+
+    def check_self_update(self):
+        """Проверить, вышла ли новая версия самого лаунчера (state/launcher_release.json
+        в репозитории). Возвращает {'ok','update','version','current','url','notes'}."""
+        try:
+            info = core._fetch_json(RELEASE_REF, self._repo(), self._token())
+        except Exception as e:
+            return {'ok': False, 'error': str(e)}
+        latest = str(info.get('version', '')).strip()
+        upd = bool(latest) and _ver_tuple(latest) > _ver_tuple(LAUNCHER_VERSION)
+        return {'ok': True, 'update': upd, 'version': latest,
+                'current': LAUNCHER_VERSION, 'url': info.get('url', ''),
+                'notes': info.get('notes', '')}
 
     # ───────── сборка дерева ─────────
     def _tree_mode(self):
@@ -570,7 +683,11 @@ class Api:
         if mid not in self._sections:
             p = self._mods_dir() / mid.replace('/', os.sep) / 'ModuleInfo.txt'
             self._sections[mid] = core.read_module_section(p) if p.exists() else ''
-        return self._sections[mid]
+        sec = self._sections[mid]
+        if not sec:                         # не установлен — раздел из каталога (чтобы мод,
+            ce = self._catalog_entry(mid)   # добавленный «по названию», попал в свою группу,
+            sec = (ce.get('section') if ce else '') or ''   # а не в «прочее» вверху списка
+        return sec
 
     def _name_of(self, mid):
         """Имя мода как в игре — поле Name из ModuleInfo (диск, кэш). Фолбэк:
@@ -597,6 +714,155 @@ class Api:
         leaf = mid.split('/')[-1]
         return next((v for k, v in cat.items() if k.split('/')[-1] == leaf), None)
 
+    def _variant_index(self):
+        """base-id → [ключи каталога вариантов] и короткое-имя → [ключи] (фолбэк). Кэш.
+        Пустой каталог (ещё не загружен) НЕ кэшируем — иначе бейджи навсегда пустые."""
+        cat = self._catalog_cache
+        if not cat:
+            return {}, {}
+        if self._camps_idx is None:
+            by_base, by_leaf = {}, {}
+            for k in cat:
+                b = k.split('@', 1)[0]
+                by_base.setdefault(b, []).append(k)
+                by_leaf.setdefault(b.split('/')[-1], []).append(k)
+            self._camps_idx = (by_base, by_leaf)
+        return self._camps_idx
+
+    def _variant_keys(self, mid):
+        """Ключи каталога всех вариантов папки mid (base + @-сиблинги). [] если нет."""
+        by_base, by_leaf = self._variant_index()
+        base = mid.split('@', 1)[0]
+        return by_base.get(base) or by_leaf.get(base.split('/')[-1]) or []
+
+    @staticmethod
+    def _entry_camps(e):
+        return {v['source'].split('/')[0] for v in e.get('variants', [])
+                if '/' in (v.get('source') or '')}
+
+    def _camp_variant_entry(self, mid, camp):
+        """Запись каталога варианта папки mid, релевантного лагерю camp: у папки Pol/Shu
+        (напр. ShusRangers/ShuNukes) под redux канон — @PolNukes, под original/universe —
+        базовый ShuNukes. Возвращает (ключ, запись) или None. Для показа в диалоге
+        добавления «Лагерь→Пак→Мод»: имя/описание берём у варианта ЭТОГО лагеря, а не у
+        первого попавшегося (Shu-)варианта."""
+        cat = self._catalog_cache or {}
+        keys = self._variant_keys(mid)
+        if not keys:
+            e = self._catalog_entry(mid)
+            return (mid, e) if e else None
+        match = [k for k in keys if camp in self._entry_camps(cat.get(k) or {})]
+        pick = match[0] if match else (mid if mid in cat else keys[0])
+        return (pick, cat.get(pick) or {})
+
+    def _installed_variant_key(self, mid):
+        """Ключ каталога ИМЕННО установленного варианта папки mid — по ModuleInfo Name
+        (Pol/Shu-папка общая, на диске один вариант). None, если не определить."""
+        cat = self._catalog_cache or {}
+        if '@' in mid and mid in cat:
+            return mid                               # явный вариант
+        cands = self._variant_keys(mid)
+        if len(cands) == 1:
+            return cands[0]
+        if not cands:
+            return None
+        nm = self._name_of(mid)                      # ModuleInfo Name с диска (кэш)
+        for k in cands:
+            if (cat[k].get('name') or '') == nm:
+                return k
+        return None
+
+    def _camps_of(self, mid):
+        """Метки лагерей ИМЕННО установленного варианта mid. Папка Pol/Shu общая, но на
+        диске один вариант → по ModuleInfo Name берём камп(ы) его записи (Pol→redux,
+        Shu→uni/orig). Если вариант не определён — объединение всех вариантов папки.
+
+        Если игрок ЯВНО выбрал вариант в переключателе (profile['variants']) — метка
+        следует ЗА выбором сразу, ещё до перекачки: «я выбрал мод с другой меткой —
+        метка должна обновиться». Иначе — по установленному на диске варианту."""
+        cat = self._catalog_cache or {}
+        if not cat or not mid:
+            return []
+        chosen = (self.profile.get('variants') or {}).get(mid.split('@', 1)[0])
+        key = chosen if (chosen and chosen in cat) else self._installed_variant_key(mid)
+        if key and key in cat:
+            return sorted(self._entry_camps(cat[key]))
+        camps = set()
+        for k in self._variant_keys(mid):            # фолбэк: объединение
+            camps |= self._entry_camps(cat[k])
+        return sorted(camps)
+
+    # ───────── выбор варианта Pol/Shu в общей папке ─────────
+    def _variants_of(self, mid):
+        """Список вариантов папки mid для переключателя: [{key,name,camps}]. Пусто, если
+        вариант один (переключать нечего)."""
+        cat = self._catalog_cache or {}
+        keys = self._variant_keys(mid)
+        if len(keys) < 2:
+            return []
+        out = []
+        for k in keys:
+            e = cat.get(k) or {}
+            out.append({'key': k, 'name': e.get('name') or k.split('/')[-1],
+                        'camps': sorted(self._entry_camps(e))})
+        out.sort(key=lambda v: v['name'])
+        return out
+
+    def _chosen_variant(self, mid):
+        """Выбранный игроком вариант папки mid (profile['variants']) или, если не
+        выбирал, — установленный на диске. '' если не определить."""
+        base = mid.split('@', 1)[0]
+        ch = (self.profile.get('variants') or {}).get(base)
+        if ch and ch in (self._catalog_cache or {}):
+            return ch
+        return self._installed_variant_key(mid) or ''
+
+    def set_variant(self, mid, key):
+        """Игрок выбрал вариант key для папки mid. Если он отличается от установленного —
+        помечаем мод как требующий обновления (перекачки); иначе снимаем пометку."""
+        cat = self._catalog_cache or {}
+        base = mid.split('@', 1)[0]
+        if key not in cat:
+            return {'ok': False, 'error': 'Неизвестный вариант.'}
+        self.profile.setdefault('variants', {})[base] = key
+        self._save_profile()
+        installed = self._installed_variant_key(mid)
+        want_name = (cat.get(key) or {}).get('name')
+        inst_name = (cat.get(installed) or {}).get('name') if installed else None
+        if key != installed and want_name != inst_name:
+            self._updates[base] = {'n': 1, 'variant': key}   # нужно перекачать вариант
+        else:
+            self._updates.pop(base, None)
+        self._emit('tree_dirty')
+        return {'ok': True}
+
+    @staticmethod
+    def _variant_files(mid, unit_maps, source):
+        """Файлы мода mid из КОНКРЕТНОГО источника source (для нацеливания на выбранный
+        вариант). {rel:sha}|None."""
+        for label, fmap in unit_maps:
+            if label == source:
+                return {r: s for r, s in fmap.items() if r == mid or r.startswith(mid + '/')}
+        return None
+
+    def get_all_mods(self):
+        """Плоский список ВСЕХ модов каталога для поиска по названию (режим добавления
+        «По названию»): [{id, name, camps, desc}]. id — ключ каталога (с @-вариантом),
+        camps — лагеря этого конкретного варианта."""
+        cat = self._catalog_cache
+        if cat is None:
+            return {'ok': False, 'error': 'Каталог ещё загружается — повторите через секунду.'}
+        out = []
+        for k, e in cat.items():
+            camps = sorted({v['source'].split('/')[0] for v in e.get('variants', [])
+                            if '/' in (v.get('source') or '')})
+            out.append({'id': k, 'base': k.split('@', 1)[0],
+                        'name': e.get('name') or k.split('/')[-1],
+                        'camps': camps, 'desc': e.get('description', ''),
+                        'source': e.get('default_source', '')})
+        out.sort(key=lambda m: m['name'].lower())
+        return {'ok': True, 'mods': out, 'count': len(out)}
+
     def _desc_of(self, mid):
         """Краткое описание мода: с диска (ModuleInfo, кэш), фолбэк на каталог
         (для модов сборки, ещё не установленных). '' если нигде нет."""
@@ -609,31 +875,53 @@ class Api:
         ce = self._catalog_entry(mid)               # живой фолбэк (каталог грузится лениво)
         return (ce.get('description') or '') if ce else ''
 
-    def get_mod_info(self, mid):
-        """Полная карточка мода для окна (i): из локального ModuleInfo, фолбэк на
-        каталог (description/full_description теперь есть и там)."""
-        info, mi_ok = {}, False
-        if mid:
-            p = self._mi_path(mid)
-            if p.exists():
-                info = core.module_card(p) or {}
-                mi_ok = bool(info)
-        if not mi_ok and mid:                       # фолбэк из каталога
-            ce = self._catalog_entry(mid)
-            if ce:
-                var = (ce.get('variants') or [{}])[0]
-                info = {'name': ce.get('name', ''), 'authors': ce.get('author', ''),
-                        'small': ce.get('description', ''),
-                        'full': ce.get('full_description', ''),
-                        'requires': var.get('depends', []),
-                        'conflicts': var.get('conflicts', []),
-                        'section': ce.get('section', ''), 'priority': ''}
+    @staticmethod
+    def _card_from_entry(ce):
+        """Карточка мода из записи каталога (для варианта, которого нет на диске)."""
+        var = (ce.get('variants') or [{}])[0]
+        return {'name': ce.get('name', ''), 'authors': ce.get('author', ''),
+                'small': ce.get('description', ''),
+                'full': core._strip_color(ce.get('full_description', '')),
+                'full_raw': ce.get('full_description', ''),
+                'requires': var.get('depends', []),
+                'conflicts': var.get('conflicts', []),
+                'section': ce.get('section', ''), 'priority': ''}
+
+    def get_mod_info(self, mid, variant=None):
+        """Полная карточка мода для окна (i): из локального ModuleInfo, фолбэк на каталог.
+
+        variant — ключ каталога конкретного варианта папки (Pol/Shu). Если задан, карточку
+        строим ИМЕННО по нему (из каталога), чтобы можно было посмотреть описание обоих
+        вариантов, даже если на диске стоит другой. Ответ также содержит `variants`
+        (переключатель в окне) и `variant_key` (какой вариант сейчас показан)."""
+        cat = self._catalog_cache or {}
+        variants = self._variants_of(mid) if mid else []       # [{key,name,camps}]
+        info, mi_ok, shown_key = {}, False, ''
+        if variant and variant in cat:                          # явно запрошенный вариант
+            info = self._card_from_entry(cat[variant])
+            shown_key = variant
+            mi_ok = (variant == self._installed_variant_key(mid))
+        else:
+            if mid:
+                p = self._mi_path(mid)
+                if p.exists():
+                    info = core.module_card(p) or {}
+                    mi_ok = bool(info)
+            if not mi_ok and mid:                               # фолбэк из каталога
+                ce = self._catalog_entry(mid)
+                if ce:
+                    info = self._card_from_entry(ce)
+            shown_key = self._chosen_variant(mid) if mid else ''
         if not info:
             return {'ok': False}
         info.setdefault('name', mid.split('/')[-1] if mid else '')
         info['id'] = mid or ''
         info['location'] = (mid or '').replace('/', '\\')   # как в игре: Категория\Имя
         info['installed'] = mi_ok
+        info['variants'] = variants                          # [] если вариант один
+        info['variant_key'] = shown_key
+        # полное описание с цветовой разметкой → безопасный HTML для окна (#12/#13)
+        info['full_html'] = core.color_to_html(info.get('full_raw') or info.get('full') or '')
         return {'ok': True, 'info': info}
 
     def _mod_group(self, mid):
@@ -708,6 +996,16 @@ class Api:
                 on = bool(m.get('last_downloaded')); sc, st = status_of(m, on)
                 rows.append((m.get('camp', 'прочее'), None, 'лагерь', '★ весь лагерь',
                              sc, st, m.get('last_downloaded', '') if on else '', iid, ''))
+            elif typ == 'desc' and m.get('id') and not m.get('url'):
+                # мод из каталога, добавленный «по названию»: показываем как обычный мод
+                # в ЕГО разделе/папке (а не как «форк» в «прочее» вверху списка)
+                mid = m['id']; seen.add(mid)
+                on = (mid in disk) or bool(m.get('last_downloaded'))
+                sc, st = status_of(m, on)
+                rows.append((m.get('camp') or 'набор профиля', self._mod_group(mid), 'мод',
+                             mid.split('/')[-1], sc, st,
+                             m.get('last_downloaded') or disk.get(mid, '') if on else '',
+                             iid, mid))
             else:
                 on = bool(m.get('last_downloaded')); sc, st = status_of(m, on)
                 rows.append(('прочее', None, 'форк' if typ == 'desc' else 'zip',
@@ -765,6 +1063,9 @@ class Api:
                 'section': (self._section_of(mid) if mid else ''),
                 'desc': (self._desc_of(mid) if mid else ''),
                 'has_info': bool(mid),
+                'labels': (self._camps_of(mid) if mid else []),   # лагеря-метки (бейджи)
+                'variants': (self._variants_of(mid) if mid else []),  # Pol/Shu-переключатель
+                'chosen': (self._chosen_variant(mid) if mid else ''),
                 'mergeable': bool(iid and (iid.startswith('d:') or iid in desc_iids)),
             }
             co = camp_obj(camp)
@@ -823,6 +1124,7 @@ class Api:
                     'descriptors/catalog.json', self._repo(), self._token()) or {}
             except Exception:
                 self._catalog_cache = {}
+            self._camps_idx = None          # перестроить индекс вариантов на свежем каталоге
             try:
                 pk = core.load_packs('state/packs.json', self._repo(), self._token())
                 self._packs_cache = pk
@@ -871,6 +1173,7 @@ class Api:
     def _invalidate_remote_cache(self):
         self._catalog_cache = None
         self._packs_cache = None
+        self._camps_idx = None
         self._cat_by_repo = {}
         self._idx_by_repo = {}
         self._fork_man_cache = {}
@@ -1369,17 +1672,47 @@ class Api:
             return {'ok': False, 'error': str(e)}
 
     def get_unit_mods(self, camp, unit):
-        """Список модов пака (для выбора конкретного мода)."""
+        """Список модов пака (для выбора конкретного мода). Каждый мод — объект
+        {key, name, camps, desc}: key — папка (мод-ключ для установки), а имя/описание/
+        метки берём у варианта ИМЕННО этого лагеря (redux→Pol*, orig/uni→Shu*), чтобы в
+        диалоге не показывались Shu*-названия для redux-пака."""
         try:
-            mods = core.list_unit_mods(self._repo(), camp, unit, self._token())
-            return {'ok': True, 'mods': mods}
+            keys = core.list_unit_mods(self._repo(), camp, unit, self._token())
         except Exception as e:
             return {'ok': False, 'error': str(e)}
+        out = []
+        for key in keys:
+            if key == '_base':
+                out.append({'key': key, 'name': '_base', 'camps': [],
+                            'desc': 'Общие файлы игры'})
+                continue
+            ent = self._camp_variant_entry(key, camp)
+            if ent and ent[1]:
+                e = ent[1]
+                out.append({'key': key, 'name': e.get('name') or key.split('/')[-1],
+                            'camps': sorted(self._entry_camps(e)),
+                            'desc': e.get('description', '')})
+            else:
+                out.append({'key': key, 'name': key.split('/')[-1], 'camps': [], 'desc': ''})
+        return {'ok': True, 'mods': out}
 
     def add_mod(self, payload):
         """Добавить запись в сборку. payload:
         {mode:'src'|'fork', camp, pack:{camp,unit,name}|None, mod:'', url:''}"""
         repo = self._repo()
+        if payload.get('mode') == 'search':
+            mid = (payload.get('id') or '').strip()
+            if not mid:
+                return {'ok': False, 'error': 'Не выбран мод.'}
+            self._dedup_folder(mid)
+            entry = {'type': 'desc', 'id': mid, 'repo': repo,
+                     'name': (payload.get('name') or mid.split('/')[-1])}
+            src = (payload.get('source') or '').strip()
+            if src:
+                entry['source'] = src
+            self.profile.setdefault('mods', []).append(entry)
+            self._save_profile()
+            return {'ok': True}
         if payload.get('mode') == 'fork':
             url = (payload.get('url') or '').strip()
             if not url:
@@ -1405,11 +1738,30 @@ class Api:
                'name': pack['name'], 'mod': ''}
         msel = (payload.get('mod') or '').strip()
         if msel and msel != ALL_PACK:
+            self._dedup_folder(msel)               # один вариант на папку (#2.2)
             mod['mod'] = msel
             mod['name'] = msel
         self.profile.setdefault('mods', []).append(mod)
         self._save_profile()
         return {'ok': True}
+
+    def _dedup_folder(self, mid):
+        """Убрать из набора прежние записи ТОГО ЖЕ мода (та же дисковая папка/база), чтобы
+        не оказалось двух вариантов одной папки с разными метками (правило #2.2). База —
+        id без @-варианта; затрагивает только записи-моды (unit с mod / desc с id)."""
+        base = (mid or '').split('@', 1)[0]
+        if not base:
+            return
+        kept, dropped = [], 0
+        for m in self.profile.get('mods', []):
+            emid = m.get('mod') or m.get('id') or ''
+            if emid and emid.split('@', 1)[0] == base and m.get('type') in ('unit', 'desc'):
+                dropped += 1
+                continue
+            kept.append(m)
+        if dropped:
+            self.profile['mods'] = kept
+            self.log(f'Заменён вариант мода «{base.split("/")[-1]}» в наборе.')
 
     # ───────── обновление с сохранением правок (Фаза 4) ─────────
     def _desc_sel(self, m):
@@ -1553,6 +1905,36 @@ class Api:
             self.log(f'ОШИБКА планирования: {e}'); self._merge_next(); return
         self._emit_plan_or_skip(('profile', i), desc, plan, index)
 
+    def _full_variant_descriptor(self, key, cat, repo, tok, source=None):
+        """Полный дескриптор варианта: НАБОР ФАЙЛОВ = слияние ВСЕХ источников его лагеря
+        (base-installer + *_fixes), fixes поверх base. Иначе default_source, указывающий
+        на куцый *_fixes-пак (напр. 5 файлов из 54), даёт неполный «theirs» — и апдейт
+        сносит остальные файлы мода: «при смене Pol/Shu мод полностью удаляется».
+        source задаёт лагерь (по умолчанию default_source записи). Все дескрипторы
+        адресуют один общий HF-индекс, поэтому блобы из разных паков резолвятся."""
+        ent = cat.get(key) or {}
+        src = source or ent.get('default_source') or ''
+        camp = src.split('/')[0]
+        srcs = [v['source'] for v in ent.get('variants', [])
+                if (v.get('source') or '').split('/')[0] == camp] if camp else []
+        if len(srcs) <= 1:                       # один источник — сливать нечего
+            return core.descriptor_for({'id': key, 'source': src or (srcs[0] if srcs else None)},
+                                       cat, repo, tok)
+        try:
+            packs = self._get_packs(tok)
+        except Exception:
+            packs = {}
+        # порядок применения по load_order пака: выше = позже = приоритетнее (fixes бьёт base)
+        srcs.sort(key=lambda s: (packs.get(s) or {}).get('load_order', 999), reverse=True)
+        descs = [core.descriptor_for({'id': key, 'source': s}, cat, repo, tok) for s in srcs]
+        descs = [d for d in descs if d]
+        if not descs:
+            return None
+        merged = core.merge_descriptors(descs)   # fixes-первым → перекрывает base
+        if merged is not None and src:
+            merged = dict(merged); merged['source'] = src
+        return merged
+
     def _plan_merge_disk(self, mid):
         repo, tok = self._repo(), self._token()
         mods_dir = self._mods_dir()
@@ -1564,19 +1946,39 @@ class Api:
             except Exception:
                 ib = None
             prefer = ib['camp'] if ib else None
-            self.log('Подбираю вариант мода по файлам на диске…')
-            desc, info = core.pick_disk_variant(cat, mid, mods_dir, repo, tok,
-                                                prefer_camp=prefer, log=self.log,
-                                                should_cancel=self.should_cancel)
+            desc = info = None
+            # выбор варианта игроком (переключатель Pol/Shu) — ставим ИМЕННО его
+            choice = (self.profile.get('variants') or {}).get(mid.split('@', 1)[0])
+            if choice and choice in cat:
+                src = cat[choice].get('default_source')
+                self.log(f'Выбранный вариант: {cat[choice].get("name")} ({src}).')
+                d = self._full_variant_descriptor(choice, cat, repo, tok, source=src)
+                if d:
+                    desc, info = d, {'source': src}
+                else:
+                    self.log('Дескриптор выбранного варианта не найден — подбираю по диску.')
+            if not desc:
+                self.log('Подбираю вариант мода по файлам на диске…')
+                desc, info = core.pick_disk_variant(cat, mid, mods_dir, repo, tok,
+                                                    prefer_camp=prefer, log=self.log,
+                                                    should_cancel=self.should_cancel)
+                if desc:
+                    # подобран лучший ОДИН источник по совпадению; расширяем до полного
+                    # набора лагеря (base+fixes), иначе *_fixes-выбор снёс бы файлы
+                    full = self._full_variant_descriptor(desc.get('id'), cat, repo, tok,
+                                                         source=info.get('source'))
+                    if full and full.get('files'):
+                        full = dict(full); full['id'] = desc.get('id')
+                        desc = full
+                    note = ''
+                    if prefer and not str(info["source"]).startswith(prefer + '/'):
+                        note = (f' — выбран по совпадению файлов на диске, не по базе ({prefer}); '
+                                f'это нормально: один мод может совпадать с версией из другого источника')
+                    self.log(f'Вариант: {info["source"]} (совпало {info["match"]}/{info["cover"]} '
+                             f'из {info["total"]}){note}')
             if not desc:
                 self.log(f'Мод {mid} не найден в каталоге — обновить нечем.')
                 self._merge_next(); return
-            note = ''
-            if prefer and not str(info["source"]).startswith(prefer + '/'):
-                note = (f' — выбран по совпадению файлов на диске, не по базе ({prefer}); '
-                        f'это нормально: один мод может совпадать с версией из другого источника')
-            self.log(f'Вариант: {info["source"]} (совпало {info["match"]}/{info["cover"]} '
-                     f'из {info["total"]}){note}')
             # дисковая папка mid — стабильная идентичность мода. Если подобран Pol/Shu-
             # сиблинг (id вида ShusRangers/X@PolX), ставим его контент, но снимок и детект
             # ключуются по mid (папке), а не по id варианта — иначе снимок не находится.
@@ -1711,8 +2113,17 @@ class Api:
         if err:
             return {'ok': False, 'error': err}
         d = self._mods_dir()
-        n = sum(1 for p in d.rglob('*') if p.is_file()) if d.exists() else 0
-        return {'ok': True, 'count': n, 'path': str(d)}
+        removable = kept = 0
+        if d.exists():
+            for p in d.rglob('*'):
+                if not p.is_file():
+                    continue
+                if _is_base_game_path(p.relative_to(d).as_posix()):
+                    kept += 1
+                else:
+                    removable += 1
+        # count = что реально удалится (базовые моды игры исключены)
+        return {'ok': True, 'count': removable, 'kept': kept, 'path': str(d)}
 
     def clear_mods(self):
         if self.busy:
@@ -1720,25 +2131,32 @@ class Api:
         err = self._require_game()
         if err:
             return {'ok': False, 'error': err}
-        import shutil
         d = self._mods_dir()
         if not d.exists():
-            return {'ok': True, 'removed': 0}
-        n = sum(1 for p in d.rglob('*') if p.is_file())
-        for it in d.iterdir():
-            if it.is_dir():
-                shutil.rmtree(it, ignore_errors=True)
-            else:
-                try:
-                    it.unlink()
-                except Exception:
-                    pass
+            return {'ok': True, 'removed': 0, 'kept': 0}
+        removed = kept = 0
+        # удаляем снизу вверх (сначала файлы, потом опустевшие папки); базовые моды
+        # игры (BASE_GAME_KEEP) и их родительские папки пропускаем
+        for p in sorted(d.rglob('*'), key=lambda x: len(x.parts), reverse=True):
+            rel = p.relative_to(d).as_posix()
+            if _is_base_game_path(rel):
+                if p.is_file():
+                    kept += 1
+                continue
+            try:
+                if p.is_file():
+                    p.unlink(); removed += 1
+                elif p.is_dir():
+                    p.rmdir()                 # удалится только если опустела
+            except Exception:
+                pass
         for m in self.profile.get('mods', []):
             m['last_downloaded'] = None
         self._save_profile()
-        self.log(f'Очищено: {n} файлов из {d}')
+        self.log(f'Очищено: {removed} файлов из {d}'
+                 + (f' (сохранено базовых модов игры: {kept})' if kept else ''))
         self._emit('tree_dirty')
-        return {'ok': True, 'removed': n}
+        return {'ok': True, 'removed': removed, 'kept': kept}
 
     # ───────── совместимость (показ) ─────────
     def check_compat(self):
@@ -1805,9 +2223,72 @@ class Api:
         for a, b in setrep.get('conflicts', []):
             items.append({'level': 'warn',
                           'text': f'Конфликт: «{mn(a)}» и «{mn(b)}» оба в сборке — оставьте один.'})
+        # зависимости подключённых в игре модов по ИМЕНИ (ModuleInfo Name, как делает
+        # сама игра): ловит «PolMercsHQ требует PolMercs, а на диске лежит ShuMercs»
+        try:
+            dc = self._disk_compat_issues()
+            for it in dc['deps']:
+                items.append({'level': 'warn',
+                              'text': f'Подключённому в игре моду «{it["name"]}» не хватает '
+                                      f'(нет на диске): {", ".join(it["missing"])}.'})
+            for a, b in dc['conflicts']:
+                items.append({'level': 'warn',
+                              'text': f'Конфликт подключённых в игре: «{a}» и «{b}» несовместимы — оставьте один.'})
+        except Exception as e:
+            self.log(f'Совместимость: ошибка проверки зависимостей на диске ({e})')
         if not items:
             items.append({'level': 'ok', 'text': 'Проблем не найдено.'})
         return {'ok': True, 'items': items, 'base': base_name}
+
+    def _disk_compat_issues(self):
+        """Совместимость подключённых в игре модов ПО ИМЕНИ (ModuleInfo Name): нехватка
+        зависимостей и конфликты между подключёнными. Игра резолвит Dependence/Conflict
+        по полю Name, а не по имени папки — поэтому Pol/Shu-варианты (одна папка
+        ShusRangers/ShuDomiks, но Name=ShuDomiks либо PolDomiks — выбор игрока, вместе
+        нельзя) сверяются по Name. Пример: ShuDomiks + PolDomiksPlus → PolDomiksPlus
+        требует PolDomiks (нет на диске, стоит ShuDomiks) — обе стороны видны.
+        {'deps': [{'name','missing':[Name,...]}], 'conflicts': [(a,b),...]}."""
+        mods_dir = self._mods_dir()
+        try:
+            mids = core.scan_installed_mods(mods_dir)
+        except Exception:
+            return {'deps': [], 'conflicts': []}
+        try:
+            connected = set(core.read_modcfg(mods_dir))
+        except Exception:
+            connected = set()
+        present_names, info = set(), {}
+        for mid in mids:
+            mi = core.read_module_info(mods_dir / mid.replace('/', os.sep) / 'ModuleInfo.txt')
+            nm = core._strip_color(mi.get('Name', '')) or mid.split('/')[-1]
+            deps = core._split_modlist(mi.get('Dependence', ''))
+            cons = core._split_modlist(mi.get('Conflict', ''))
+            present_names.add(nm)
+            present_names.add(mid.split('/')[-1])   # фолбэк по имени папки
+            info[mid] = (nm, deps, cons)
+        # проверяем подключённые в игре (если ModCFG пуст — все установленные)
+        check = [m for m in info if not connected or m in connected]
+        # для конфликтов сверяем ТОЛЬКО по фактическим ModuleInfo Name (НЕ по имени папки:
+        # папка Pol/Shu общая — лист 'ShuText' совпал бы с собственным Conflict Pol-варианта
+        # и давал ложный «PolText ⟷ ShuText», хотя стоит один вариант)
+        conn_names = {info[m][0] for m in check}
+        # Объявленный Conflict — ВСЕГДА конфликт, даже если встречная сторона объявляет
+        # этот мод зависимостью. Кейс Cat_Nuke↔PolNukes: Cat_Nuke.Dependence=PolNukes, но
+        # PolNukes.Conflict=Cat_Nuke — это противоречивая пара (нужен, но несовместим),
+        # и её НАДО показать конфликтом, чтобы игрок оставил один. Зависимость не гасит.
+        deps_out, conflicts, seen = [], [], set()
+        for mid in check:
+            nm, deps, cons = info[mid]
+            missing = [d for d in deps if d not in present_names]
+            if missing:
+                deps_out.append({'name': nm, 'missing': missing})
+            for c in cons:                          # конфликт: оба реально подключены (по Name)
+                if c in conn_names and c != nm:
+                    pair = tuple(sorted((nm, c)))
+                    if pair not in seen:
+                        seen.add(pair)
+                        conflicts.append(pair)
+        return {'deps': deps_out, 'conflicts': conflicts}
 
     def refresh_remote(self):
         """Кнопка ⟳: сбросить кэши, перетянуть каталог с GitHub И запустить пофайловую

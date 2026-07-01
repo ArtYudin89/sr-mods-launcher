@@ -3,7 +3,7 @@
 #   pyinstaller webui/SRModsLauncher.spec   (из корня репозитория)
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('web', 'web')]            # фронт (HTML/CSS/JS) → _MEIPASS/web
+datas = [('web', 'web'), ('Icon.ico', '.')]   # фронт (HTML/CSS/JS) + иконка → _MEIPASS
 binaries = []
 hiddenimports = ['launcher_core', 'embedded_secrets', 'clr', 'requests']
 
@@ -40,4 +40,5 @@ exe = EXE(
     runtime_tmpdir=None,
     console=False,                  # окно без консоли
     disable_windowed_traceback=False,
+    icon='Icon.ico',               # иконка exe/окна/панели задач
 )

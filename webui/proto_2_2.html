@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="ru" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<title>Прототип #2.2 — кросс-лагерные моды, бейджи, пресеты</title>
+<style>
+:root{--bg:#11151d;--panel:#1a2030;--panel-2:#222a3d;--line:#2c3650;--fg:#e8edf7;
+  --muted:#9aa7c4;--accent:#34c0d6;--accent-fg:#06222a;--accent-2:#3a78f0;--ok:#46c98b;
+  --warn:#f0b54a;--danger:#f0635a;--chip:#283149;--row-hover:#1e2538;--row-sel:#23314f;--head:#161c2a;}
+*{box-sizing:border-box;}
+body{margin:0;background:var(--bg);color:var(--fg);font-family:"Segoe UI",system-ui,sans-serif;
+  font-size:14px;padding:24px;line-height:1.5;}
+h1{font-size:20px;margin:0 0 4px;} h2{font-size:15px;color:var(--accent);margin:26px 0 10px;}
+.note{color:var(--muted);font-size:13px;max-width:880px;}
+.wrap{display:flex;gap:20px;flex-wrap:wrap;align-items:flex-start;}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px;width:430px;}
+.card h3{margin:0 0 4px;font-size:14px;} .card .sub{color:var(--muted);font-size:12px;margin-bottom:10px;}
+.pick{margin-top:10px;text-align:center;}
+.pick b{color:var(--accent);}
+/* бейджи лагеря (метки), как UNI/REDUX на вики */
+.lbl{display:inline-block;padding:1px 7px;border-radius:5px;font-size:10px;font-weight:800;
+  letter-spacing:.5px;vertical-align:middle;margin-left:6px;}
+.l-uni{background:#2b3242;color:#d6deef;border:1px solid #44506e;}
+.l-redux{background:#5a1717;color:#ff7a72;border:1px solid #7a2222;}
+.l-orig{background:#3a3320;color:#f0c870;border:1px solid #5a4d2a;}
+/* дерево */
+.tree{background:var(--panel-2);border:1px solid var(--line);border-radius:8px;overflow:hidden;}
+.trow{display:grid;grid-template-columns:1fr 110px 92px;align-items:center;padding:7px 12px;border-bottom:1px solid var(--line);font-size:13px;}
+.trow:last-child{border-bottom:none;}
+.trow.grp{font-weight:600;color:var(--accent);background:var(--head);}
+.trow.grp.uni{color:#9fb4e6;} .trow .c{text-align:center;color:var(--muted);font-size:11px;}
+.badge{display:inline-block;padding:1px 8px;border-radius:999px;font-size:10px;font-weight:600;}
+.b-ok{color:var(--muted);} .b-upd{background:rgba(58,120,240,.18);color:var(--accent-2);}
+.b-avail{background:rgba(70,201,139,.18);color:var(--ok);} .b-queued{background:rgba(52,192,214,.16);color:var(--accent);}
+/* диалоги */
+.dlg{background:var(--panel-2);border:1px solid var(--line);border-radius:8px;padding:12px;}
+.field{margin:8px 0;} .field label{display:block;font-size:11px;text-transform:uppercase;color:var(--muted);letter-spacing:.4px;margin-bottom:4px;}
+.field select,.field input{width:100%;background:var(--panel);border:1px solid var(--line);border-radius:7px;padding:8px 10px;color:var(--fg);font-size:13px;}
+.opt{display:flex;align-items:center;gap:6px;padding:7px 10px;border:1px solid var(--line);border-radius:7px;margin:5px 0;background:var(--panel);cursor:pointer;}
+.opt:hover{border-color:var(--accent-2);} .opt .nm{flex:1;}
+.seg{display:inline-flex;background:var(--panel);border:1px solid var(--line);border-radius:8px;overflow:hidden;margin-bottom:8px;}
+.seg button{background:transparent;color:var(--muted);border:none;padding:6px 14px;font-size:12.5px;cursor:pointer;font-family:inherit;}
+.seg button.on{background:var(--accent);color:var(--accent-fg);font-weight:600;}
+/* пресеты */
+.preset{display:flex;gap:10px;flex-wrap:wrap;}
+.pbtn{background:var(--panel-2);border:1px solid var(--line);border-radius:9px;padding:11px 14px;cursor:pointer;
+  display:flex;align-items:center;gap:9px;font-size:13px;color:var(--fg);}
+.pbtn:hover{border-color:var(--accent);}
+.hide{display:none;}
+small.k{color:var(--muted);}
+</style>
+</head>
+<body>
+  <h1>Прототип #2.2 — установка модов из любого лагеря, бейджи, пресеты</h1>
+  <p class="note">Это статичный макет, чтобы выбрать вид. Решено: бейджи лагеря — <b>и в дереве, и в диалоге</b>;
+  смешивание лагерей разрешено без предупреждений. Осталось выбрать вид окна «Добавить мод»:
+  <b>Вариант A</b> (привычный каскад) или <b>Вариант B</b> (плоский поиск по всем модам), либо оба.</p>
+
+  <h2>1. Дерево модов с бейджами лагеря</h2>
+  <div class="tree" style="max-width:660px">
+    <div class="trow grp"><div>🗂 ПБ «Свободная Бухта» <small class="k">(установленная база)</small></div><div class="c">Раздел</div><div class="c">Состояние</div></div>
+    <div class="trow"><div>&nbsp;&nbsp;PolMercsHQ <span class="lbl l-redux">REDUX</span></div><div class="c">Рейнджеры</div><div class="c"><span class="badge b-ok">✅ установлен</span></div></div>
+    <div class="trow"><div>&nbsp;&nbsp;PolMercs <span class="lbl l-redux">REDUX</span></div><div class="c">Рейнджеры</div><div class="c"><span class="badge b-ok">✅ установлен</span></div></div>
+    <div class="trow"><div>&nbsp;&nbsp;AMod_Merchant <span class="lbl l-redux">REDUX</span></div><div class="c">Прочее</div><div class="c"><span class="badge b-queued">➕ добавлен</span></div></div>
+    <div class="trow grp uni"><div>🗂 Space Rangers Universe (Community)</div><div class="c">Раздел</div><div class="c">Состояние</div></div>
+    <div class="trow"><div>&nbsp;&nbsp;ShuWarriors <span class="lbl l-uni">UNI</span></div><div class="c">Рейнджеры</div><div class="c"><span class="badge b-avail">📥 доступен</span></div></div>
+    <div class="trow"><div>&nbsp;&nbsp;ShuAsteroids <span class="lbl l-uni">UNI</span><span class="lbl l-orig">ORIG</span></div><div class="c">Мир</div><div class="c"><span class="badge b-upd">⬆ обновление</span></div></div>
+  </div>
+  <p class="note" style="margin-top:8px">Несколько бейджей (<span class="lbl l-uni">UNI</span><span class="lbl l-orig">ORIG</span>) = мод доступен в нескольких лагерях с одинаковым содержимым.</p>
+
+  <h2>2. Окно «Добавить мод» — два варианта на выбор</h2>
+  <div class="wrap">
+
+    <div class="card">
+      <h3>Вариант A — каскад Лагерь → Пак → Мод</h3>
+      <div class="sub">Как сейчас, но без привязки к базе: можно выбрать любой лагерь. У мода — бейдж.</div>
+      <div class="dlg">
+        <div class="field"><label>Лагерь</label>
+          <select><option>Любой / Space Rangers Universe (Community)</option><option>ПБ «Свободная Бухта»</option><option>Original</option></select></div>
+        <div class="field"><label>Пак</label><select><option>★ весь пак — Рейнджеры Шу</option></select></div>
+        <div class="field"><label>Мод</label>
+          <div class="opt"><span class="nm">ShuMercs</span><span class="lbl l-uni">UNI</span></div>
+          <div class="opt"><span class="nm">ShuMercsHQ</span><span class="lbl l-uni">UNI</span></div>
+          <div class="opt"><span class="nm">ShuWarriors</span><span class="lbl l-uni">UNI</span></div>
+        </div>
+      </div>
+      <div class="pick">Выбрать → напишите «<b>A</b>»</div>
+    </div>
+
+    <div class="card">
+      <h3>Вариант B — плоский поиск по всем модам</h3>
+      <div class="sub">Один список всех модов всех лагерей. Печатаете имя — видите все варианты сразу.</div>
+      <div class="dlg">
+        <div class="field"><label>Поиск мода (любой лагерь)</label><input value="merc" readonly></div>
+        <div class="opt"><span class="nm">PolMercs</span><span class="lbl l-redux">REDUX</span></div>
+        <div class="opt"><span class="nm">PolMercsHQ</span><span class="lbl l-redux">REDUX</span></div>
+        <div class="opt"><span class="nm">ShuMercs</span><span class="lbl l-uni">UNI</span><span class="lbl l-orig">ORIG</span></div>
+        <div class="opt"><span class="nm">ShuMercsHQ</span><span class="lbl l-uni">UNI</span></div>
+        <div class="opt"><span class="nm">AMod_Merchant</span><span class="lbl l-uni">UNI</span><span class="lbl l-redux">REDUX</span></div>
+      </div>
+      <div class="pick">Выбрать → напишите «<b>B</b>» (или «<b>оба</b>»)</div>
+    </div>
+
+  </div>
+
+  <h2>3. Пресеты (вшитые сборки «всё с одной меткой»)</h2>
+  <p class="note">Кнопки в окне «Сборки» — поставить разом весь набор одной метки, не разбираясь в паках.</p>
+  <div class="preset">
+    <div class="pbtn"><span class="lbl l-redux">REDUX</span> Поставить всё «ПБ Свободная Бухта»</div>
+    <div class="pbtn"><span class="lbl l-uni">UNI</span> Поставить всё «Universe (Community)»</div>
+    <div class="pbtn"><span class="lbl l-orig">ORIG</span> Поставить всё «Original»</div>
+  </div>
+
+  <h2>4. Правила (как вы просили) — войдут в установку и «Совместимость»</h2>
+  <ul class="note">
+    <li>В одну папку/имя — только ОДИН вариант: нельзя одновременно <span class="lbl l-uni">UNI</span> ShuMercs и <span class="lbl l-redux">REDUX</span> PolMercs (это одна папка). Добавление второго заменит первый.</li>
+    <li>Зависимость наследует метку: если <span class="lbl l-redux">REDUX</span> PolMercsHQ требует PolMercs — подтянется именно <span class="lbl l-redux">REDUX</span>-вариант.</li>
+    <li>Конфликт игнорирует метку: если мод конфликтует с ShuRattors — исключаются ShuRattors <b>всех</b> меток.</li>
+  </ul>
+</body>
+</html>

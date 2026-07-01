@@ -6,7 +6,7 @@
 # Предварительно build_rwt.bat генерирует embedded_secrets.py из launcher_config.json.
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('web', 'web')]            # фронт (HTML/CSS/JS) → _MEIPASS/web
+datas = [('web', 'web'), ('Icon.ico', '.')]   # фронт (HTML/CSS/JS) + иконка → _MEIPASS
 binaries = []
 hiddenimports = ['launcher_core', 'embedded_secrets', 'clr', 'requests']
 
@@ -43,4 +43,5 @@ exe = EXE(
     runtime_tmpdir=None,
     console=False,                  # окно без консоли
     disable_windowed_traceback=False,
+    icon='Icon.ico',               # иконка exe/окна/панели задач
 )
