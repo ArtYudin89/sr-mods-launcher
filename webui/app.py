@@ -1355,6 +1355,18 @@ class Api:
         except Exception as e:
             return {'ok': False, 'error': str(e)}
 
+    def open_url(self, url):
+        """Открыть ссылку (страница релиза лаунчера) в браузере по умолчанию."""
+        url = (url or '').strip()
+        if not (url.startswith('http://') or url.startswith('https://')):
+            return {'ok': False, 'error': 'Некорректная ссылка.'}
+        try:
+            import webbrowser
+            webbrowser.open(url)
+            return {'ok': True}
+        except Exception as e:
+            return {'ok': False, 'error': str(e)}
+
     def browse_game(self):
         if not _WINDOW:
             return None

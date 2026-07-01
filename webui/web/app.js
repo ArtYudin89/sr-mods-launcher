@@ -126,6 +126,8 @@ function wireUI() {
   $('gamePath').onclick = browseGame;
   $('chooseGameBtn').onclick = browseGame;
   $('settingsBtn').onclick = openSettings;
+  $('verBadge').onclick = openSettings;   // клик по версии/«доступна vX» → Настройки (проверка)
+  $('verBadge').style.cursor = 'pointer';
   $('profileSel').onchange = (e) => switchProfile(e.target.value);
   $('profileMenuBtn').onclick = openProfiles;
 
@@ -174,6 +176,7 @@ function wireUI() {
   $('setCancelBtn').onclick = () => hide('settingsOverlay');
   $('setSaveBtn').onclick = saveSettings;
   $('setBrowseBtn').onclick = async () => { const p = await api().browse_game(); if (p) $('setGamePath').value = p; };
+  $('setUpdateBtn').onclick = manualCheckUpdate;
   $('forkAddBtn').onclick = addFork;
   // профили
   $('createProfBtn').onclick = createProfile;
@@ -797,9 +800,28 @@ function openSettings() {
   $('setRepo').value = STATE.repo || '';
   $('setToken').value = '';
   $('forkRepo').value = ''; $('forkToken').value = '';
+  $('setUpdateStatus').innerHTML = `Текущая: v${esc(STATE.version || '?')}`;
   FORKS = (STATE.forks || []).map((f) => ({ repo: f.repo, has_token: f.has_token, token: '' }));
   renderForks();
   show('settingsOverlay');
+}
+// ручная проверка обновления лаунчера (кнопка в Настройках)
+async function manualCheckUpdate() {
+  const st = $('setUpdateStatus');
+  st.innerHTML = 'Проверяю…';
+  let r;
+  try { r = await api().check_self_update(); } catch (e) { r = null; }
+  if (!r || !r.ok) { st.innerHTML = `<span style="color:var(--warn)">Не удалось проверить${r && r.error ? ': ' + esc(r.error) : ''}</span>`; return; }
+  if (r.update) {
+    st.innerHTML = `<span style="color:var(--accent)">Доступна v${esc(r.version)}</span> (у вас v${esc(r.current)}). `
+      + (r.url ? `<a href="#" id="setUpdDl">Скачать</a>` : 'Обновите лаунчер вручную.');
+    const dl = $('setUpdDl');
+    if (dl) dl.onclick = (e) => { e.preventDefault(); api().open_url(r.url); };
+    // подсветим бейдж версии в подвале
+    $('verBadge').textContent = `⬆ доступна v${r.version}`; $('verBadge').classList.add('upd');
+  } else {
+    st.innerHTML = `<span style="color:var(--ok)">У вас последняя версия (v${esc(r.current)}).</span>`;
+  }
 }
 async function saveSettings() {
   const token = $('setToken').value;
