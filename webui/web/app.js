@@ -203,6 +203,7 @@ function wireUI() {
   // контекстное меню (ПКМ)
   $('ctxOpenMod').onclick = () => { if (ctxMid) api().open_mod_folder(ctxMid); hideCtxMenu(); };
   $('ctxOpenMods').onclick = () => { api().open_mods_folder(); hideCtxMenu(); };
+  $('ctxCancelAdd').onclick = () => { const p = ctxPidx; hideCtxMenu(); if (p !== null) cancelAdd(p); };
   document.addEventListener('click', hideCtxMenu);
   document.addEventListener('scroll', hideCtxMenu, true);
   // Esc закрывает верхнюю открытую модалку / поповер
@@ -460,8 +461,12 @@ function onLeafClick(e, iid) {
   }
   renderTree();
 }
+// индекс записи сборки из iid: 'p3' (обычная) или 'p3#Кат/Мод' (мод развёрнутого лагеря)
+function pidxOf(iid) { const m = /^p(\d+)(#|$)/.exec(iid || ''); return m ? parseInt(m[1]) : null; }
 function selectedPidx() {
-  return [...selected].filter((i) => /^p\d+$/.test(i)).map((i) => parseInt(i.slice(1)));
+  const out = new Set();
+  [...selected].forEach((i) => { const n = pidxOf(i); if (n !== null) out.add(n); });
+  return [...out];
 }
 // все узлы-моды дерева (включая свёрнутые группы, которых нет в NODE)
 function allNodes() {
@@ -622,6 +627,10 @@ function removeSelected() {
     `Будет убрано из сборки: <b>${pidx.length}</b> позиц.<br>
      <span style="color:var(--muted)">Файлы на диске не удаляются — снимается только пометка «в сборке».</span>`,
     () => api().remove_pidx(pidx).then(() => { selected.clear(); refreshTree(); }));
+}
+// «Отменить добавление» из контекстного меню: убрать запись сборки (мод/пак/лагерь)
+function cancelAdd(pidx) {
+  api().remove_pidx([pidx]).then(() => { selected.clear(); refreshTree(); toast('Добавление отменено', 'ok'); });
 }
 function handleOpStart(r) { if (!r || !r.ok) toast((r && r.error) || 'Не удалось запустить', 'err'); }
 
@@ -1122,11 +1131,13 @@ function logStamp() {
 }
 
 // ───────── контекстное меню (ПКМ по моду) ─────────
-let ctxMid = null;
+let ctxMid = null, ctxPidx = null;
 function openCtxMenu(e, iid) {
   const n = NODE[iid];
   ctxMid = (n && n.mid) || null;
+  ctxPidx = pidxOf(iid);                 // запись сборки (добавленная) — можно отменить
   $('ctxOpenMod').style.display = ctxMid ? '' : 'none';
+  $('ctxCancelAdd').style.display = (ctxPidx !== null) ? '' : 'none';
   const menu = $('ctxMenu');
   menu.classList.remove('hidden');
   const w = menu.offsetWidth || 200, h = menu.offsetHeight || 80;

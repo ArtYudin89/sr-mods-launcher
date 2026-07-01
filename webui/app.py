@@ -97,7 +97,7 @@ IS_RWT = bool(EMBEDDED_TOKEN)
 # из репозитория ({version, url?, notes?}). url можно оставить пустым — тогда показ без
 # ссылки на скачивание (просто «доступна новая версия»).
 # ВНИМАНИЕ: при релизе выставить реальный следующий номер (текущий публичный > 0.13.1).
-LAUNCHER_VERSION = '0.15.0'
+LAUNCHER_VERSION = '0.15.1'
 RELEASE_REF = 'state/launcher_release.json'
 
 
@@ -740,6 +740,17 @@ class Api:
         return {v['source'].split('/')[0] for v in e.get('variants', [])
                 if '/' in (v.get('source') or '')}
 
+    def _camp_member_mids(self, camp):
+        """Folder-id всех модов каталога, у которых есть вариант этого лагеря — чтобы
+        развернуть добавленный «весь лагерь» в реальные моды в дереве (превью того, что
+        поставится), а не показывать одной строкой «★ весь лагерь» вверху списка."""
+        cat = self._catalog_cache or {}
+        out = set()
+        for k, e in cat.items():
+            if camp in self._entry_camps(e):
+                out.add(k.split('@', 1)[0])
+        return out
+
     def _camp_variant_entry(self, mid, camp):
         """Запись каталога варианта папки mid, релевантного лагерю camp: у папки Pol/Shu
         (напр. ShusRangers/ShuNukes) под redux канон — @PolNukes, под original/universe —
@@ -974,7 +985,7 @@ class Api:
             return ('ok', '✅ установлен') if on_disk else ('queued', '➕ добавлен')
 
         # (camp, pack, kind, label, status_class, status_text, date, iid, mid)
-        rows, seen, desc_iids = [], set(), set()
+        rows, seen, desc_iids, camp_adds = [], set(), set(), []
         for idx, m in enumerate(self.profile.get('mods', [])):
             typ, iid = m.get('type'), f'p{idx}'
             if typ == 'desc':
@@ -993,9 +1004,9 @@ class Api:
                              'пак', m.get('name', m.get('unit')), sc, st,
                              m.get('last_downloaded', '') if on else '', iid, ''))
             elif typ == 'camp':
-                on = bool(m.get('last_downloaded')); sc, st = status_of(m, on)
-                rows.append((m.get('camp', 'прочее'), None, 'лагерь', '★ весь лагерь',
-                             sc, st, m.get('last_downloaded', '') if on else '', iid, ''))
+                # разворачиваем в моды лагеря ПОСЛЕ дисковых (чтобы не дублировать уже
+                # установленные) — см. проход camp_adds ниже
+                camp_adds.append((iid, m.get('camp', 'прочее')))
             elif typ == 'desc' and m.get('id') and not m.get('url'):
                 # мод из каталога, добавленный «по названию»: показываем как обычный мод
                 # в ЕГО разделе/папке (а не как «форк» в «прочее» вверху списка)
@@ -1037,6 +1048,21 @@ class Api:
                       else ('load', '… каталог грузится'))
             rows.append((prof_camp, self._mod_group(mid), 'мод', mid.split('/')[-1],
                          sc, st, '', 'e:' + mid, mid))
+
+        # развернуть добавленный «весь лагерь» в реальные моды лагеря: каждый мод —
+        # строкой «➕ добавлен» в своей группе (превью того, что поставится), а не одной
+        # строкой «★ весь лагерь» вверху. iid='p{idx}#mid' → «отменить добавление»/удаление
+        # ведёт к записи лагеря (число idx); установка остаётся bulk (тип camp).
+        for cid, camp in camp_adds:
+            members = sorted(m for m in self._camp_member_mids(camp) if m not in seen)
+            if not members:                    # каталог ещё грузится — не прятать добавление
+                rows.append((camp, None, 'лагерь', '★ весь лагерь',
+                             'queued', '➕ добавлен', '', cid, ''))
+                continue
+            for mid in members:
+                seen.add(mid)
+                rows.append((camp, self._mod_group(mid), 'мод', mid.split('/')[-1],
+                             'queued', '➕ добавлен', '', f'{cid}#{mid}', mid))
 
         # вложенная структура camps → (mods | packs → mods)
         camps = {}
