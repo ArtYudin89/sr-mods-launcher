@@ -97,7 +97,7 @@ IS_RWT = bool(EMBEDDED_TOKEN)
 # из репозитория ({version, url?, notes?}). url можно оставить пустым — тогда показ без
 # ссылки на скачивание (просто «доступна новая версия»).
 # ВНИМАНИЕ: при релизе выставить реальный следующий номер (текущий публичный > 0.13.1).
-LAUNCHER_VERSION = '0.15.2'
+LAUNCHER_VERSION = '0.15.3'
 RELEASE_REF = 'state/launcher_release.json'
 
 
@@ -668,9 +668,34 @@ class Api:
         return order
 
     def get_update_order(self):
-        """Для диалога/настроек: {base, order, all_camps}. order = [база, доп…]."""
+        """Для диалога/настроек: {base, order, all_camps, needs_order}. needs_order=False →
+        все установленные моды есть в базовом лагере, окно порядка можно НЕ показывать."""
         return {'ok': True, 'base': (self.profile.get('base') or ''),
-                'order': self._update_order(), 'all_camps': list(CAMP_KEYS)}
+                'order': self._update_order(), 'all_camps': list(CAMP_KEYS),
+                'needs_order': self._needs_order()}
+
+    def _needs_order(self):
+        """Нужно ли показывать окно порядка лагерей. True, если (а) уже настроены доп.строки,
+        либо (б) на диске есть мод, которого НЕТ в базовом лагере (только в других) — тогда
+        порядок реально влияет. Если все моды есть в базе — False (окно лишнее)."""
+        base = (self.profile.get('base') or '').strip()
+        if not base:
+            return False
+        if (self.profile.get('update_extra') or []):
+            return True
+        cat = self._catalog_cache or {}
+        idx = self._disk_index or {}
+        if not cat or not idx.get('mods'):
+            return False                       # не знаем состав диска → не навязываем окно
+        for mid in idx['mods']:
+            bid = mid.split('@', 1)[0]
+            camps = set()
+            for k, e in cat.items():
+                if k.split('@', 1)[0] == bid:
+                    camps |= self._entry_camps(e)
+            if camps and base not in camps:    # мод есть только в НЕ-базовых лагерях
+                return True
+        return False
 
     def set_update_extra(self, extra):
         """Сохранить доп.строки порядка (лагеря после базовой). Строку базы не трогаем."""
@@ -1557,6 +1582,15 @@ class Api:
                 mods.pop(i)
         self._save_profile()
         return True
+
+    def clear_queue(self):
+        """Отменить ВСЕ добавления: очистить очередь сборки (profile['mods']). Файлы на
+        диске не трогает — это только неустановленные добавленные записи."""
+        n = len(self.profile.get('mods', []))
+        self.profile['mods'] = []
+        self._save_profile()
+        self._emit('tree_dirty')
+        return {'ok': True, 'removed': n}
 
     def add_to_profile(self, mid):
         """Добавить мод из набора профиля в очередь установки (desc-запись)."""

@@ -71,15 +71,15 @@
         <button class="icon-btn" id="expandBtn" title="Развернуть все группы">⊕</button>
         <button class="icon-btn" id="collapseBtn" title="Свернуть все группы">⊖</button>
         <button class="btn ghost" id="indexBtn" title="Просканировать установленные моды и сверить с каталогом (без скачивания). Нужно после ручной установки модов мимо лаунчера.">🗂 Индексировать</button>
-        <div class="base-pick" title="База лагеря, относительно которой проверяются обновления. «Авто» — определить по файлам в Mods.">
+        <div class="base-pick" title="С каким сборником модов сверяться при поиске обновлений. Оставьте «авто», если не уверены — база определится сама по файлам в Mods. Кнопка 🎯 — определить прямо сейчас.">
           <span class="base-lbl">База:</span>
           <select id="baseSel">
             <option value="">— авто —</option>
-            <option value="universe">UNI</option>
-            <option value="redux">REDUX</option>
-            <option value="original">ORIG</option>
+            <option value="universe">Universe (Community)</option>
+            <option value="redux">ПБ «Свободная Бухта»</option>
+            <option value="original">Original</option>
           </select>
-          <button class="icon-btn" id="baseAutoBtn" title="Определить базу автоматически по файлам в папке Mods (sha base-паков)">🎯</button>
+          <button class="icon-btn" id="baseAutoBtn" title="Определить базу прямо сейчас по файлам в папке Mods">🎯</button>
         </div>
         <button class="btn ghost" id="refreshBtn" title="Перечитать каталог с сервера и проверить, для каких модов вышли новые версии (только проверка, ничего не скачивается)">⟳ Проверить обновления</button>
       </div>
@@ -91,7 +91,7 @@
       <div class="tree-wrap">
         <div class="tree-head">
           <div>Мод</div>
-          <div class="c" id="colDim" title="Папка на диске или раздел из ModuleInfo — показывается измерение, обратное группировке">Раздел</div>
+          <div class="c" id="colDim" title="Папка мода на диске или раздел из описания мода (показывается то, по чему сейчас НЕ сгруппировано дерево)">Раздел</div>
           <div class="c help" title="✓ — мод сейчас подключён в самой игре (файл ModCFG)">В игре</div>
           <div class="c help" title="✓ — мод входит в эту сборку. Нажмите галочку, чтобы включить/выключить.">В сборке</div>
           <div class="c">Состояние</div>
@@ -104,7 +104,7 @@
       <!-- действия -->
       <div class="actions">
         <button class="btn primary" id="addBtn" title="Добавить мод, пак или целый лагерь в эту сборку">➕ Добавить мод</button>
-        <button class="btn" id="installBtn" title="Скачать и установить. Без выделения — всю сборку (📋) целиком; с выделением — только выбранные строки.">🧩 Установить все</button>
+        <button class="btn" id="installBtn" title="Скачать и установить. Без выделения — всю сборку целиком; с выделением — только выбранные строки.">🧩 Установить все</button>
         <button class="btn" id="mergeBtn" title="Скачать и применить новые версии (после «Проверить обновления»), сохранив ваши ручные правки файлов. Без выделения — все моды с обновлением; с выделением — только выбранные.">🔀 Обновить все</button>
         <button class="btn" id="compatBtn" title="Проверить, всё ли совместимо: есть ли база, фиксы, конфликты">🛡 Совместимость</button>
         <div class="spacer"></div>
@@ -360,7 +360,8 @@
   <div class="ctx-menu hidden" id="ctxMenu">
     <button id="ctxOpenMod">📂 Открыть папку мода</button>
     <button id="ctxOpenMods">📁 Открыть папку Mods</button>
-    <button id="ctxCancelAdd">✖ Отменить добавление</button>
+    <button id="ctxRemoveOne">🗑 Убрать из сборки (эту строку)</button>
+    <button id="ctxCancelAdd">✖ Отменить добавление (всё)</button>
   </div>
 
   <div class="toast-wrap" id="toastWrap"></div>

@@ -132,7 +132,7 @@ input,select{font-family:inherit;}
 .row.camp .label{color:var(--accent);}
 .row.pack .label{color:var(--accent-2);}
 .cell{text-align:center;color:var(--muted);font-size:12px;}
-.toggle{display:inline-flex;width:21px;height:21px;border-radius:6px;align-items:center;justify-content:center;border:1px solid var(--line);background:var(--toggle-off);font-size:12px;}
+.toggle{display:inline-flex;width:24px;height:24px;border-radius:6px;align-items:center;justify-content:center;border:1px solid var(--line);background:var(--toggle-off);font-size:12px;}
 .toggle.on{background:var(--ok);color:#fff;border-color:transparent;font-weight:700;}
 .toggle.click{cursor:pointer;}
 .toggle.ro{opacity:.85;}

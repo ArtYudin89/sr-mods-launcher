@@ -214,7 +214,14 @@ function wireUI() {
   // контекстное меню (ПКМ)
   $('ctxOpenMod').onclick = () => { if (ctxMid) api().open_mod_folder(ctxMid); hideCtxMenu(); };
   $('ctxOpenMods').onclick = () => { api().open_mods_folder(); hideCtxMenu(); };
-  $('ctxCancelAdd').onclick = () => { const p = ctxPidx; hideCtxMenu(); if (p !== null) cancelAdd(p); };
+  $('ctxRemoveOne').onclick = () => { const p = ctxPidx; hideCtxMenu(); if (p !== null) cancelAdd(p); };
+  $('ctxCancelAdd').onclick = () => {
+    hideCtxMenu();
+    confirmBox('Отменить все добавления?',
+      'Очистит очередь сборки (все добавленные, ещё не установленные записи). Файлы на диске не тронет.',
+      () => api().clear_queue().then(() => { selected.clear(); refreshTree(); toast('Все добавления отменены', 'ok'); }),
+      null, { okLabel: 'Отменить всё', okDanger: true });
+  };
   document.addEventListener('click', hideCtxMenu);
   document.addEventListener('scroll', hideCtxMenu, true);
   // Esc закрывает верхнюю открытую модалку / поповер
@@ -756,13 +763,15 @@ async function startCheckUpdates() {
       null, { okLabel: 'Определить автоматически', cancelLabel: 'Отмена' });
     return;
   }
+  if (!st.needs_order) { runUpdateCheck(); return; }       // все моды в базе → окно не нужно
   openOrderDialog(st, (extra) => runUpdateCheck(extra));   // п.2 — окно порядка
 }
 
 async function runUpdateCheck(extra) {                     // п.3 — сама проверка
-  await api().set_update_extra(extra);     // ВАЖНО: сохранить порядок ДО refresh_remote —
-  toast('Перечитываю каталог и проверяю обновления…', 'ok');   // он сам запускает сверку
-  try { await api().refresh_remote(); } catch (e) {}           // (уже с сохранённым порядком)
+  // extra===undefined → окно пропущено, сохранённый порядок НЕ трогаем; массив → сохранить
+  if (Array.isArray(extra)) await api().set_update_extra(extra);   // ДО refresh_remote (он сам
+  toast('Перечитываю каталог и проверяю обновления…', 'ok');       // запускает сверку с порядком)
+  try { await api().refresh_remote(); } catch (e) {}
   const s = await api().get_state(); STATE = s; applyState();
   refreshTree();
 }
@@ -1110,7 +1119,7 @@ function startMerge() {
       return true;
     }).map((n) => n.iid);
     if (!iids.length) {
-      toast('Обновлений не найдено. Нажмите «⟳ Обновить», чтобы проверить.', 'err');
+      toast('Обновлений не найдено. Нажмите «⟳ Проверить обновления».', 'err');
       return;
     }
   }
@@ -1257,7 +1266,8 @@ function openCtxMenu(e, iid) {
   ctxMid = (n && n.mid) || null;
   ctxPidx = pidxOf(iid);                 // запись сборки (добавленная) — можно отменить
   $('ctxOpenMod').style.display = ctxMid ? '' : 'none';
-  $('ctxCancelAdd').style.display = (ctxPidx !== null) ? '' : 'none';
+  $('ctxRemoveOne').style.display = (ctxPidx !== null) ? '' : 'none';   // убрать эту строку
+  $('ctxCancelAdd').style.display = (ctxPidx !== null) ? '' : 'none';   // отменить все добавления
   const menu = $('ctxMenu');
   menu.classList.remove('hidden');
   const w = menu.offsetWidth || 200, h = menu.offsetHeight || 80;
@@ -1312,7 +1322,16 @@ async function openModInfo(mid, variant) {
 }
 
 // ───────── утилиты ─────────
-function show(id) { $(id).classList.remove('hidden'); }
+function show(id) {
+  const el = $(id);
+  el.classList.remove('hidden');
+  // доступность: при открытии окна ставим фокус на первое поле, иначе на первую кнопку —
+  // чтобы можно было сразу печатать / подтвердить Enter, а не кликать мышью
+  const box = el.querySelector('.modal, .popover, .ctx-menu') || el;
+  const target = box.querySelector('input:not([type=hidden]),select,textarea')
+    || box.querySelector('button');
+  if (target) setTimeout(() => { try { target.focus(); } catch (e) {} }, 30);
+}
 function hide(id) { $(id).classList.add('hidden'); }
 function confirmBox(title, html, onOk, onCancel, opts) {
   opts = opts || {};
@@ -1328,8 +1347,14 @@ function confirmBox(title, html, onOk, onCancel, opts) {
   // подтверждения опасных действий) — чтобы случайный двойной клик не «протолкнул» оба
   ok.parentElement.style.flexDirection = opts.okSwap ? 'row-reverse' : '';
   show('confirmOverlay');
-  ok.onclick = () => { hide('confirmOverlay'); if (onOk) onOk(); };
-  cancel.onclick = () => { hide('confirmOverlay'); if (onCancel) onCancel(); };
+  const done = (fn) => { hide('confirmOverlay'); $('confirmOverlay').onkeydown = null; if (fn) fn(); };
+  ok.onclick = () => done(onOk);
+  cancel.onclick = () => done(onCancel);
+  // Enter подтверждает (кроме многострочных полей), Esc отменяет — без мыши
+  $('confirmOverlay').onkeydown = (e) => {
+    if (e.key === 'Enter' && e.target.tagName !== 'TEXTAREA' && !opts.okHidden) { e.preventDefault(); done(onOk); }
+    else if (e.key === 'Escape') { e.preventDefault(); done(onCancel); }
+  };
 }
 function toast(msg, kind) {
   const t = document.createElement('div');
