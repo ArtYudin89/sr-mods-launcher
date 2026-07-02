@@ -359,3 +359,23 @@ body.busy .toggle.click{pointer-events:none;opacity:.5;}
 .csc{border-radius:8px;padding:9px 12px;font-size:12.5px;margin:8px 0;line-height:1.5;}
 .csc.add{background:rgba(70,201,139,.12);border-left:3px solid var(--ok);}
 .csc.del{background:rgba(240,99,90,.12);border-left:3px solid var(--danger);}
+/* ───────── справка ───────── */
+.help-list{display:flex;flex-direction:column;gap:9px;margin-top:6px;}
+.help-item{background:var(--panel-2);border:1px solid var(--line);border-radius:8px;
+  padding:9px 12px;font-size:12.8px;line-height:1.5;color:var(--muted);}
+.help-item b{color:var(--fg);}
+/* ───────── обучающий тур ───────── */
+.tour{position:fixed;inset:0;z-index:70;}
+.tour.hidden{display:none;}
+/* подсвеченная «дырка» вокруг целевого элемента: затемняет всё остальное box-shadow'ом */
+.tour-hi{position:absolute;border-radius:9px;pointer-events:none;transition:all .2s ease;
+  box-shadow:0 0 0 9999px rgba(0,0,0,.62),0 0 0 2px var(--accent),0 0 22px 4px rgba(52,192,214,.55);}
+/* подсказка-карточка со стэппером */
+.tour-tip{position:absolute;width:400px;max-width:92vw;background:var(--panel);
+  border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);padding:15px 17px;}
+.tour-tip-title{font-size:15px;font-weight:700;color:var(--fg);margin-bottom:6px;}
+.tour-tip-text{font-size:13px;line-height:1.55;color:var(--muted);}
+.tour-tip-foot{display:flex;align-items:center;gap:7px;margin-top:14px;flex-wrap:wrap;}
+.tour-tip-foot .spacer{flex:1;min-width:6px;}
+.tour-tip-foot .btn{flex:none;padding:6px 11px;font-size:12px;}
+.tour-step{font-size:12px;color:var(--muted);white-space:nowrap;flex:none;}

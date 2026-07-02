@@ -77,6 +77,7 @@ async function init() {
   wireUI();
   refreshTree();
   checkSelfUpdate();                  // фоновая проверка новой версии лаунчера
+  maybeAutoTour();                    // при первом запуске — показать обучающий тур
 }
 
 async function checkSelfUpdate() {
@@ -129,6 +130,28 @@ function wireUI() {
   $('gamePath').onclick = browseGame;
   $('chooseGameBtn').onclick = browseGame;
   $('settingsBtn').onclick = openSettings;
+  // справка и обучение
+  $('helpBtn').onclick = () => show('helpOverlay');
+  $('tourBtn').onclick = () => startTour();
+  $('helpCloseBtn').onclick = () => hide('helpOverlay');
+  $('helpTourBtn').onclick = () => { hide('helpOverlay'); startTour(); };
+  $('helpGitBtn').onclick = () => api().open_url(STATE.help_url || HELP_URL_FALLBACK);
+  $('tourNext').onclick = () => tourGo(1);
+  $('tourPrev').onclick = () => tourGo(-1);
+  $('tourSkip').onclick = endTour;
+  // клавиатура в туре: ←/→ — шаги, Tab не выпускает фокус за карточку подсказки
+  $('tourOverlay').addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowRight') { e.preventDefault(); tourGo(1); }
+    else if (e.key === 'ArrowLeft') { e.preventDefault(); tourGo(-1); }
+    else if (e.key === 'Tab') {
+      const f = focusables($('tourTip'));
+      if (!f.length) return;
+      const first = f[0], last = f[f.length - 1];
+      const inside = $('tourTip').contains(document.activeElement);
+      if (e.shiftKey && (document.activeElement === first || !inside)) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && (document.activeElement === last || !inside)) { e.preventDefault(); first.focus(); }
+    }
+  });
   $('verBadge').onclick = openSettings;   // клик по версии/«доступна vX» → Настройки (проверка)
   $('verBadge').style.cursor = 'pointer';
   $('profileSel').onchange = (e) => switchProfile(e.target.value);
@@ -211,7 +234,7 @@ function wireUI() {
 
   // закрытие по клику на фон — только для «безопасных» модалок
   // (confirm/merge завязаны на состояние бэкенда → закрываются только кнопками)
-  ['settingsOverlay', 'profileOverlay', 'addOverlay', 'infoOverlay', 'compatOverlay'].forEach((id) =>
+  ['settingsOverlay', 'profileOverlay', 'addOverlay', 'infoOverlay', 'compatOverlay', 'helpOverlay'].forEach((id) =>
     $(id).onclick = (e) => { if (e.target === $(id)) hide(id); });
   $('infoCloseBtn').onclick = () => hide('infoOverlay');
   $('compatCloseBtn').onclick = () => hide('compatOverlay');
@@ -231,9 +254,10 @@ function wireUI() {
   // Esc закрывает верхнюю открытую модалку / поповер
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
+    if (!$('tourOverlay').classList.contains('hidden')) { endTour(); return; }
     if (!$('ctxMenu').classList.contains('hidden')) { hideCtxMenu(); return; }
     if (!$('filterPop').classList.contains('hidden')) { $('filterPop').classList.add('hidden'); return; }
-    for (const id of ['infoOverlay', 'compatOverlay', 'addOverlay', 'profileOverlay', 'settingsOverlay']) {
+    for (const id of ['helpOverlay', 'infoOverlay', 'compatOverlay', 'addOverlay', 'profileOverlay', 'settingsOverlay']) {
       if (!$(id).classList.contains('hidden')) { hide(id); return; }
     }
     if (!$('confirmOverlay').classList.contains('hidden')) { $('confirmCancel').click(); return; }
@@ -1409,6 +1433,104 @@ function focusables(root) {
   return [...root.querySelectorAll(FOCUS_SEL)]
     .filter((el) => el.offsetWidth || el.offsetHeight || el.getClientRects().length);
 }
+// ───────── обучающий тур ─────────
+const HELP_URL_FALLBACK =
+  'https://github.com/ArtYudin89/sr-mods-launcher/blob/master/README.md';
+// Шаги тура: sel — CSS-селектор подсвечиваемого элемента (null = карточка по центру).
+const TOUR_STEPS = [
+  { sel: null, title: 'Добро пожаловать!',
+    text: 'Это SR Mods Launcher — он скачивает, ставит и обновляет моды для Space Rangers HD. Короткий тур покажет главное. Пройти можно за минуту.' },
+  { sel: '#gamePath', title: 'Папка игры',
+    text: 'Сначала укажите, где установлена игра (там лежит Rangers.exe). Моды ставятся в подпапку Mods. Клик по адресу — выбрать папку.' },
+  { sel: '.field', title: 'Сборка модов',
+    text: 'Сборка — это сохранённый набор модов. Держите несколько и переключайтесь здесь; кнопка ＋ рядом — создать новую или удалить.' },
+  { sel: '#addBtn', title: 'Добавить мод',
+    text: 'Окно добавления: поиск по названию, выбор по цепочке Лагерь → Пак → Мод или по ссылке. Можно добавить и целый лагерь сразу.' },
+  { sel: '#treeBody', title: 'Список модов',
+    text: 'Все моды сборки. Галочка «В сборке» включает/выключает мод, «В игре» — подключён ли он сейчас. Правый клик по строке — доп. действия.' },
+  { sel: '#installBtn', title: 'Установить',
+    text: 'Скачивает и ставит моды сборки. Без выделения — всю сборку целиком, с выделением строк — только выбранные.' },
+  { sel: '#refreshBtn', title: 'Проверить обновления',
+    text: 'Сверяет установленные моды с сервером и показывает, для каких вышли новые версии. Только проверка — ничего не скачивается.' },
+  { sel: '#mergeBtn', title: 'Обновить',
+    text: 'После проверки — скачивает новые версии, сохраняя ваши ручные правки файлов модов.' },
+  { sel: '.base-pick', title: 'База',
+    text: 'С каким сборником сверяться при поиске обновлений. Оставьте «авто», если не уверены; 🎯 — определить прямо сейчас по файлам в Mods.' },
+  { sel: '#launchBtn', title: 'Играть',
+    text: 'Запускает Space Rangers HD с текущими модами. Это всё основное — можно начинать!' },
+  { sel: '#helpBtn', title: 'Справка и повтор',
+    text: 'Этот тур всегда можно запустить снова кнопкой 🎓, а краткую справку со ссылкой на GitHub открыть кнопкой ❔ рядом.' },
+];
+let tourIdx = 0;
+
+function maybeAutoTour() {
+  if (STATE && !STATE.tutorial_done) setTimeout(() => startTour(), 500);
+}
+function startTour() {
+  tourIdx = 0;
+  $('tourOverlay').classList.remove('hidden');
+  renderTourStep();
+  setTimeout(() => { try { $('tourNext').focus(); } catch (e) {} }, 40);
+}
+function endTour() {
+  $('tourOverlay').classList.add('hidden');
+  $('tourOverlay').style.background = '';
+  if (STATE) STATE.tutorial_done = true;
+  try { api().set_tutorial_done(true); } catch (e) {}
+}
+function tourGo(d) {
+  const n = tourIdx + d;
+  if (n < 0) return;
+  if (n >= TOUR_STEPS.length) { endTour(); return; }
+  tourIdx = n;
+  renderTourStep();
+}
+function renderTourStep() {
+  const step = TOUR_STEPS[tourIdx];
+  $('tourTipTitle').textContent = step.title;
+  $('tourTipText').textContent = step.text;
+  $('tourStep').textContent = `Шаг ${tourIdx + 1} из ${TOUR_STEPS.length}`;
+  $('tourPrev').style.display = tourIdx === 0 ? 'none' : '';
+  $('tourNext').textContent = (tourIdx === TOUR_STEPS.length - 1) ? 'Готово ✓' : 'Далее →';
+  const hi = $('tourHi'), tip = $('tourTip'), ov = $('tourOverlay');
+  const el = step.sel ? document.querySelector(step.sel) : null;
+  const r = (el && (el.offsetWidth || el.offsetHeight)) ? el.getBoundingClientRect() : null;
+  if (r) {
+    // подсветка вокруг цели; затемнение фона делает box-shadow самой подсветки
+    const pad = 6;
+    hi.style.display = 'block';
+    hi.style.left = (r.left - pad) + 'px';
+    hi.style.top = (r.top - pad) + 'px';
+    hi.style.width = (r.width + pad * 2) + 'px';
+    hi.style.height = (r.height + pad * 2) + 'px';
+    ov.style.background = '';
+    positionTourTip(tip, r);
+  } else {
+    // без цели — карточка по центру, затемняем весь оверлей
+    hi.style.display = 'none';
+    ov.style.background = 'rgba(0,0,0,.62)';
+    tip.style.transform = 'translate(-50%,-50%)';
+    tip.style.left = '50%';
+    tip.style.top = '50%';
+  }
+}
+function positionTourTip(tip, r) {
+  tip.style.transform = '';
+  tip.style.left = '0px'; tip.style.top = '0px';        // показать для замера
+  const tw = tip.offsetWidth, th = tip.offsetHeight;
+  const vw = window.innerWidth, vh = window.innerHeight, gap = 14;
+  let top = r.bottom + gap;                             // по умолчанию — под целью
+  if (top + th > vh - 8) top = r.top - gap - th;        // не влезло снизу → над целью
+  top = Math.max(8, Math.min(top, vh - th - 8));
+  let left = r.left + r.width / 2 - tw / 2;             // по центру цели
+  left = Math.max(8, Math.min(left, vw - tw - 8));
+  tip.style.left = left + 'px';
+  tip.style.top = top + 'px';
+}
+window.addEventListener('resize', () => {
+  if (!$('tourOverlay').classList.contains('hidden')) renderTourStep();
+});
+
 const _trap = [];   // стек открытых модалок: {el, box, prev, handler} — для focus-trap и возврата фокуса
 function show(id) {
   const el = $(id);

@@ -518,6 +518,133 @@ def reconstruct_unit(repo, camp, unit, mods_dir, token, progress_cb=None,
     return stats
 
 
+def reconstruct_camp(repo, camp, units, mods_dir, token, log=print, tmp_dir=None,
+                     should_cancel=None, part_cb=None, byte_cb=None, sha_sink=None,
+                     dry_run=False):
+    """Установить ВЕСЬ лагерь одним идемпотентным проходом.
+
+    Раньше лагерь ставился по юниту за раз (reconstruct_unit в цикле), и каждый юнит
+    сверял диск ТОЛЬКО со своим манифестом. Но base / fixes / разные моды нередко
+    делят один и тот же целевой файл с РАЗНЫМ содержимым (после install_route их пути
+    сходятся в одно место на диске). При пофайловой установке юниты перезаписывали
+    файлы друг друга на КАЖДОЙ установке и «сверка хешей» никогда не сходилась к нулю
+    — отсюда «постоянно что-то устанавливается».
+
+    Здесь манифесты всех юнитов сливаются в ОДИН эффективный набор с приоритетом:
+    `units` идёт в порядке низший→высший приоритет, и более поздний юнит перезаписывает
+    того же по ЦЕЛЕВОМУ пути на диске (регистронезависимо). Затем — одна сверка хешей и
+    одна запись. Каждый спорный файл пишется ровно раз победителем → повторная установка
+    видит совпадение и не пишет ничего. Финальное состояние игры прежнее (побеждает тот
+    же юнит, что и при старом «кто последний в порядке установки»).
+
+    units: список dict в порядке приоритета (низший→высший):
+      {'unit': имя, 'tier': 'base'|'fixes'|..., 'fork_files': {relpath:(sha,kind)}|None,
+       'fork_index': idx|None}.
+    """
+    mods_dir = Path(mods_dir)
+    tmp = Path(tmp_dir or mods_dir.parent)
+    tmp.mkdir(parents=True, exist_ok=True)
+    stats = {'code_files': 0, 'asset_files': 0, 'chunks': [], 'missing': 0, 'skipped': 0}
+
+    index = json.loads(repo_file_bytes(repo, 'state/asset_index.json', token))
+
+    # 1) Слить манифесты всех юнитов в эффективный набор, дедуп по ЦЕЛЕВОМУ пути на
+    #    диске: более поздний юнит (выше приоритет) выигрывает. Ключ — (куда, путь.lower())
+    #    т.к. ФС Windows регистронезависима и разные relpath могут лечь в один файл.
+    eff = {}            # (where, rel_lower) -> {'sha','kind','relpath'}
+    fork_indexes = []   # индексы частей форков, в порядке юнитов (низший→высший)
+    conflicts = 0
+    for u in units:
+        _check_cancel(should_cancel)
+        unit = u['unit']
+        code_man = _load_manifest(repo, f'mods/{camp}/{unit}/code.manifest.json', token)
+        asset_man = _load_manifest(repo, f'mods/{camp}/{unit}/assets.manifest.json', token)
+        if not code_man and not asset_man:
+            log(f'⚠ нет манифестов для {camp}/{unit} — пропускаю')
+            continue
+        umap = {}       # relpath -> (sha, kind)
+        for kind, man in (('code', code_man), ('asset', asset_man)):
+            for relpath, meta in man.items():
+                umap[relpath] = (meta['sha256'], kind)
+        ff = u.get('fork_files')
+        if ff:
+            umap = overlay_manifest(umap, ff)
+            if u.get('fork_index'):
+                fork_indexes.append(u['fork_index'])
+        added = overridden = 0
+        for relpath, (sh, kind) in umap.items():
+            where, rel = install_route(relpath)
+            if where is None:
+                continue                       # мусор инсталлятора — никуда не пишется
+            key = (where, rel.lower())
+            if key in eff:
+                overridden += 1                # этот юнит переопределяет предыдущий
+            else:
+                added += 1
+            eff[key] = {'sha': sh, 'kind': kind, 'relpath': relpath}
+        conflicts += overridden
+        log(f'--- {unit} ({u.get("tier", "?")}) — +{added} файлов'
+            + (f', переопределяет {overridden}' if overridden else '') + ' ---')
+
+    if fork_indexes:                            # форки приоритетнее основного индекса;
+        # высший приоритет первым: юниты шли низший→высший → развернуть, затем базовый.
+        index = merge_chunk_indexes(list(reversed(fork_indexes)) + [index])
+        log('Наложение форков на лагерь включено.')
+
+    # 2) Одна сверка хешей на диске + сбор недостающего/изменённого.
+    log('Проверяю, что уже на диске (сверка хешей, без скачивания)…')
+
+    need = {}           # chunk -> {sha: [(relpath, kind), ...]}
+    for info in eff.values():
+        _check_cancel(should_cancel)
+        sh, kind, relpath = info['sha'], info['kind'], info['relpath']
+        # сверяем по фактическому пути победителя (relpath)
+        wr, real_rel = install_route(relpath)
+        tgt = (mods_dir if wr == 'mods' else mods_dir.parent) / real_rel
+        if tgt.is_file() and file_sha256(tgt) == sh:
+            stats['skipped'] += 1
+            continue
+        b = index['blobs'].get(sh)
+        if not b:
+            stats['missing'] += 1
+            continue
+        need.setdefault(b['chunk'], {}).setdefault(sh, []).append((relpath, kind))
+
+    if stats['skipped']:
+        log(f'Уже на диске и совпадает: {stats["skipped"]} файлов — скачивать не нужно.')
+    stats['chunks'] = list(need.keys())
+    for shamap in need.values():
+        for targets in shamap.values():
+            for _relpath, kind in targets:
+                stats[f'{kind}_files'] += 1
+    log(f'Лагерь {camp}: {stats["code_files"]} код + {stats["asset_files"]} ассетов '
+        f'в {len(need)} частях'
+        + (f' (конфликтов путей разрешено по приоритету: {conflicts})' if conflicts else '')
+        + (f', НЕ найдено файлов: {stats["missing"]}' if stats['missing'] else ''))
+    if dry_run:
+        return stats
+
+    def resolve(chunk, cpath, sc, bcb):
+        meta = index['chunks'].get(chunk, {})
+        url = meta.get('url')
+        if url:                                  # HF public / любой прямой URL
+            ctoken = token if meta.get('store') == 'github' else None
+            download_url(url, ctoken, cpath, None, sc, bcb)
+        else:                                    # back-compat: GitHub release по тегу
+            tag = meta.get('release_tag')
+            crel = release_by_tag(repo, tag, token)
+            casset = next((a for a in crel.get('assets', []) if a['name'] == chunk), None)
+            if not casset:
+                raise RuntimeError(f'часть {chunk}: нет ссылки/релиза')
+            download_asset(casset, token, cpath, None, sc, bcb)
+
+    _parallel_fetch_extract(need, mods_dir, tmp, resolve, log,
+                            should_cancel=should_cancel, part_cb=part_cb, byte_cb=byte_cb,
+                            sha_sink=sha_sink)
+    log(f'Готово: {stats["code_files"]} код + {stats["asset_files"]} ассетов в {mods_dir}')
+    return stats
+
+
 def unit_remote_updated(repo, camp, token):
     """Дата последнего коммита репо (отражает обновление кода/ассетов/индекса).
     Код больше не в релизах — staleness считаем по последнему коммиту ветки."""

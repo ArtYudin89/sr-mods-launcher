@@ -17,6 +17,8 @@
     <button class="icon-btn" id="profileMenuBtn" title="Создать сборку и управлять списком">＋</button>
     <div class="game-path" id="gamePath" title="Папка, куда установлена игра. Нажмите, чтобы выбрать.">Папка игры не выбрана</div>
     <div class="spacer"></div>
+    <button class="icon-btn" id="tourBtn" title="Обучение — тур по интерфейсу лаунчера">🎓</button>
+    <button class="icon-btn" id="helpBtn" title="Справка">❔</button>
     <button class="icon-btn" id="themeBtn" title="Светлая / тёмная тема">🌙</button>
     <button class="icon-btn" id="settingsBtn" title="Настройки">⚙</button>
     <button class="btn play" id="launchBtn" title="Запустить Space Rangers HD">▶  Играть</button>
@@ -362,6 +364,57 @@
     <button id="ctxOpenMods">📁 Открыть папку Mods</button>
     <button id="ctxRemoveOne">🗑 Убрать из сборки (эту строку)</button>
     <button id="ctxCancelAdd">✖ Отменить добавление (всё)</button>
+  </div>
+
+  <!-- МОДАЛКА: справка -->
+  <div class="overlay hidden" id="helpOverlay">
+    <div class="modal info-modal">
+      <h2>Справка</h2>
+      <div class="m-body">
+        <div class="note" style="border-left-color:var(--accent)">
+          Коротко о том, как пользоваться лаунчером. Полная инструкция с картинками —
+          по кнопке «Полная справка на GitHub» ниже.
+        </div>
+        <div class="help-list">
+          <div class="help-item"><b>1. Папка игры.</b> Укажите папку, где лежит Rangers.exe
+            (клик по адресу игры в шапке или в Настройках). Моды ставятся в подпапку Mods.</div>
+          <div class="help-item"><b>2. Сборка.</b> Это сохранённый набор модов. Держите несколько
+            и переключайтесь селектором «Сборка» в шапке; кнопка ＋ — создать/удалить.</div>
+          <div class="help-item"><b>3. Добавить мод.</b> Кнопка «➕ Добавить мод»: искать по названию,
+            выбрать по цепочке Лагерь → Пак → Мод, или добавить по ссылке. Можно добавить целый лагерь.</div>
+          <div class="help-item"><b>4. Установить.</b> «🧩 Установить все» скачивает и ставит моды сборки.
+            Галочка «В сборке» у строки включает/выключает мод.</div>
+          <div class="help-item"><b>5. Обновления.</b> «⟳ Проверить обновления» сверяет ваши моды
+            с сервером, «🔀 Обновить все» скачивает новые версии, сохраняя ваши ручные правки.</div>
+          <div class="help-item"><b>6. База.</b> Селектор «База» — с каким сборником сверяться при
+            обновлениях. Оставьте «авто», если не уверены; 🎯 — определить сейчас по файлам в Mods.</div>
+          <div class="help-item"><b>7. Играть.</b> Кнопка «▶ Играть» запускает Space Rangers HD.
+            Панель справа синхронизирует список подключённых в игре модов (ModCFG) со сборкой.</div>
+        </div>
+      </div>
+      <div class="m-foot">
+        <button class="btn" id="helpTourBtn" title="Показать обучающий тур по интерфейсу">🎓 Пройти обучение</button>
+        <button class="btn" id="helpGitBtn" title="Открыть полную инструкцию в браузере">🌐 Полная справка на GitHub</button>
+        <span class="spacer"></span>
+        <button class="btn primary" id="helpCloseBtn">Закрыть</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ОБУЧЕНИЕ: подсветка элемента + подсказка-стэппер -->
+  <div class="tour hidden" id="tourOverlay">
+    <div class="tour-hi" id="tourHi"></div>
+    <div class="tour-tip" id="tourTip" role="dialog" aria-live="polite">
+      <div class="tour-tip-title" id="tourTipTitle"></div>
+      <div class="tour-tip-text" id="tourTipText"></div>
+      <div class="tour-tip-foot">
+        <span class="tour-step" id="tourStep"></span>
+        <span class="spacer"></span>
+        <button class="btn ghost" id="tourSkip">Пропустить</button>
+        <button class="btn" id="tourPrev">← Назад</button>
+        <button class="btn primary" id="tourNext">Далее →</button>
+      </div>
+    </div>
   </div>
 
   <div class="toast-wrap" id="toastWrap"></div>

@@ -97,8 +97,13 @@ IS_RWT = bool(EMBEDDED_TOKEN)
 # из репозитория ({version, url?, notes?}). url можно оставить пустым — тогда показ без
 # ссылки на скачивание (просто «доступна новая версия»).
 # ВНИМАНИЕ: при релизе выставить реальный следующий номер (текущий публичный > 0.13.1).
-LAUNCHER_VERSION = '0.15.4'
+LAUNCHER_VERSION = '0.16.0'
 RELEASE_REF = 'state/launcher_release.json'
+# Ссылка на полную справку в репозитории (ИНСТРУКЦИЯ-ПРОСТАЯ.md, имя в percent-encoding —
+# кириллица в пути; так браузер откроет её без ручного кодирования).
+HELP_URL = ('https://github.com/ArtYudin89/sr-mods-launcher/blob/master/'
+            '%D0%98%D0%9D%D0%A1%D0%A2%D0%A0%D0%A3%D0%9A%D0%A6%D0%98%D0%AF-'
+            '%D0%9F%D0%A0%D0%9E%D0%A1%D0%A2%D0%90%D0%AF.md')
 
 
 def _ver_tuple(v):
@@ -118,6 +123,9 @@ DEFAULT_CONFIG = {
     # по умолчанию (при первом запуске) — группировка «По разделам» и имена «как в игре»;
     # сохранённый конфиг пользователя накладывается поверх и эти значения не трогает.
     'tree_mode': 'section', 'name_mode': 'module', 'theme': 'dark', 'log_verbose': False,
+    # Обучающий тур по интерфейсу: показывается автоматически один раз (при первом
+    # запуске), затем флаг ставится в True. Повторно вызывается из шапки/справки.
+    'tutorial_done': False,
 }
 
 
@@ -827,6 +835,8 @@ class Api:
             'is_rwt': IS_RWT,
             'version': LAUNCHER_VERSION,
             'busy': self.busy,
+            'tutorial_done': self.config.get('tutorial_done', False),
+            'help_url': HELP_URL,
         }
 
     def check_self_update(self):
@@ -1357,6 +1367,13 @@ class Api:
         self._save_config()
         return True
 
+    def set_tutorial_done(self, done=True):
+        """Запомнить, что обучающий тур пройден/пропущен — чтобы не показывать его
+        автоматически при следующих запусках (повтор доступен из шапки и справки)."""
+        self.config['tutorial_done'] = bool(done)
+        self._save_config()
+        return True
+
     def save_settings(self, game_path, repo, token, base):
         self.profile['game_path'] = (game_path or '').strip()
         self.profile['base'] = (base or '').strip()
@@ -1704,19 +1721,23 @@ class Api:
             units = sorted([p for p in packs.values() if p['camp'] == m['camp']],
                            key=lambda p: (self._unit_install_rank(p, packs),
                                           p.get('load_order', 999)))
-            ntot = len(units)
-            for k, p in enumerate(units, 1):
-                self._pack_ctx = f'пак {k}/{ntot} · {p["name"]}'
-                self.log(f'--- {p["name"]} ({p["tier"]}) ---')
+            # Единый идемпотентный проход по всему лагерю: манифесты юнитов сливаются в
+            # ОДИН эффективный набор с приоритетом (порядок = низший→высший, кто позже —
+            # перезаписывает по целевому пути на диске). Иначе base/fixes/разные моды,
+            # делящие один файл, перезаписывали бы друг друга на КАЖДОЙ установке (сверка
+            # хешей никогда не сходится к нулю). См. core.reconstruct_camp.
+            ulist = []
+            for p in units:
                 ff, fidx = self._fork_unit_overlay(p['camp'], p['name'])
-                core.reconstruct_unit(
-                    m['repo'], p['camp'], p['name'], mods_dir, tok,
-                    self._progress, self.log, tmp_dir=ROOT, should_cancel=self.should_cancel,
-                    part_cb=self._part_progress, byte_cb=self._byte_progress,
-                    skip_present=True,         # докачивать только недостающее/изменённое
-                    fork_files=ff, fork_index=fidx)
+                ulist.append({'unit': p['name'], 'tier': p.get('tier'),
+                              'fork_files': ff, 'fork_index': fidx})
                 if p.get('tier') == 'base':
                     self.profile['installed_base'] = p['name']
+            self._pack_ctx = f'лагерь {m["camp"]}'
+            core.reconstruct_camp(
+                m['repo'], m['camp'], ulist, mods_dir, tok,
+                log=self.log, tmp_dir=ROOT, should_cancel=self.should_cancel,
+                part_cb=self._part_progress, byte_cb=self._byte_progress)
         elif m.get('type') == 'unit':
             self._pack_ctx = m.get('name', m.get('unit', ''))
             ff, fidx = self._fork_unit_overlay(m['camp'], m['unit'])

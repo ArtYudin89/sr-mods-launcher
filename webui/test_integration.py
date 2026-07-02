@@ -28,6 +28,27 @@ sys.path.insert(0, r'C:\claude_sandbox\sr-mods-launcher\webui')
 import app
 import launcher_core as core
 
+
+class _MultiPatch:
+    """Патчит и reconstruct_unit, и reconstruct_camp одним фейком. Позиция mods_dir
+    (4-й позиционный аргумент) одинакова в обеих функциях, а фейки берут args[3] и
+    глотают остальное через **kw — так один side_effect совместим с любой из них.
+    Нужно, потому что установка ЛАГЕРЯ теперь идёт через reconstruct_camp (единый
+    идемпотентный проход), а установка отдельного мода/юнита — через reconstruct_unit."""
+    def __init__(self, fn):
+        self._ps = [patch.object(core, 'reconstruct_unit', side_effect=fn),
+                    patch.object(core, 'reconstruct_camp', side_effect=fn)]
+    def start(self):
+        for p in self._ps:
+            p.start()
+    def stop(self):
+        for p in self._ps:
+            p.stop()
+
+
+def patch_reconstruct(fn):
+    return _MultiPatch(fn)
+
 # ═══════════════════════════════════════════════
 #  Тестовые данные
 # ═══════════════════════════════════════════════
@@ -330,9 +351,9 @@ finally:
     g.cleanup()
 
 # ═══════════════════════════════════════════════
-#  ГРУППА 3: Установка (мокаем core.reconstruct_unit)
+#  ГРУППА 3: Установка (мокаем core.reconstruct_camp / reconstruct_unit)
 # ═══════════════════════════════════════════════
-print('\n=== ГРУППА 3: установка (мок reconstruct_unit) ===')
+print('\n=== ГРУППА 3: установка (мок reconstruct_camp) ===')
 
 g = TempGame()
 try:
@@ -341,12 +362,10 @@ try:
     a.add_mod({'mode': 'src', 'camp': 'redux', 'pack': None, 'mod': ''})
     check('1 запись в очереди до install', 1, len(a.profile['mods']))
 
-    def fake_reconstruct(repo, camp, unit, mods_dir_path, token,
-                         progress_cb=None, log=print, tmp_dir=None, mod=None,
-                         should_cancel=None, part_cb=None, byte_cb=None,
-                         sha_sink=None, skip_present=False,
-                         fork_files=None, fork_index=None):
-        """Имитирует reconstruct_unit: пишет фейковые файлы мода на диск."""
+    def fake_reconstruct_camp(repo, camp, units, mods_dir_path, token,
+                              log=print, tmp_dir=None, should_cancel=None,
+                              part_cb=None, byte_cb=None, sha_sink=None, dry_run=False):
+        """Имитирует reconstruct_camp (единый проход по лагерю): пишет фейковые файлы."""
         mds = Path(mods_dir_path)
         nuke_dir = mds / 'ShusRangers' / 'ShuNukes'
         nuke_dir.mkdir(parents=True, exist_ok=True)
@@ -355,7 +374,7 @@ try:
                 'missing': 0, 'skipped': 0}
 
     # Патч должен жить пока работает фоновый поток
-    patcher12 = patch.object(core, 'reconstruct_unit', side_effect=fake_reconstruct)
+    patcher12 = patch.object(core, 'reconstruct_camp', side_effect=fake_reconstruct_camp)
     patcher12.start()
     try:
         r = a.install([0])
@@ -382,7 +401,7 @@ try:
     a2.add_mod({'mode': 'src', 'camp': 'redux', 'pack': None, 'mod': ''})
     call_count = [0]
 
-    def counting_reconstruct(repo, camp, unit, mods_dir_path, token, progress_cb=None, log=None, **kw):
+    def counting_reconstruct_camp(repo, camp, units, mods_dir_path, token, log=None, **kw):
         call_count[0] += 1
         mds = Path(mods_dir_path)
         nuke_dir = mds / 'ShusRangers' / 'ShuNukes'
@@ -390,7 +409,7 @@ try:
         (nuke_dir / 'ModuleInfo.txt').write_bytes(NUKE_V1)
         return {'code_files': 1, 'asset_files': 0, 'chunks': [], 'missing': 0, 'skipped': 0}
 
-    patcher14 = patch.object(core, 'reconstruct_unit', side_effect=counting_reconstruct)
+    patcher14 = patch.object(core, 'reconstruct_camp', side_effect=counting_reconstruct_camp)
     patcher14.start()
     try:
         r14 = a2.install([0])
@@ -800,7 +819,7 @@ try:
         (d / 'ModuleInfo.txt').write_bytes(NUKE_V1)
         return {'code_files': 1, 'asset_files': 0, 'chunks': [], 'missing': 0, 'skipped': 0}
 
-    p_rec = patch.object(core, 'reconstruct_unit', side_effect=fake_rec_v1)
+    p_rec = patch_reconstruct(fake_rec_v1)
     p_rec.start()
     try:
         a.install([0])
@@ -914,7 +933,7 @@ try:
         (d / 'ModuleInfo.txt').write_bytes(NUKE_V1)
         return {'code_files': 1, 'asset_files': 0, 'chunks': [], 'missing': 0, 'skipped': 0}
 
-    p_ri = patch.object(core, 'reconstruct_unit', side_effect=fake_rec_reinstall)
+    p_ri = patch_reconstruct(fake_rec_reinstall)
     p_ri.start()
     try:
         a2.install([0])
@@ -969,7 +988,7 @@ try:
         d.mkdir(parents=True, exist_ok=True)
         (d / 'ModuleInfo.txt').write_bytes(NUKE_V1)
 
-    p_r34 = patch.object(core, 'reconstruct_unit', side_effect=fake_rec_34)
+    p_r34 = patch_reconstruct(fake_rec_34)
     p_d34 = patch.object(core, 'descriptor_for', return_value=V2_DESC)
     p_i34 = patch.object(core, 'install_descriptor', side_effect=fake_inst_34)
     p_c34 = patch.object(core, 'load_chunk_index', return_value=FAKE_IDX)
@@ -1003,7 +1022,7 @@ try:
     def fake_inst_35(desc, mods_dir, idx, tok, *args, **kw):
         call_log35.append('install_desc')
 
-    p_r35 = patch.object(core, 'reconstruct_unit', side_effect=fake_rec_35)
+    p_r35 = patch_reconstruct(fake_rec_35)
     p_d35 = patch.object(core, 'descriptor_for', return_value=V2_DESC)
     p_i35 = patch.object(core, 'install_descriptor', side_effect=fake_inst_35)
     p_c35 = patch.object(core, 'load_chunk_index', return_value=FAKE_IDX)
@@ -1053,7 +1072,7 @@ try:
         (d / 'ModuleInfo.txt').write_bytes(NUKE_V1)
         return {'code_files': 1, 'asset_files': 0, 'chunks': [], 'missing': 0, 'skipped': 0}
 
-    p_r36 = patch.object(core, 'reconstruct_unit', side_effect=fake_rec_36)
+    p_r36 = patch_reconstruct(fake_rec_36)
     p_r36.start()
     try:
         a.install([0])
@@ -1176,7 +1195,7 @@ try:
             time.sleep(0.05)
         return {'code_files': 0, 'asset_files': 0, 'chunks': [], 'missing': 0, 'skipped': 0}
 
-    p_slow = patch.object(core, 'reconstruct_unit', side_effect=slow_reconstruct)
+    p_slow = patch_reconstruct(slow_reconstruct)
     p_slow.start()
     try:
         a.install([0])
@@ -1591,6 +1610,82 @@ try:
           'universe', a._updates.get('Universe/UniMod', {}).get('camp'))
 finally:
     g.cleanup()
+
+# ═══════════════════════════════════════════════
+#  ГРУППА 20: reconstruct_camp — идемпотентность лагеря (реальная логика)
+# ═══════════════════════════════════════════════
+print('\n=== ГРУППА 20: reconstruct_camp идемпотентность ===')
+
+import zipfile as _zip
+
+def _sha(b): return hashlib.sha256(b).hexdigest()
+
+# base и fix делят один целевой файл с РАЗНЫМ содержимым (пути расходятся регистром и
+# префиксом {app}, но install_route сводит их в одну цель). fix идёт позже → побеждает.
+_BASE_SHARED = b'BASE-shared'; _FIX_SHARED = b'FIX-shared-WINS'
+_BASE_ONLY = b'BASE-only';     _FIX_ONLY = b'FIX-only'
+_S_BS, _S_FS, _S_BO, _S_FO = map(_sha, (_BASE_SHARED, _FIX_SHARED, _BASE_ONLY, _FIX_ONLY))
+_BASE_MAN = {'files': {'{app}/Mods/Foo/shared.dat': {'sha256': _S_BS, 'size': len(_BASE_SHARED)},
+                       '{app}/Mods/Foo/onlybase.dat': {'sha256': _S_BO, 'size': len(_BASE_ONLY)}}}
+_FIX_MAN = {'files': {'Mods/Foo/Shared.dat': {'sha256': _S_FS, 'size': len(_FIX_SHARED)},
+                      'Mods/Foo/onlyfix.dat': {'sha256': _S_FO, 'size': len(_FIX_ONLY)}}}
+_EMPTY_MAN = {'files': {}}
+_IDX = {'blobs': {_S_BS: {'chunk': 'c1'}, _S_FS: {'chunk': 'c1'},
+                  _S_BO: {'chunk': 'c1'}, _S_FO: {'chunk': 'c1'}},
+        'chunks': {'c1': {'url': 'http://fake/c1', 'store': 'hf'}}}
+
+def _fake_rfb(repo, path, token, should_cancel=None, branch=None):
+    if path == 'state/asset_index.json':
+        return json.dumps(_IDX).encode()
+    tbl = {'mods/redux/redux_base_installer/code.manifest.json': _BASE_MAN,
+           'mods/redux/redux_base_installer/assets.manifest.json': _EMPTY_MAN,
+           'mods/redux/redux_fixes/code.manifest.json': _FIX_MAN,
+           'mods/redux/redux_fixes/assets.manifest.json': _EMPTY_MAN}
+    if path in tbl:
+        return json.dumps(tbl[path]).encode()
+    import requests
+    raise requests.HTTPError(f'404 {path}')
+
+def _fake_dl(url, token, dest, progress_cb=None, should_cancel=None, byte_cb=None):
+    with _zip.ZipFile(dest, 'w') as z:
+        z.writestr(_S_BS, _BASE_SHARED); z.writestr(_S_FS, _FIX_SHARED)
+        z.writestr(_S_BO, _BASE_ONLY);   z.writestr(_S_FO, _FIX_ONLY)
+
+def _run_camp(mods, tmp):
+    units = [{'unit': 'redux_base_installer', 'tier': 'base', 'fork_files': None, 'fork_index': None},
+             {'unit': 'redux_fixes', 'tier': 'fixes', 'fork_files': None, 'fork_index': None}]
+    with patch.object(core, 'repo_file_bytes', side_effect=_fake_rfb), \
+         patch.object(core, 'download_url', side_effect=_fake_dl):
+        return core.reconstruct_camp('repo', 'redux', units, mods, 'tok',
+                                     log=lambda *_: None, tmp_dir=tmp)
+
+_w = Path(tempfile.mkdtemp(prefix='camp_idem_'))
+try:
+    print('\n--- T66: проход 1 — победитель по приоритету + запись ---')
+    _mods = _w / 'Game' / 'Mods'; _tmp = _w / 'tmp'
+    _mods.mkdir(parents=True); _tmp.mkdir()
+    _shared = _mods / 'Foo' / 'Shared.dat'
+    s1 = _run_camp(_mods, _tmp)
+    check_true('T66: проход1 записал код (>0)', s1['code_files'] > 0)
+    check('T66: проход1 skipped=0', 0, s1['skipped'])
+    check('T66: победил fix (позже в порядке)', _FIX_SHARED, _shared.read_bytes())
+    check('T66: onlybase записан', _BASE_ONLY, (_mods / 'Foo' / 'onlybase.dat').read_bytes())
+
+    print('\n--- T67: проход 2 — идемпотентно (ничего не пишется) ---')
+    s2 = _run_camp(_mods, _tmp)
+    check('T67: проход2 code=0', 0, s2['code_files'])
+    check('T67: проход2 asset=0', 0, s2['asset_files'])
+    check('T67: проход2 всё skipped (3)', 3, s2['skipped'])
+    check('T67: спорный файл не откатился', _FIX_SHARED, _shared.read_bytes())
+
+    print('\n--- T68: проход 3 — порча одного файла чинит ровно его ---')
+    _shared.write_bytes(b'corrupted')
+    s3 = _run_camp(_mods, _tmp)
+    check('T68: перезаписан ровно 1 файл', 1, s3['code_files'])
+    check('T68: восстановлен до fix', _FIX_SHARED, _shared.read_bytes())
+    check('T68: остальные 2 skipped', 2, s3['skipped'])
+finally:
+    shutil.rmtree(_w, ignore_errors=True)
 
 # ═══════════════════════════════════════════════
 #  Итог
