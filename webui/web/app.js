@@ -10,6 +10,9 @@ const collapsed = new Set();         // свёрнутые узлы
 const NODE = {};                     // iid -> узел (для быстрых проверок)
 let busy = false;
 let reconcileTimer = null;
+// доступность: клавиатурная навигация по дереву (roving tabindex)
+let treeCursor = null;      // data-iid/data-key строки, на которой сейчас «курсор»
+let _treeRefocus = false;   // после перерисовки вернуть фокус на курсор (только при действии с клавиатуры)
 
 // состояния и их описание (для легенды и фильтра)
 const STATES = [
@@ -136,6 +139,7 @@ function wireUI() {
   $('searchInp').oninput = renderTree;
   $('expandBtn').onclick = () => { collapsed.clear(); renderTree(); };
   $('collapseBtn').onclick = collapseAll;
+  $('treeBody').addEventListener('keydown', onTreeKey);   // доступность: стрелки/Enter/Space по дереву
   $('indexBtn').onclick = doReindex;
   $('clearModsBtn').onclick = doClearMods;
   $('baseSel').onchange = async () => {
@@ -208,7 +212,7 @@ function wireUI() {
   // закрытие по клику на фон — только для «безопасных» модалок
   // (confirm/merge завязаны на состояние бэкенда → закрываются только кнопками)
   ['settingsOverlay', 'profileOverlay', 'addOverlay', 'infoOverlay', 'compatOverlay'].forEach((id) =>
-    $(id).onclick = (e) => { if (e.target === $(id)) $(id).classList.add('hidden'); });
+    $(id).onclick = (e) => { if (e.target === $(id)) hide(id); });
   $('infoCloseBtn').onclick = () => hide('infoOverlay');
   $('compatCloseBtn').onclick = () => hide('compatOverlay');
   // контекстное меню (ПКМ)
@@ -360,8 +364,8 @@ function renderTree() {
   body.innerHTML = rows.length ? rows.join('')
     : `<div class="tree-empty">Ничего не подходит под фильтр.<br>Снимите фильтр или измените поиск.</div>`;
 
-  body.querySelectorAll('.row.group').forEach((el) => el.onclick = () => toggleCollapse(el.dataset.key));
-  body.querySelectorAll('.row.leaf').forEach((el) => el.onclick = (e) => onLeafClick(e, el.dataset.iid));
+  body.querySelectorAll('.row.group').forEach((el) => el.onclick = () => { treeCursor = el.dataset.key; toggleCollapse(el.dataset.key); });
+  body.querySelectorAll('.row.leaf').forEach((el) => el.onclick = (e) => { treeCursor = el.dataset.iid; onLeafClick(e, el.dataset.iid); });
   body.querySelectorAll('.toggle.click').forEach((el) =>
     el.onclick = (e) => { e.stopPropagation(); onToggleClick(el); });
   body.querySelectorAll('.info-btn').forEach((el) =>
@@ -370,7 +374,80 @@ function renderTree() {
     el.onclick = (e) => { e.stopPropagation(); onVariantClick(el); });
   body.querySelectorAll('.row.leaf').forEach((el) =>
     el.oncontextmenu = (e) => { e.preventDefault(); openCtxMenu(e, el.dataset.iid); });
+  applyTreeRoving();
   updateActionButtons();
+}
+
+// ───────── доступность: клавиатурная навигация по дереву ─────────
+function treeRows() { return [...$('treeBody').querySelectorAll('.row')]; }
+function rowId(el) { return el.dataset.iid || el.dataset.key || ''; }
+// после каждой перерисовки: ровно одна строка получает tabindex=0 (точка входа Tab),
+// остальные — -1; при действии с клавиатуры возвращаем на неё фокус.
+function applyTreeRoving() {
+  const rows = treeRows();
+  if (!rows.length) { treeCursor = null; return; }
+  let i = rows.findIndex((r) => rowId(r) === treeCursor);
+  if (i < 0) i = 0;
+  treeCursor = rowId(rows[i]);
+  rows.forEach((r, j) => { r.tabIndex = (j === i ? 0 : -1); });
+  if (_treeRefocus) { _treeRefocus = false; try { rows[i].focus(); } catch (e) {} }
+}
+function moveTreeFocus(i) {
+  const rows = treeRows();
+  if (!rows.length) return;
+  i = Math.max(0, Math.min(rows.length - 1, i));
+  treeCursor = rowId(rows[i]);
+  rows.forEach((r, j) => { r.tabIndex = (j === i ? 0 : -1); });
+  try { rows[i].focus(); } catch (e) {}
+}
+function onTreeKey(e) {
+  const rows = treeRows();
+  if (!rows.length) return;
+  let idx = rows.indexOf(e.target.closest ? e.target.closest('.row') : null);
+  if (idx < 0) idx = rows.findIndex((r) => rowId(r) === treeCursor);
+  if (idx < 0) idx = 0;
+  const row = rows[idx];
+  const isGroup = row.classList.contains('group');
+  const key = e.key;
+  if (key === 'ArrowDown') { e.preventDefault(); moveTreeFocus(idx + 1); }
+  else if (key === 'ArrowUp') { e.preventDefault(); moveTreeFocus(idx - 1); }
+  else if (key === 'Home') { e.preventDefault(); moveTreeFocus(0); }
+  else if (key === 'End') { e.preventDefault(); moveTreeFocus(rows.length - 1); }
+  else if (key === 'ArrowRight' && isGroup) {
+    e.preventDefault();
+    if (collapsed.has(row.dataset.key)) { treeCursor = row.dataset.key; _treeRefocus = true; toggleCollapse(row.dataset.key); }
+    else moveTreeFocus(idx + 1);            // уже раскрыт → к первому ребёнку
+  }
+  else if (key === 'ArrowLeft') {
+    e.preventDefault();
+    if (isGroup && !collapsed.has(row.dataset.key)) { treeCursor = row.dataset.key; _treeRefocus = true; toggleCollapse(row.dataset.key); }
+    else { for (let j = idx - 1; j >= 0; j--) if (rows[j].classList.contains('group')) { moveTreeFocus(j); break; } }
+  }
+  else if (key === ' ' || key === 'Spacebar') {          // Space — выделить строку
+    e.preventDefault();
+    if (isGroup) { treeCursor = row.dataset.key; _treeRefocus = true; toggleCollapse(row.dataset.key); }
+    else { _treeRefocus = true; onLeafClick(e, row.dataset.iid); }
+  }
+  else if (key === 'Enter') {                              // Enter — свернуть/раскрыть группу или переключить «в сборке»
+    e.preventDefault();
+    if (isGroup) { treeCursor = row.dataset.key; _treeRefocus = true; toggleCollapse(row.dataset.key); }
+    else {
+      const tg = row.querySelector('.toggle.click');
+      if (tg) { treeCursor = row.dataset.iid; _treeRefocus = true; setTimeout(() => { _treeRefocus = false; }, 1500); onToggleClick(tg); }
+      else { _treeRefocus = true; onLeafClick(e, row.dataset.iid); }   // мод без записи в сборке — просто выделить
+    }
+  }
+  else if ((key === 'i' || key === 'I') && !isGroup) {    // i — подробнее о моде
+    const ib = row.querySelector('.info-btn');
+    if (ib) { e.preventDefault(); openModInfo(ib.dataset.mid); }
+  }
+  else if (key === 'ContextMenu' || (e.shiftKey && key === 'F10')) {
+    if (!isGroup) {
+      e.preventDefault();
+      const r = row.getBoundingClientRect();
+      openCtxMenu({ clientX: r.left + 24, clientY: r.bottom - 6 }, row.dataset.iid);
+    }
+  }
 }
 
 function groupRow(kind, label, key, isCol, count, counts) {
@@ -380,7 +457,7 @@ function groupRow(kind, label, key, isCol, count, counts) {
   // в свёрнутом состоянии содержимое не видно → показываем разбивку по статусам
   // (цветные цифры через «/»); в развёрнутом достаточно общего счётчика.
   const cell = (isCol && counts) ? statusCountHtml(counts) : `<span class="tag">${count}</span>`;
-  return `<div class="row group ${kind} ${lvl}" data-key="${esc(key)}">
+  return `<div class="row group ${kind} ${lvl}" data-key="${esc(key)}" role="treeitem" aria-level="1" aria-expanded="${isCol ? 'false' : 'true'}" aria-label="${esc(label)}, группа, ${count}">
     <div class="name"><span class="tw">${tw}</span><span class="label">${icon} ${esc(label)}</span></div>
     <div class="cell"></div><div class="cell"></div><div class="cell"></div>
     <div class="cell">${cell}</div></div>`;
@@ -415,7 +492,7 @@ function leafRow(n, lvl) {
   // во втором режиме рядом показываем папку мелким, чтобы не терять ориентир
   const alt = (STATE.name_mode === 'module' && n.name && n.name !== n.label)
     ? `<span class="alt-name" title="имя папки на диске">${esc(n.label)}</span>` : '';
-  return `<div class="row leaf lvl${lvl}${sel}" data-iid="${esc(n.iid)}">
+  return `<div class="row leaf lvl${lvl}${sel}" data-iid="${esc(n.iid)}" role="treeitem" aria-level="${lvl}" aria-selected="${selected.has(n.iid) ? 'true' : 'false'}" aria-label="${esc(disp)}, ${esc(n.status)}${n.in_profile ? ', в сборке' : ''}">
     <div class="name"><span class="tw">·</span>
       <span class="label-wrap"><span class="label">${esc(disp)}${labelBadges(n.labels)}${alt}</span>${variantSwitch(n)}${desc}</span>${info}</div>
     <div class="cell">${esc(colValue(n) || '')}</div>
@@ -1273,6 +1350,9 @@ function openCtxMenu(e, iid) {
   const w = menu.offsetWidth || 200, h = menu.offsetHeight || 80;
   menu.style.left = Math.min(e.clientX, window.innerWidth - w - 6) + 'px';
   menu.style.top = Math.min(e.clientY, window.innerHeight - h - 6) + 'px';
+  // доступность: фокус на первый пункт — меню управляется Enter/Tab/Esc с клавиатуры
+  const firstBtn = [...menu.querySelectorAll('button')].find((b) => b.style.display !== 'none');
+  if (firstBtn) setTimeout(() => { try { firstBtn.focus(); } catch (err) {} }, 20);
 }
 function hideCtxMenu() { $('ctxMenu').classList.add('hidden'); }
 
@@ -1322,8 +1402,17 @@ async function openModInfo(mid, variant) {
 }
 
 // ───────── утилиты ─────────
+// доступность: селектор фокусируемых элементов внутри модалки
+const FOCUS_SEL = 'a[href],button:not([disabled]),input:not([disabled]):not([type=hidden]),'
+  + 'select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
+function focusables(root) {
+  return [...root.querySelectorAll(FOCUS_SEL)]
+    .filter((el) => el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+}
+const _trap = [];   // стек открытых модалок: {el, box, prev, handler} — для focus-trap и возврата фокуса
 function show(id) {
   const el = $(id);
+  const prev = document.activeElement;               // куда вернуть фокус при закрытии
   el.classList.remove('hidden');
   // доступность: при открытии окна ставим фокус на первое поле, иначе на первую кнопку —
   // чтобы можно было сразу печатать / подтвердить Enter, а не кликать мышью
@@ -1331,8 +1420,30 @@ function show(id) {
   const target = box.querySelector('input:not([type=hidden]),select,textarea')
     || box.querySelector('button');
   if (target) setTimeout(() => { try { target.focus(); } catch (e) {} }, 30);
+  // focus-trap: Tab/Shift+Tab не выпускают фокус за пределы окна (циклично)
+  const handler = (e) => {
+    if (e.key !== 'Tab') return;
+    const f = focusables(box);
+    if (!f.length) return;
+    const first = f[0], last = f[f.length - 1];
+    const inside = box.contains(document.activeElement);
+    if (e.shiftKey && (document.activeElement === first || !inside)) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && (document.activeElement === last || !inside)) { e.preventDefault(); first.focus(); }
+  };
+  el.addEventListener('keydown', handler);
+  _trap.push({ el, box, prev, handler });
 }
-function hide(id) { $(id).classList.add('hidden'); }
+function hide(id) {
+  const el = $(id);
+  el.classList.add('hidden');
+  // снять focus-trap этой модалки и вернуть фокус туда, где он был до открытия
+  const i = _trap.map((t) => t.el).lastIndexOf(el);
+  if (i >= 0) {
+    const t = _trap.splice(i, 1)[0];
+    el.removeEventListener('keydown', t.handler);
+    try { if (t.prev && document.contains(t.prev)) t.prev.focus(); } catch (e) {}
+  }
+}
 function confirmBox(title, html, onOk, onCancel, opts) {
   opts = opts || {};
   $('confirmTitle').textContent = title;

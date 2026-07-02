@@ -97,7 +97,7 @@ IS_RWT = bool(EMBEDDED_TOKEN)
 # из репозитория ({version, url?, notes?}). url можно оставить пустым — тогда показ без
 # ссылки на скачивание (просто «доступна новая версия»).
 # ВНИМАНИЕ: при релизе выставить реальный следующий номер (текущий публичный > 0.13.1).
-LAUNCHER_VERSION = '0.15.3'
+LAUNCHER_VERSION = '0.15.4'
 RELEASE_REF = 'state/launcher_release.json'
 
 
