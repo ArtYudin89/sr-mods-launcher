@@ -97,7 +97,7 @@ IS_RWT = bool(EMBEDDED_TOKEN)
 # из репозитория ({version, url?, notes?}). url можно оставить пустым — тогда показ без
 # ссылки на скачивание (просто «доступна новая версия»).
 # ВНИМАНИЕ: при релизе выставить реальный следующий номер (текущий публичный > 0.13.1).
-LAUNCHER_VERSION = '0.15.1'
+LAUNCHER_VERSION = '0.15.2'
 RELEASE_REF = 'state/launcher_release.json'
 
 
@@ -142,6 +142,7 @@ CONFLICT_OPTIONS = {
 }
 ALL_CAMP = '★ весь лагерь'
 ALL_PACK = '★ весь пак'
+CAMP_KEYS = ('universe', 'redux', 'original')     # известные лагеря (порядок = дефолтный)
 
 # Базовые моды, поставляемые с игрой (инсталлятор кладёт их в Mods и сохраняет при
 # переустановке через TempStorageFolder). При «Очистить Mods» их НЕ удаляем. Пути —
@@ -464,6 +465,27 @@ class Api:
         self._pub_cache_all = out
         return out
 
+    def _detect_base_camp(self, unit_maps, disk_all):
+        """Определить лагерь установленной базы по sha: у какого base-пака (tier='base')
+        больше всего файлов совпадает с тем, что лежит в Mods. Устойчиво к пересечению
+        имён папок между лагерями (Den/Solyanka/AnotherMods есть у redux И universe) и к
+        добавлению/удалению паков со временем. -> 'redux'|'universe'|'original'|None.
+        Критерий (match, cover) — как в подборе вариантов; match важнее (совпал контент)."""
+        packs = self._get_packs(self._token())
+        base_units = {f"{p['camp']}/{p['name']}": p['camp']
+                      for p in packs.values() if p.get('tier') == 'base'}
+        best_camp, best = None, (0, 0)
+        for label, fmap in unit_maps:
+            camp = base_units.get(label)
+            if not camp or not fmap:
+                continue
+            cover = sum(1 for r in fmap if r in disk_all)
+            match = sum(1 for r, s in fmap.items() if disk_all.get(r) == s)
+            score = (match, cover)
+            if score > best:
+                best, best_camp = score, camp
+        return best_camp
+
     @staticmethod
     def _best_unit_files(mid, unit_maps, disk, allowed_sources=None, prefer_camp=None):
         """Файлы мода mid из источника, лучше всего совпадающего с диском. Критерий
@@ -488,11 +510,14 @@ class Api:
                 best_score, best = score, sub
         return best
 
-    def check_updates(self):
+    def check_updates(self, extra=None):
         """Проверить обновления ПОФАЙЛОВОЙ сверкой: хеши файлов на диске (из индекса)
-        против опубликованных манифестов (+форки). Запускается фоном."""
+        против опубликованных манифестов (+форки). extra — подтверждённые доп.строки
+        порядка лагерей (из диалога). Запускается фоном."""
         if self.busy:
             return {'ok': False, 'error': 'Уже идёт операция.'}
+        if extra is not None:
+            self.set_update_extra(extra)
         if self._game_root() is None:
             return {'ok': False, 'error': 'Сначала укажите папку игры.'}
         self.busy = True
@@ -511,13 +536,29 @@ class Api:
                                        should_cancel=self.should_cancel)
             core.save_disk_index(mods_dir, idx)
             self._disk_index = idx
-            base = idx.get('base')
-            camp = base.get('camp') if base else None
-            if not camp:
+            unit_maps = self._all_unit_maps()
+            # База лагеря определяется НЕ по именам папок (Den/Solyanka/AnotherMods есть у
+            # нескольких лагерей — маркеры со временем протухают при добавлении/удалении
+            # паков), а по sha: у какого base-пака (tier='base') максимум файлов совпадает
+            # с диском. cover/match — тот же критерий, что и в подборе вариантов.
+            if not (self.profile.get('base') or '').strip():
+                # база не задана — определим по sha (флоу обычно спрашивает раньше)
+                disk_all = {}
+                for m in idx.get('mods', {}).values():
+                    for rel, f in (m.get('files') or {}).items():
+                        disk_all[rel] = f['sha']
+                det = self._detect_base_camp(unit_maps, disk_all)
+                if not det:
+                    b = idx.get('base'); det = b.get('camp') if b else None
+                if det:
+                    self.profile['base'] = det; self._save_profile()
+            # порядок лагерей: строка 1 = база, далее доп.строки. Каждый мод проверяем по
+            # ПЕРВОМУ лагерю списка, где он есть, и только один раз (дедуп за один проход).
+            order = self._update_order()
+            if not order:
                 self.log('Не удалось определить базу в Mods — сверять не с чем.')
                 self._finish_check(); return
-            self.log(f'Сверяю с опубликованными вариантами (база: {camp})…')
-            unit_maps = self._all_unit_maps()
+            self.log(f'Порядок проверки обновлений: {" → ".join(order)}')
             # источники по логическому id + его Pol/Shu-сиблингам (id@<Name>): дисковая
             # папка ShusRangers/X может нести genuine X ИЛИ X@PolX (redux_base кладёт
             # Pol-контент под тем же путём) — кандидаты ОБЯЗАНЫ включать сиблингов, иначе
@@ -554,12 +595,20 @@ class Api:
                 # выбор варианта игроком (переключатель Pol/Shu): нацеливаемся ИМЕННО на
                 # выбранный вариант — если диск ему не соответствует, будет «обновление»
                 choice = (self.profile.get('variants') or {}).get(mid)
-                theirs = None
+                theirs, tcamp = None, None
                 if choice and choice in cat:
                     theirs = self._variant_files(
                         mid, unit_maps, cat[choice].get('default_source'))
+                    tcamp = (cat[choice].get('default_source') or '').split('/')[0] or None
                 if not theirs:
-                    theirs = self._best_unit_files(mid, unit_maps, disk, allowed, prefer_camp=camp)
+                    # целевой лагерь = первый в порядке, где этот мод есть; проверяем ТОЛЬКО
+                    # его вариант (внутри лагеря — лучший по совпадению файлов)
+                    tcamp = self._target_camp(order, allowed)
+                    if not tcamp:
+                        continue                   # мод не входит ни в один лагерь списка
+                    camp_srcs = {s for s in allowed if (s or '').split('/')[0] == tcamp}
+                    theirs = self._best_unit_files(mid, unit_maps, disk, camp_srcs,
+                                                   prefer_camp=tcamp)
                 if not theirs:
                     continue                       # ни один логический вариант не лёг на диск
                 unavail += sum(1 for s in theirs.values() if s not in avail)
@@ -574,7 +623,7 @@ class Api:
                             for rp, sha in (snap.get('files') or {}).items()}
                 n = core.plan_actionable_sha(theirs, base, disk)
                 if n:
-                    ups[mid] = {'n': n}
+                    ups[mid] = {'n': n, 'camp': tcamp}
             self._updates = ups
             if unavail:
                 self.log(f'(на сервере пока нет {unavail} файлов — они не учитываются)')
@@ -591,6 +640,99 @@ class Api:
         self._finish_check()
 
     def _finish_check(self):
+        self.busy = False
+        self._emit('op_end', {'status': 'Готово'})
+
+    def set_base(self, camp):
+        """Задать базу лагеря вручную (селектор в панели). '' = авто (sha-детект по диску).
+        На неё опирается проверка обновлений. Мгновенно, без сканирования диска."""
+        camp = (camp or '').strip()
+        self.profile['base'] = camp
+        self._save_profile()
+        self._emit('tree_dirty')
+        return {'ok': True, 'base': camp}
+
+    def _update_order(self):
+        """Порядок лагерей для проверки/установки/обновления: строка 1 = текущая база,
+        далее — доп.строки из настроек (profile['update_extra']). Для каждого мода берём
+        ПЕРВЫЙ лагерь списка, где этот мод есть, и проверяем его только один раз. Пустая
+        база → []."""
+        base = (self.profile.get('base') or '').strip()
+        if not base:
+            return []
+        order = [base]
+        for c in (self.profile.get('update_extra') or []):
+            c = (c or '').strip()
+            if c and c != base and c not in order and c in CAMP_KEYS:
+                order.append(c)
+        return order
+
+    def get_update_order(self):
+        """Для диалога/настроек: {base, order, all_camps}. order = [база, доп…]."""
+        return {'ok': True, 'base': (self.profile.get('base') or ''),
+                'order': self._update_order(), 'all_camps': list(CAMP_KEYS)}
+
+    def set_update_extra(self, extra):
+        """Сохранить доп.строки порядка (лагеря после базовой). Строку базы не трогаем."""
+        base = (self.profile.get('base') or '').strip()
+        seen, clean = {base}, []
+        for c in (extra or []):
+            c = (c or '').strip()
+            if c and c in CAMP_KEYS and c not in seen:
+                seen.add(c); clean.append(c)
+        self.profile['update_extra'] = clean
+        self._save_profile()
+        return {'ok': True, 'order': self._update_order()}
+
+    @staticmethod
+    def _target_camp(order, allowed_sources):
+        """Лагерь, по которому проверяем/обновляем мод: первый в order, у которого есть
+        источник этого мода. None — мод не входит ни в один лагерь списка (не проверяем)."""
+        camps = {(s or '').split('/')[0] for s in (allowed_sources or [])}
+        for c in order:
+            if c in camps:
+                return c
+        return None
+
+    def autodetect_base(self):
+        """Определить базу по файлам в Mods (sha base-паков) и проставить в панель.
+        Фоновая операция: хеширует диск и сравнивает с base-инсталляторами лагерей."""
+        if self.busy:
+            return {'ok': False, 'error': 'Уже идёт операция.'}
+        if self._game_root() is None:
+            return {'ok': False, 'error': 'Сначала укажите папку игры.'}
+        self.busy = True
+        self._cancel.clear()
+        self._emit('op_begin', {'name': 'Определение базы'})
+        threading.Thread(target=self._autodetect_base_worker, daemon=True).start()
+        return {'ok': True}
+
+    def _autodetect_base_worker(self):
+        try:
+            mods_dir = self._mods_dir()
+            cat = self._catalog_for(self._repo(), self._token())
+            self.log('Определяю базу по файлам в Mods (sha base-паков)…')
+            idx = core.index_disk_mods(mods_dir, cat, prev_index=self._disk_index,
+                                       log=self.log, progress_cb=self._progress,
+                                       should_cancel=self.should_cancel)
+            core.save_disk_index(mods_dir, idx)
+            self._disk_index = idx
+            disk_all = {}
+            for m in idx.get('mods', {}).values():
+                for rel, f in (m.get('files') or {}).items():
+                    disk_all[rel] = f['sha']
+            camp = self._detect_base_camp(self._all_unit_maps(), disk_all)
+            if camp:
+                self.profile['base'] = camp
+                self._save_profile()
+                self.log(f'✅ База определена: {camp}')
+            else:
+                self.log('Не удалось определить базу — на диске нет узнаваемого base-пака.')
+            self._emit('tree_dirty')
+        except core.OperationCancelled:
+            self.log('Определение базы отменено.')
+        except Exception as e:
+            self.log(f'ОШИБКА определения базы: {e}')
         self.busy = False
         self._emit('op_end', {'status': 'Готово'})
 
@@ -1054,12 +1196,15 @@ class Api:
         # строкой «★ весь лагерь» вверху. iid='p{idx}#mid' → «отменить добавление»/удаление
         # ведёт к записи лагеря (число idx); установка остаётся bulk (тип camp).
         for cid, camp in camp_adds:
-            members = sorted(m for m in self._camp_member_mids(camp) if m not in seen)
-            if not members:                    # каталог ещё грузится — не прятать добавление
-                rows.append((camp, None, 'лагерь', '★ весь лагерь',
-                             'queued', '➕ добавлен', '', cid, ''))
+            all_members = self._camp_member_mids(camp)
+            if not all_members:                # каталог ещё грузится — строка-заглушка,
+                rows.append((camp, None, 'лагерь', '★ весь лагерь',   # чтобы не прятать факт
+                             'queued', '➕ добавлен', '', cid, ''))    # добавления лагеря
                 continue
-            for mid in members:
+            # разворачиваем ТОЛЬКО ещё не показанных членов; если весь лагерь уже на диске/
+            # в наборе — новых строк нет и заглушка «★ весь лагерь» НЕ появляется (моды
+            # пресета уже в дереве). Запись лагеря остаётся в профиле → bulk-установка цела.
+            for mid in sorted(m for m in all_members if m not in seen):
                 seen.add(mid)
                 rows.append((camp, self._mod_group(mid), 'мод', mid.split('/')[-1],
                              'queued', '➕ добавлен', '', f'{cid}#{mid}', mid))
@@ -1113,6 +1258,7 @@ class Api:
             'camps': out,
             'base': ({'camp': inst_base['camp'], 'name': inst_base.get('name', '')}
                      if inst_base else None),
+            'base_manual': (self.profile.get('base') or ''),   # выбор базы в панели
             'queue': self._queue_summary(),
             'tree_mode': self._tree_mode(),
             'name_mode': self.config.get('name_mode', 'folder'),
@@ -1767,6 +1913,10 @@ class Api:
             return {'ok': False, 'error': 'Выберите лагерь.'}
         pack = payload.get('pack')
         if not pack:                                   # весь лагерь
+            # дедуп: повторный клик по тому же пресету не должен плодить записи лагеря
+            if any(m.get('type') == 'camp' and m.get('camp') == camp
+                   for m in self.profile.get('mods', [])):
+                return {'ok': True, 'dup': True}
             self.profile.setdefault('mods', []).append({
                 'type': 'camp', 'camp': camp, 'repo': repo,
                 'name': f'{camp} — весь лагерь'})
@@ -1983,7 +2133,18 @@ class Api:
                 ib = core.detect_installed_base(mods_dir)
             except Exception:
                 ib = None
-            prefer = ib['camp'] if ib else None
+            # целевой лагерь = тот же, что выбрал детект (ups[mid]['camp']); иначе первый в
+            # порядке проверки, где мод есть; иначе — определённая база. Обновляем мод по
+            # ЭТОМУ лагерю (как при проверке), а не по случайному лучшему совпадению.
+            bid = mid.split('@', 1)[0]
+            allowed = set()
+            for k, e in cat.items():
+                if k.split('@', 1)[0] == bid:
+                    allowed |= {v['source'] for v in e.get('variants', [])}
+            tcamp = (self._updates.get(mid, {}) or {}).get('camp') \
+                or self._target_camp(self._update_order(), allowed) \
+                or (ib['camp'] if ib else None)
+            prefer = tcamp
             desc = info = None
             # выбор варианта игроком (переключатель Pol/Shu) — ставим ИМЕННО его
             choice = (self.profile.get('variants') or {}).get(mid.split('@', 1)[0])
@@ -1995,6 +2156,20 @@ class Api:
                     desc, info = d, {'source': src}
                 else:
                     self.log('Дескриптор выбранного варианта не найден — подбираю по диску.')
+            if not desc and tcamp:
+                # целевой лагерь известен из порядка проверки — берём его вариант (полный
+                # набор base+fixes лагеря), а не подбор по лучшему совпадению среди всех
+                kv = self._camp_variant_entry(mid, tcamp)
+                if kv:
+                    key, ent = kv
+                    src = next((v['source'] for v in ent.get('variants', [])
+                                if (v.get('source') or '').split('/')[0] == tcamp),
+                               ent.get('default_source'))
+                    d = self._full_variant_descriptor(key, cat, repo, tok, source=src)
+                    if d and d.get('files'):
+                        d = dict(d); d['id'] = key
+                        desc, info = d, {'source': src}
+                        self.log(f'Целевой лагерь по порядку проверки: {tcamp} ({src}).')
             if not desc:
                 self.log('Подбираю вариант мода по файлам на диске…')
                 desc, info = core.pick_disk_variant(cat, mid, mods_dir, repo, tok,
@@ -2170,7 +2345,9 @@ class Api:
         if err:
             return {'ok': False, 'error': err}
         d = self._mods_dir()
+        self.log(f'🧹 Очистка папки Mods: {d}')
         if not d.exists():
+            self.log('Папки Mods нет — очищать нечего.')
             return {'ok': True, 'removed': 0, 'kept': 0}
         removed = kept = 0
         # удаляем снизу вверх (сначала файлы, потом опустевшие папки); базовые моды

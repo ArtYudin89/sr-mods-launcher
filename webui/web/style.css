@@ -98,6 +98,12 @@ input,select{font-family:inherit;}
 .search{background:var(--panel-2);border:1px solid var(--line);border-radius:8px;padding:6px 11px;color:var(--fg);width:170px;font-size:12.5px;outline:none;}
 .search:focus{border-color:var(--accent);}
 .queue-lbl{font-size:12.5px;color:var(--muted);}
+.base-pick{display:inline-flex;align-items:center;gap:5px;background:var(--panel-2);
+  border:1px solid var(--line);border-radius:8px;padding:2px 4px 2px 9px;}
+.base-pick .base-lbl{font-size:12px;color:var(--muted);}
+.base-pick select{background:transparent;border:none;color:var(--fg);font-size:12.5px;
+  outline:none;cursor:pointer;padding:4px 2px;font-family:inherit;}
+.base-pick .icon-btn{width:28px;height:26px;font-size:13px;}
 
 /* дерево */
 .tree-wrap{flex:1;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;display:flex;flex-direction:column;min-height:0;}
@@ -212,6 +218,18 @@ input,select{font-family:inherit;}
   border:1px solid var(--line);border-radius:8px;padding:7px 11px;font-size:12.5px;color:var(--fg);
   cursor:pointer;font-family:inherit;}
 .preset-row .pbtn:hover{border-color:var(--accent);}
+/* порядок проверки обновлений (диалог + настройки) */
+.ord-help{font-size:12.5px;color:var(--muted);line-height:1.45;margin-bottom:9px;}
+.ord-list{display:flex;flex-direction:column;gap:6px;}
+.ord-row{display:flex;align-items:center;gap:8px;background:var(--panel-2);
+  border:1px solid var(--line);border-radius:8px;padding:6px 10px;}
+.ord-row .ord-num{color:var(--muted);font-size:12px;width:16px;text-align:center;}
+.ord-row .ord-name{color:var(--fg);font-size:12.5px;}
+.ord-row .mini{padding:2px 8px;font-size:12px;}
+.ord-add{display:flex;gap:8px;margin-top:9px;}
+.ord-add select{flex:1;background:var(--panel-2);border:1px solid var(--line);
+  border-radius:8px;color:var(--fg);padding:6px 9px;font-size:12.5px;font-family:inherit;}
+.ord-empty{font-size:12.5px;color:var(--warn);}
 /* отчёт совместимости */
 .compat-row{display:grid;grid-template-columns:22px 1fr;gap:8px;align-items:start;padding:7px 0;border-bottom:1px solid var(--line);font-size:13px;line-height:1.45;color:var(--fg);}
 .compat-row:last-child{border-bottom:none;}
@@ -242,6 +260,7 @@ input,select{font-family:inherit;}
 .fcount:empty{display:none;}
 /* во время операции интерактив тулбара/таблицы заблокирован (прокрутка остаётся) */
 body.busy .seg button,body.busy .icon-btn{opacity:.5;pointer-events:none;}
+body.busy .base-pick{opacity:.5;pointer-events:none;}
 body.busy .toggle.click{pointer-events:none;opacity:.5;}
 .popover{
   position:absolute;top:calc(100% + 6px);left:0;z-index:40;width:268px;

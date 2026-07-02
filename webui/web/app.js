@@ -138,12 +138,17 @@ function wireUI() {
   $('collapseBtn').onclick = collapseAll;
   $('indexBtn').onclick = doReindex;
   $('clearModsBtn').onclick = doClearMods;
-  $('refreshBtn').onclick = async () => {
-    toast('Перечитываю каталог и проверяю обновления…', 'ok');
-    try { await api().refresh_remote(); } catch (e) {}
-    const s = await api().get_state(); STATE = s; applyState();
-    refreshTree();                          // бейджи «⬆ обновление» придут с tree_dirty по завершении сверки
+  $('baseSel').onchange = async () => {
+    const v = $('baseSel').value;
+    await api().set_base(v);
+    toast(v ? `База: ${campLabel(v)}` : 'База: авто (по диску)', 'ok');
   };
+  $('baseAutoBtn').onclick = async () => {
+    const r = await api().autodetect_base();
+    if (!r || !r.ok) toast((r && r.error) || 'Не удалось', 'err');
+    else toast('Определяю базу по файлам в Mods…', 'ok');
+  };
+  $('refreshBtn').onclick = startCheckUpdates;
 
   // фильтр
   $('filterBtn').onclick = (e) => { e.stopPropagation(); $('filterPop').classList.toggle('hidden'); };
@@ -178,6 +183,12 @@ function wireUI() {
   $('setBrowseBtn').onclick = async () => { const p = await api().browse_game(); if (p) $('setGamePath').value = p; };
   $('setUpdateBtn').onclick = manualCheckUpdate;
   $('forkAddBtn').onclick = addFork;
+  // база в настройках меняется сразу (как селектор в панели) + перерисовать порядок
+  $('setBase').onchange = async () => { await api().set_base($('setBase').value); loadSetOrder(); };
+  $('setOrdAddBtn').onclick = () => {
+    const v = $('setOrdAdd').value;
+    if (v && !SET_ORDER.includes(v)) { SET_ORDER.push(v); api().set_update_extra(SET_ORDER.slice(1)); renderSetOrder(); }
+  };
   // профили
   $('createProfBtn').onclick = createProfile;
   $('profCloseBtn').onclick = () => hide('profileOverlay');
@@ -290,6 +301,7 @@ function toggleTheme() {
 async function refreshTree() {
   TREE = await api().get_tree(false);
   STATE.base = TREE.base;
+  if ($('baseSel')) $('baseSel').value = TREE.base_manual || '';   // селектор базы в панели
   renderTree();
   const q = TREE.queue || {};
   $('queueLbl').textContent = q.count ? `в сборке: ${q.count}${q.size ? ' · ~' + q.size : ''}` : '';
@@ -724,9 +736,75 @@ function renderPresets() {
 async function addPreset(camp) {
   const r = await api().add_mod({ mode: 'src', camp, pack: null, mod: '' });   // весь лагерь
   if (!r || !r.ok) { toast((r && r.error) || 'Не удалось', 'err'); return; }
+  if (r.dup) { toast(`«${campLabel(camp)}» уже в сборке`, 'ok'); return; }
   refreshTree();
   toast(`Добавлено «всё ${campLabel(camp)}» — нажмите «🧩 Установить все»`, 'ok');
 }
+
+// ───────── проверка обновлений: порядок лагерей ─────────
+let pendingAfterDetect = null;    // что запустить после автоопределения базы
+let ORDER_EDIT = [];              // редактируемый порядок в диалоге (incl. база на [0])
+let ORDER_ALL = [];
+
+async function startCheckUpdates() {
+  const st = await api().get_update_order();      // {ok, base, order, all_camps}
+  if (!st || !st.ok) { toast('Не удалось получить состояние', 'err'); return; }
+  if (!st.base) {                                 // п.1 — база не выбрана
+    confirmBox('Базовый лагерь не выбран',
+      'Для проверки обновлений нужно знать базовый лагерь.<br>Определить его автоматически по файлам в папке Mods?',
+      () => { pendingAfterDetect = 'check'; api().autodetect_base(); toast('Определяю базу…', 'ok'); },
+      null, { okLabel: 'Определить автоматически', cancelLabel: 'Отмена' });
+    return;
+  }
+  openOrderDialog(st, (extra) => runUpdateCheck(extra));   // п.2 — окно порядка
+}
+
+async function runUpdateCheck(extra) {                     // п.3 — сама проверка
+  await api().set_update_extra(extra);     // ВАЖНО: сохранить порядок ДО refresh_remote —
+  toast('Перечитываю каталог и проверяю обновления…', 'ok');   // он сам запускает сверку
+  try { await api().refresh_remote(); } catch (e) {}           // (уже с сохранённым порядком)
+  const s = await api().get_state(); STATE = s; applyState();
+  refreshTree();
+}
+
+function openOrderDialog(st, onConfirm) {
+  ORDER_EDIT = (st.order || []).slice();
+  ORDER_ALL = (st.all_camps || []).slice();
+  confirmBox('Порядок проверки обновлений',
+    `<div class="ord-help">Обновление каждого мода проверяется по <b>первому</b> лагерю в списке, где этот мод есть. Мод проверяется один раз. Строка 1 — базовый лагерь (не меняется).</div>
+     <div id="ordList" class="ord-list"></div>
+     <div class="ord-add"><select id="ordAdd"></select><button class="mini" id="ordAddBtn">➕ Добавить лагерь</button></div>`,
+    () => onConfirm(ORDER_EDIT.slice(1)),
+    null, { okLabel: '✓ Проверить', cancelLabel: 'Отмена' });
+  const addBtn = $('ordAddBtn');
+  if (addBtn) addBtn.onclick = () => {
+    const v = $('ordAdd').value;
+    if (v && !ORDER_EDIT.includes(v)) { ORDER_EDIT.push(v); renderOrderEditor(); }
+  };
+  renderOrderEditor();
+}
+
+function renderOrderEditor() {
+  const list = $('ordList'); if (!list) return;
+  list.innerHTML = ORDER_EDIT.map((c, i) => `
+    <div class="ord-row">
+      <span class="ord-num">${i + 1}</span>
+      <span class="lbl lbl-${c}">${esc(CAMP_BADGE[c] || c.toUpperCase())}</span>
+      <span class="ord-name">${esc(campLabel(c))}${i === 0 ? ' — базовый' : ''}</span>
+      <span class="spacer"></span>
+      ${i > 1 ? `<button class="mini" data-up="${i}" title="Выше">▲</button>` : ''}
+      ${i >= 1 && i < ORDER_EDIT.length - 1 ? `<button class="mini" data-down="${i}" title="Ниже">▼</button>` : ''}
+      ${i >= 1 ? `<button class="mini danger" data-del="${i}" title="Убрать">✖</button>` : ''}
+    </div>`).join('');
+  const rem = ORDER_ALL.filter((c) => !ORDER_EDIT.includes(c));
+  const sel = $('ordAdd'), addBtn = $('ordAddBtn');
+  if (sel) sel.innerHTML = rem.map((c) => `<option value="${c}">${esc(campLabel(c))}</option>`).join('');
+  if (addBtn) addBtn.disabled = !rem.length;
+  list.querySelectorAll('[data-del]').forEach((b) => b.onclick = () => { ORDER_EDIT.splice(+b.dataset.del, 1); renderOrderEditor(); });
+  list.querySelectorAll('[data-up]').forEach((b) => b.onclick = () => { const i = +b.dataset.up; [ORDER_EDIT[i - 1], ORDER_EDIT[i]] = [ORDER_EDIT[i], ORDER_EDIT[i - 1]]; renderOrderEditor(); });
+  list.querySelectorAll('[data-down]').forEach((b) => b.onclick = () => { const i = +b.dataset.down; [ORDER_EDIT[i + 1], ORDER_EDIT[i]] = [ORDER_EDIT[i], ORDER_EDIT[i + 1]]; renderOrderEditor(); });
+}
+
 function renderProfList() {
   const box = $('profList');
   const profs = STATE.profiles || [];
@@ -805,14 +883,52 @@ function addFork() {
 }
 function openSettings() {
   $('setGamePath').value = STATE.game_path || '';
-  $('setBase').value = STATE.base || '';
+  $('setBase').value = (TREE && TREE.base_manual) || '';
   $('setRepo').value = STATE.repo || '';
   $('setToken').value = '';
   $('forkRepo').value = ''; $('forkToken').value = '';
   $('setUpdateStatus').innerHTML = `Текущая: v${esc(STATE.version || '?')}`;
   FORKS = (STATE.forks || []).map((f) => ({ repo: f.repo, has_token: f.has_token, token: '' }));
   renderForks();
+  loadSetOrder();
   show('settingsOverlay');
+}
+
+// редактор «Порядок проверки обновлений» в Настройках (сохраняется сразу)
+let SET_ORDER = [];
+async function loadSetOrder() {
+  const st = await api().get_update_order();
+  if (!st || !st.ok) return;
+  SET_ORDER = (st.order || []).slice();
+  ORDER_ALL = (st.all_camps || []).slice();
+  renderSetOrder();
+}
+function renderSetOrder() {
+  const list = $('setOrdList'); if (!list) return;
+  if (!SET_ORDER.length) {
+    list.innerHTML = `<div class="ord-empty">Сначала выберите базовый лагерь выше.</div>`;
+    if ($('setOrdAdd')) $('setOrdAdd').innerHTML = '';
+    if ($('setOrdAddBtn')) $('setOrdAddBtn').disabled = true;
+    return;
+  }
+  list.innerHTML = SET_ORDER.map((c, i) => `
+    <div class="ord-row">
+      <span class="ord-num">${i + 1}</span>
+      <span class="lbl lbl-${c}">${esc(CAMP_BADGE[c] || c.toUpperCase())}</span>
+      <span class="ord-name">${esc(campLabel(c))}${i === 0 ? ' — базовый' : ''}</span>
+      <span class="spacer"></span>
+      ${i > 1 ? `<button class="mini" data-up="${i}" title="Выше">▲</button>` : ''}
+      ${i >= 1 && i < SET_ORDER.length - 1 ? `<button class="mini" data-down="${i}" title="Ниже">▼</button>` : ''}
+      ${i >= 1 ? `<button class="mini danger" data-del="${i}" title="Убрать">✖</button>` : ''}
+    </div>`).join('');
+  const rem = ORDER_ALL.filter((c) => !SET_ORDER.includes(c));
+  const sel = $('setOrdAdd'), addBtn = $('setOrdAddBtn');
+  if (sel) sel.innerHTML = rem.map((c) => `<option value="${c}">${esc(campLabel(c))}</option>`).join('');
+  if (addBtn) addBtn.disabled = !rem.length;
+  const persist = () => { api().set_update_extra(SET_ORDER.slice(1)); renderSetOrder(); };
+  list.querySelectorAll('[data-del]').forEach((b) => b.onclick = () => { SET_ORDER.splice(+b.dataset.del, 1); persist(); });
+  list.querySelectorAll('[data-up]').forEach((b) => b.onclick = () => { const i = +b.dataset.up; [SET_ORDER[i - 1], SET_ORDER[i]] = [SET_ORDER[i], SET_ORDER[i - 1]]; persist(); });
+  list.querySelectorAll('[data-down]').forEach((b) => b.onclick = () => { const i = +b.dataset.down; [SET_ORDER[i + 1], SET_ORDER[i]] = [SET_ORDER[i], SET_ORDER[i + 1]]; persist(); });
 }
 // ручная проверка обновления лаунчера (кнопка в Настройках)
 async function manualCheckUpdate() {
@@ -1091,6 +1207,10 @@ function onOpEnd(d) {
   setTimeout(() => $('progressCard').classList.add('hidden'), 1600);
   updateActionButtons();
   toast((d && d.status) || 'Готово', (d && d.status === 'Ошибка') ? 'err' : 'ok');
+  if (pendingAfterDetect === 'check') {     // после автоопределения базы — продолжить флоу
+    pendingAfterDetect = null;
+    setTimeout(startCheckUpdates, 200);
+  }
 }
 function onProgress(d) {
   const bar = $('progBar');
