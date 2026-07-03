@@ -97,7 +97,7 @@ IS_RWT = bool(EMBEDDED_TOKEN)
 # из репозитория ({version, url?, notes?}). url можно оставить пустым — тогда показ без
 # ссылки на скачивание (просто «доступна новая версия»).
 # ВНИМАНИЕ: при релизе выставить реальный следующий номер (текущий публичный > 0.13.1).
-LAUNCHER_VERSION = '0.16.0'
+LAUNCHER_VERSION = '0.17.0'
 RELEASE_REF = 'state/launcher_release.json'
 # Ссылка на полную справку в репозитории (ИНСТРУКЦИЯ-ПРОСТАЯ.md, имя в percent-encoding —
 # кириллица в пути; так браузер откроет её без ручного кодирования).
@@ -126,6 +126,8 @@ DEFAULT_CONFIG = {
     # Обучающий тур по интерфейсу: показывается автоматически один раз (при первом
     # запуске), затем флаг ставится в True. Повторно вызывается из шапки/справки.
     'tutorial_done': False,
+    # Левая панель (фильтры/отображение) свёрнута — запоминается между запусками.
+    'rail_collapsed': False,
 }
 
 
@@ -148,9 +150,9 @@ CONFLICT_OPTIONS = {
                         ('сохранить оба (.srnew)', 'both')],
     'conflict_deleted': [('оставить мой', 'keep'), ('удалить', 'delete')],
 }
-ALL_CAMP = '★ весь лагерь'
+ALL_CAMP = '★ вся сборка'
 ALL_PACK = '★ весь пак'
-CAMP_KEYS = ('universe', 'redux', 'original')     # известные лагеря (порядок = дефолтный)
+CAMP_KEYS = ('universe', 'redux', 'original')     # известные сборки (порядок = дефолтный)
 
 # Базовые моды, поставляемые с игрой (инсталлятор кладёт их в Mods и сохраняет при
 # переустановке через TempStorageFolder). При «Очистить Mods» их НЕ удаляем. Пути —
@@ -216,12 +218,12 @@ class Api:
         self._cancel = threading.Event()
         self._catalog_cache = None
         self._packs_cache = None
-        self._camps_idx = None             # (by_base, by_leaf) -> множества лагерей мода
+        self._camps_idx = None             # (by_base, by_leaf) -> множества сборок мода
         self._cat_by_repo = {}             # repo -> catalog (кэш каталогов форков)
         self._idx_by_repo = {}             # repo -> chunk-index (кэш индексов форков)
         self._fork_man_cache = {}          # (repo,camp,unit,which) -> манифест форка
         self._pub_cache = {}               # camp -> {install_rel: sha} (опубликованные файлы)
-        self._pub_cache_all = None         # [(source, {install_rel: sha})] по ВСЕМ лагерям
+        self._pub_cache_all = None         # [(source, {install_rel: sha})] по ВСЕМ сборкам
         self._updates = {}                 # mid -> {changed, added} (найденные обновления)
         self._fixparent = {}
         self._sections = {}
@@ -250,6 +252,13 @@ class Api:
 
     def log(self, msg):
         self._emit('log', str(msg))
+
+    def vlog(self, msg):
+        """Технические подробности (пути, хеши, тексты ошибок, служебные термины) —
+        попадают в журнал ТОЛЬКО при включённой галочке «Подробный лог». Обычному
+        пользователю они не нужны и лишь засоряют журнал."""
+        if core.LOG_VERBOSE:
+            self._emit('log', str(msg))
 
     def _save_config(self):
         CONFIG_FILE.write_text(json.dumps(self.config, ensure_ascii=False, indent=2),
@@ -413,7 +422,7 @@ class Api:
         return merged, core.merge_chunk_indexes(indexes)
 
     def _unit_maps(self, camp):
-        """Список (метка_юнита, {install_rel: sha}) для лагеря (его юниты + shared,
+        """Список (метка_юнита, {install_rel: sha}) для сборки (его юниты + shared,
         с наложением форков). Кэш на сессию. По юнитам (а не плоско) — чтобы детект
         мог подобрать лучший вариант мода, как делает обновление (pick_disk_variant)."""
         if camp in self._pub_cache:
@@ -443,11 +452,11 @@ class Api:
         return out
 
     def _all_unit_maps(self):
-        """Список (source='camp/unit', {install_rel: sha}) по ВСЕМ лагерям (+форки).
+        """Список (source='camp/unit', {install_rel: sha}) по ВСЕМ сборкам (+форки).
         Кэш на сессию. Детект ОБЯЗАН выбирать вариант среди ВСЕХ источников — как
         обновление (pick_disk_variant). Иначе кросс-лагерные моды вечно «нуждаются в
         обновлении»: genuine Shu* живут в universe/original, а redux_base несёт Pol*-
-        контент под теми же путями ShusRangers/* → сверка с базовым лагерем всегда
+        контент под теми же путями ShusRangers/* → сверка с базовой сборкой всегда
         расходится, а обновление пишет другой вариант → они никогда не сходятся."""
         if self._pub_cache_all is not None:
             return self._pub_cache_all
@@ -474,9 +483,9 @@ class Api:
         return out
 
     def _detect_base_camp(self, unit_maps, disk_all):
-        """Определить лагерь установленной базы по sha: у какого base-пака (tier='base')
+        """Определить сборка установленной базы по sha: у какого base-пака (tier='base')
         больше всего файлов совпадает с тем, что лежит в Mods. Устойчиво к пересечению
-        имён папок между лагерями (Den/Solyanka/AnotherMods есть у redux И universe) и к
+        имён папок между сборками (Den/Solyanka/AnotherMods есть у redux И universe) и к
         добавлению/удалению паков со временем. -> 'redux'|'universe'|'original'|None.
         Критерий (match, cover) — как в подборе вариантов; match важнее (совпал контент)."""
         packs = self._get_packs(self._token())
@@ -521,7 +530,7 @@ class Api:
     def check_updates(self, extra=None):
         """Проверить обновления ПОФАЙЛОВОЙ сверкой: хеши файлов на диске (из индекса)
         против опубликованных манифестов (+форки). extra — подтверждённые доп.строки
-        порядка лагерей (из диалога). Запускается фоном."""
+        порядка сборок (из диалога). Запускается фоном."""
         if self.busy:
             return {'ok': False, 'error': 'Уже идёт операция.'}
         if extra is not None:
@@ -538,15 +547,16 @@ class Api:
         try:
             mods_dir = self._mods_dir()
             cat = self._catalog_for(self._repo(), self._token())
-            self.log('Хеширую файлы на диске (инкрементально)…')
+            self.log('Проверяю установленные моды…')
+            self.vlog('Хеширую файлы на диске (инкрементально)…')
             idx = core.index_disk_mods(mods_dir, cat, prev_index=self._disk_index,
                                        log=self.log, progress_cb=self._progress,
                                        should_cancel=self.should_cancel)
             core.save_disk_index(mods_dir, idx)
             self._disk_index = idx
             unit_maps = self._all_unit_maps()
-            # База лагеря определяется НЕ по именам папок (Den/Solyanka/AnotherMods есть у
-            # нескольких лагерей — маркеры со временем протухают при добавлении/удалении
+            # База сборки определяется НЕ по именам папок (Den/Solyanka/AnotherMods есть у
+            # нескольких сборок — маркеры со временем протухают при добавлении/удалении
             # паков), а по sha: у какого base-пака (tier='base') максимум файлов совпадает
             # с диском. cover/match — тот же критерий, что и в подборе вариантов.
             if not (self.profile.get('base') or '').strip():
@@ -560,13 +570,13 @@ class Api:
                     b = idx.get('base'); det = b.get('camp') if b else None
                 if det:
                     self.profile['base'] = det; self._save_profile()
-            # порядок лагерей: строка 1 = база, далее доп.строки. Каждый мод проверяем по
-            # ПЕРВОМУ лагерю списка, где он есть, и только один раз (дедуп за один проход).
+            # порядок сборок: строка 1 = база, далее доп.строки. Каждый мод проверяем по
+            # ПЕРВОЙ сборке списка, где он есть, и только один раз (дедуп за один проход).
             order = self._update_order()
             if not order:
-                self.log('Не удалось определить базу в Mods — сверять не с чем.')
+                self.log('Не удалось определить основной набор модов — сравнивать не с чем.')
                 self._finish_check(); return
-            self.log(f'Порядок проверки обновлений: {" → ".join(order)}')
+            self.vlog(f'Порядок проверки обновлений: {" → ".join(order)}')
             # источники по логическому id + его Pol/Shu-сиблингам (id@<Name>): дисковая
             # папка ShusRangers/X может нести genuine X ИЛИ X@PolX (redux_base кладёт
             # Pol-контент под тем же путём) — кандидаты ОБЯЗАНЫ включать сиблингов, иначе
@@ -583,7 +593,7 @@ class Api:
                 cidx = core.load_chunk_index(repo=self._repo(), token=self._token())
                 avail |= set(cidx.get('blobs', {}))
             except Exception as e:
-                self.log(f'⚠ индекс частей не загружен ({e})')
+                self.vlog(f'⚠ индекс частей не загружен ({e})')
             for fidx in self._idx_by_repo.values():
                 avail |= set((fidx or {}).get('blobs', {}))
             ups = {}
@@ -609,11 +619,11 @@ class Api:
                         mid, unit_maps, cat[choice].get('default_source'))
                     tcamp = (cat[choice].get('default_source') or '').split('/')[0] or None
                 if not theirs:
-                    # целевой лагерь = первый в порядке, где этот мод есть; проверяем ТОЛЬКО
-                    # его вариант (внутри лагеря — лучший по совпадению файлов)
+                    # целевая сборка = первый в порядке, где этот мод есть; проверяем ТОЛЬКО
+                    # его вариант (внутри сборки — лучший по совпадению файлов)
                     tcamp = self._target_camp(order, allowed)
                     if not tcamp:
-                        continue                   # мод не входит ни в один лагерь списка
+                        continue                   # мод не входит ни в одну сборку списка
                     camp_srcs = {s for s in allowed if (s or '').split('/')[0] == tcamp}
                     theirs = self._best_unit_files(mid, unit_maps, disk, camp_srcs,
                                                    prefer_camp=tcamp)
@@ -634,17 +644,22 @@ class Api:
                     ups[mid] = {'n': n, 'camp': tcamp}
             self._updates = ups
             if unavail:
-                self.log(f'(на сервере пока нет {unavail} файлов — они не учитываются)')
+                self.vlog(f'(на сервере пока нет {unavail} файлов — они не учитываются)')
             for pm in self.profile.get('mods', []):
                 if pm.get('type') == 'desc':
                     pm['update_available'] = bool(pm.get('id') in ups)
-            self.log(f'Готово. Модов с обновлением: {len(ups)}'
-                     + (': ' + ', '.join(sorted(ups)[:20]) if ups else '.'))
+            if ups:
+                self.log(f'Проверка завершена. Обновления доступны для модов: {len(ups)}.')
+                self.vlog('С обновлением: ' + ', '.join(sorted(ups)))
+            else:
+                self.log('Проверка завершена. Все моды актуальны — обновлять нечего.')
             self._emit('tree_dirty')
         except core.OperationCancelled:
             self.log('Проверка обновлений отменена.')
         except Exception as e:
-            self.log(f'ОШИБКА проверки обновлений: {e}')
+            self.log('Не удалось проверить обновления. Проверьте подключение к интернету '
+                     'и попробуйте ещё раз.')
+            self.vlog(f'Техническая ошибка проверки обновлений: {e}')
         self._finish_check()
 
     def _finish_check(self):
@@ -652,7 +667,7 @@ class Api:
         self._emit('op_end', {'status': 'Готово'})
 
     def set_base(self, camp):
-        """Задать базу лагеря вручную (селектор в панели). '' = авто (sha-детект по диску).
+        """Задать базу сборки вручную (селектор в панели). '' = авто (sha-детект по диску).
         На неё опирается проверка обновлений. Мгновенно, без сканирования диска."""
         camp = (camp or '').strip()
         self.profile['base'] = camp
@@ -661,9 +676,9 @@ class Api:
         return {'ok': True, 'base': camp}
 
     def _update_order(self):
-        """Порядок лагерей для проверки/установки/обновления: строка 1 = текущая база,
+        """Порядок сборок для проверки/установки/обновления: строка 1 = текущая база,
         далее — доп.строки из настроек (profile['update_extra']). Для каждого мода берём
-        ПЕРВЫЙ лагерь списка, где этот мод есть, и проверяем его только один раз. Пустая
+        ПЕРВАЯ сборка списка, где этот мод есть, и проверяем его только один раз. Пустая
         база → []."""
         base = (self.profile.get('base') or '').strip()
         if not base:
@@ -677,14 +692,14 @@ class Api:
 
     def get_update_order(self):
         """Для диалога/настроек: {base, order, all_camps, needs_order}. needs_order=False →
-        все установленные моды есть в базовом лагере, окно порядка можно НЕ показывать."""
+        все установленные моды есть в базовой сборке, окно порядка можно НЕ показывать."""
         return {'ok': True, 'base': (self.profile.get('base') or ''),
                 'order': self._update_order(), 'all_camps': list(CAMP_KEYS),
                 'needs_order': self._needs_order()}
 
     def _needs_order(self):
-        """Нужно ли показывать окно порядка лагерей. True, если (а) уже настроены доп.строки,
-        либо (б) на диске есть мод, которого НЕТ в базовом лагере (только в других) — тогда
+        """Нужно ли показывать окно порядка сборок. True, если (а) уже настроены доп.строки,
+        либо (б) на диске есть мод, которого НЕТ в базовой сборке (только в других) — тогда
         порядок реально влияет. Если все моды есть в базе — False (окно лишнее)."""
         base = (self.profile.get('base') or '').strip()
         if not base:
@@ -701,12 +716,12 @@ class Api:
             for k, e in cat.items():
                 if k.split('@', 1)[0] == bid:
                     camps |= self._entry_camps(e)
-            if camps and base not in camps:    # мод есть только в НЕ-базовых лагерях
+            if camps and base not in camps:    # мод есть только в НЕ-базовых сборках
                 return True
         return False
 
     def set_update_extra(self, extra):
-        """Сохранить доп.строки порядка (лагеря после базовой). Строку базы не трогаем."""
+        """Сохранить доп.строки порядка (сборки после базовой). Строку базы не трогаем."""
         base = (self.profile.get('base') or '').strip()
         seen, clean = {base}, []
         for c in (extra or []):
@@ -719,8 +734,8 @@ class Api:
 
     @staticmethod
     def _target_camp(order, allowed_sources):
-        """Лагерь, по которому проверяем/обновляем мод: первый в order, у которого есть
-        источник этого мода. None — мод не входит ни в один лагерь списка (не проверяем)."""
+        """Сборка, по которому проверяем/обновляем мод: первый в order, у которого есть
+        источник этого мода. None — мод не входит ни в одну сборку списка (не проверяем)."""
         camps = {(s or '').split('/')[0] for s in (allowed_sources or [])}
         for c in order:
             if c in camps:
@@ -729,7 +744,7 @@ class Api:
 
     def autodetect_base(self):
         """Определить базу по файлам в Mods (sha base-паков) и проставить в панель.
-        Фоновая операция: хеширует диск и сравнивает с base-инсталляторами лагерей."""
+        Фоновая операция: хеширует диск и сравнивает с base-инсталляторами сборок."""
         if self.busy:
             return {'ok': False, 'error': 'Уже идёт операция.'}
         if self._game_root() is None:
@@ -836,6 +851,7 @@ class Api:
             'version': LAUNCHER_VERSION,
             'busy': self.busy,
             'tutorial_done': self.config.get('tutorial_done', False),
+            'rail_collapsed': self.config.get('rail_collapsed', False),
             'help_url': HELP_URL,
         }
 
@@ -918,9 +934,9 @@ class Api:
                 if '/' in (v.get('source') or '')}
 
     def _camp_member_mids(self, camp):
-        """Folder-id всех модов каталога, у которых есть вариант этого лагеря — чтобы
-        развернуть добавленный «весь лагерь» в реальные моды в дереве (превью того, что
-        поставится), а не показывать одной строкой «★ весь лагерь» вверху списка."""
+        """Folder-id всех модов каталога, у которых есть вариант этой сборки — чтобы
+        развернуть добавленный «вся сборка» в реальные моды в дереве (превью того, что
+        поставится), а не показывать одной строкой «★ вся сборка» вверху списка."""
         cat = self._catalog_cache or {}
         out = set()
         for k, e in cat.items():
@@ -929,10 +945,10 @@ class Api:
         return out
 
     def _camp_variant_entry(self, mid, camp):
-        """Запись каталога варианта папки mid, релевантного лагерю camp: у папки Pol/Shu
+        """Запись каталога варианта папки mid, релевантного сборке camp: у папки Pol/Shu
         (напр. ShusRangers/ShuNukes) под redux канон — @PolNukes, под original/universe —
         базовый ShuNukes. Возвращает (ключ, запись) или None. Для показа в диалоге
-        добавления «Лагерь→Пак→Мод»: имя/описание берём у варианта ЭТОГО лагеря, а не у
+        добавления «Сборка→Пак→Мод»: имя/описание берём у варианта ЭТОЙ сборки, а не у
         первого попавшегося (Shu-)варианта."""
         cat = self._catalog_cache or {}
         keys = self._variant_keys(mid)
@@ -961,7 +977,7 @@ class Api:
         return None
 
     def _camps_of(self, mid):
-        """Метки лагерей ИМЕННО установленного варианта mid. Папка Pol/Shu общая, но на
+        """Метки сборок ИМЕННО установленного варианта mid. Папка Pol/Shu общая, но на
         диске один вариант → по ModuleInfo Name берём камп(ы) его записи (Pol→redux,
         Shu→uni/orig). Если вариант не определён — объединение всех вариантов папки.
 
@@ -1036,7 +1052,7 @@ class Api:
     def get_all_mods(self):
         """Плоский список ВСЕХ модов каталога для поиска по названию (режим добавления
         «По названию»): [{id, name, camps, desc}]. id — ключ каталога (с @-вариантом),
-        camps — лагеря этого конкретного варианта."""
+        camps — сборки этого конкретного варианта."""
         cat = self._catalog_cache
         if cat is None:
             return {'ok': False, 'error': 'Каталог ещё загружается — повторите через секунду.'}
@@ -1142,7 +1158,7 @@ class Api:
         return out
 
     def get_tree(self, only_attention=False):
-        """Собрать дерево Лагерь→Пак→Мод (диск + набор профиля) как вложенный JSON."""
+        """Собрать дерево Сборка→Пак→Мод (диск + набор профиля) как вложенный JSON."""
         try:
             inst_base = core.detect_installed_base(self._mods_dir())
         except Exception:
@@ -1181,7 +1197,7 @@ class Api:
                              'пак', m.get('name', m.get('unit')), sc, st,
                              m.get('last_downloaded', '') if on else '', iid, ''))
             elif typ == 'camp':
-                # разворачиваем в моды лагеря ПОСЛЕ дисковых (чтобы не дублировать уже
+                # разворачиваем в моды сборки ПОСЛЕ дисковых (чтобы не дублировать уже
                 # установленные) — см. проход camp_adds ниже
                 camp_adds.append((iid, m.get('camp', 'прочее')))
             elif typ == 'desc' and m.get('id') and not m.get('url'):
@@ -1226,19 +1242,19 @@ class Api:
             rows.append((prof_camp, self._mod_group(mid), 'мод', mid.split('/')[-1],
                          sc, st, '', 'e:' + mid, mid))
 
-        # развернуть добавленный «весь лагерь» в реальные моды лагеря: каждый мод —
+        # развернуть добавленный «вся сборка» в реальные моды сборки: каждый мод —
         # строкой «➕ добавлен» в своей группе (превью того, что поставится), а не одной
-        # строкой «★ весь лагерь» вверху. iid='p{idx}#mid' → «отменить добавление»/удаление
-        # ведёт к записи лагеря (число idx); установка остаётся bulk (тип camp).
+        # строкой «★ вся сборка» вверху. iid='p{idx}#mid' → «отменить добавление»/удаление
+        # ведёт к записи сборки (число idx); установка остаётся bulk (тип camp).
         for cid, camp in camp_adds:
             all_members = self._camp_member_mids(camp)
             if not all_members:                # каталог ещё грузится — строка-заглушка,
-                rows.append((camp, None, 'лагерь', '★ весь лагерь',   # чтобы не прятать факт
-                             'queued', '➕ добавлен', '', cid, ''))    # добавления лагеря
+                rows.append((camp, None, 'сборка', '★ вся сборка',   # чтобы не прятать факт
+                             'queued', '➕ добавлен', '', cid, ''))    # добавления сборки
                 continue
-            # разворачиваем ТОЛЬКО ещё не показанных членов; если весь лагерь уже на диске/
-            # в наборе — новых строк нет и заглушка «★ весь лагерь» НЕ появляется (моды
-            # пресета уже в дереве). Запись лагеря остаётся в профиле → bulk-установка цела.
+            # разворачиваем ТОЛЬКО ещё не показанных членов; если всю сборку уже на диске/
+            # в наборе — новых строк нет и заглушка «★ вся сборка» НЕ появляется (моды
+            # пресета уже в дереве). Запись сборки остаётся в профиле → bulk-установка цела.
             for mid in sorted(m for m in all_members if m not in seen):
                 seen.add(mid)
                 rows.append((camp, self._mod_group(mid), 'мод', mid.split('/')[-1],
@@ -1269,7 +1285,7 @@ class Api:
                 'section': (self._section_of(mid) if mid else ''),
                 'desc': (self._desc_of(mid) if mid else ''),
                 'has_info': bool(mid),
-                'labels': (self._camps_of(mid) if mid else []),   # лагеря-метки (бейджи)
+                'labels': (self._camps_of(mid) if mid else []),   # сборки-метки (бейджи)
                 'variants': (self._variants_of(mid) if mid else []),  # Pol/Shu-переключатель
                 'chosen': (self._chosen_variant(mid) if mid else ''),
                 'mergeable': bool(iid and (iid.startswith('d:') or iid in desc_iids)),
@@ -1364,6 +1380,12 @@ class Api:
     def set_verbose(self, v):
         self.config['log_verbose'] = bool(v)
         core.LOG_VERBOSE = bool(v)
+        self._save_config()
+        return True
+
+    def set_rail_collapsed(self, collapsed=True):
+        """Запомнить состояние левой панели (свёрнута/развёрнута)."""
+        self.config['rail_collapsed'] = bool(collapsed)
         self._save_config()
         return True
 
@@ -1522,7 +1544,8 @@ class Api:
             return {'ok': False, 'error': str(e)}
         self.profile['enabled'] = mods
         self._save_profile()
-        self.log(f'Считано из игры (ModCFG): {len(mods)} подключённых модов.')
+        self.log(f'Считано из игры: сейчас подключено модов — {len(mods)}.')
+        self.vlog(f'ModCFG прочитан: {len(mods)} записей.')
         return {'ok': True, 'count': len(mods)}
 
     def profile_to_modcfg(self):
@@ -1536,9 +1559,23 @@ class Api:
             core.write_modcfg(self._mods_dir(), en)
         except Exception as e:
             return {'ok': False, 'error': str(e)}
-        self.log(f'Записано в игру (ModCFG): {len(en)} модов.'
-                 + (f' Не на диске: {len(missing)}.' if missing else ''))
+        self.log(f'Записано в игру: подключено модов — {len(en)}.'
+                 + (f' Из них не найдено на диске: {len(missing)}.' if missing else ''))
+        self.vlog('ModCFG записан.'
+                  + (f' Отсутствуют на диске: {", ".join(missing)}' if missing else ''))
         return {'ok': True, 'count': len(en), 'missing': missing}
+
+    def disable_all_mods(self):
+        """Снять все галочки «в профиле» — отключить все моды ТОЛЬКО в профиле.
+        Подключение в самой игре (ModCFG) и файлы на диске НЕ трогаем: чтобы применить
+        это к игре, нужно затем нажать «⟸ Записать профиль в игру»."""
+        n = len(self.profile.get('enabled', []))
+        self.profile['enabled'] = []
+        self._save_profile()
+        self.log(f'Отключено в профиле модов: {n}. Чтобы применить к игре — нажмите '
+                 '«Записать профиль в игру».')
+        self._emit('tree_dirty')
+        return {'ok': True}
 
     # ───────── действия ─────────
     def launch_game(self):
@@ -1560,6 +1597,53 @@ class Api:
             return {'ok': True}
         except Exception as e:
             return {'ok': False, 'error': str(e)}
+
+    def open_profiles_folder(self):
+        """Открыть в проводнике папку с файлами профилей (.json) — чтобы забрать
+        готовый профиль другому игроку или положить присланный."""
+        try:
+            PROFILES_DIR.mkdir(exist_ok=True)
+            os.startfile(str(PROFILES_DIR))  # noqa
+            return {'ok': True}
+        except Exception as e:
+            return {'ok': False, 'error': str(e)}
+
+    def import_profile(self):
+        """Загрузить профиль из файла .json (присланный другим игроком): выбрать файл,
+        скопировать в папку профилей под свободным именем и зарегистрировать. Дальше
+        фронт переключается на него через switch_profile."""
+        if not _WINDOW:
+            return {'ok': False, 'error': 'Окно недоступно.'}
+        try:
+            res = _WINDOW.create_file_dialog(
+                webview.OPEN_DIALOG,
+                file_types=('Профиль (*.json)', 'Все файлы (*.*)'))
+        except Exception as e:
+            return {'ok': False, 'error': str(e)}
+        if not res:
+            return {'ok': False, 'cancelled': True}
+        path = res[0] if isinstance(res, (list, tuple)) else res
+        try:
+            data = json.loads(Path(path).read_text(encoding='utf-8'))
+            if not isinstance(data, dict):
+                raise ValueError('файл не похож на профиль')
+        except Exception as e:
+            return {'ok': False, 'error': f'Не удалось прочитать профиль: {e}'}
+        base = (str(data.get('name') or Path(path).stem).strip() or 'imported')
+        name, i = base, 2
+        while (PROFILES_DIR / f'{name}.json').exists():
+            name = f'{base} ({i})'; i += 1
+        data['name'] = name
+        data.setdefault('game_path', self.profile.get('game_path', ''))
+        data['mods'] = []                      # очередь не переносим (сессионная)
+        PROFILES_DIR.mkdir(exist_ok=True)
+        (PROFILES_DIR / f'{name}.json').write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
+        if name not in self.config['profiles']:
+            self.config['profiles'].append(name)
+        self._save_config()
+        self.log(f'Профиль загружен из файла: {name}')
+        return {'ok': True, 'name': name}
 
     def open_mod_folder(self, mid):
         try:
@@ -1591,6 +1675,26 @@ class Api:
             self._save_profile()
             return path
         return None
+
+    def save_log(self, text):
+        """Сохранить текст журнала в файл (диалог «Сохранить как…»). Удобно приложить
+        к обращению в поддержку. text приходит из интерфейса — весь видимый журнал."""
+        if not _WINDOW:
+            return {'ok': False, 'error': 'Окно недоступно.'}
+        try:
+            res = _WINDOW.create_file_dialog(
+                webview.SAVE_DIALOG, save_filename='sr-launcher-log.txt',
+                file_types=('Текстовый файл (*.txt)', 'Все файлы (*.*)'))
+        except Exception as e:
+            return {'ok': False, 'error': str(e)}
+        if not res:
+            return {'ok': False, 'cancelled': True}
+        path = res if isinstance(res, str) else res[0]
+        try:
+            Path(path).write_text(text or '', encoding='utf-8')
+            return {'ok': True, 'path': path}
+        except Exception as e:
+            return {'ok': False, 'error': str(e)}
 
     def remove_pidx(self, indices):
         mods = self.profile.get('mods', [])
@@ -1721,7 +1825,7 @@ class Api:
             units = sorted([p for p in packs.values() if p['camp'] == m['camp']],
                            key=lambda p: (self._unit_install_rank(p, packs),
                                           p.get('load_order', 999)))
-            # Единый идемпотентный проход по всему лагерю: манифесты юнитов сливаются в
+            # Единый идемпотентный проход по всему сборке: манифесты юнитов сливаются в
             # ОДИН эффективный набор с приоритетом (порядок = низший→высший, кто позже —
             # перезаписывает по целевому пути на диске). Иначе base/fixes/разные моды,
             # делящие один файл, перезаписывали бы друг друга на КАЖДОЙ установке (сверка
@@ -1733,7 +1837,7 @@ class Api:
                               'fork_files': ff, 'fork_index': fidx})
                 if p.get('tier') == 'base':
                     self.profile['installed_base'] = p['name']
-            self._pack_ctx = f'лагерь {m["camp"]}'
+            self._pack_ctx = f'сборка {m["camp"]}'
             core.reconstruct_camp(
                 m['repo'], m['camp'], ulist, mods_dir, tok,
                 log=self.log, tmp_dir=ROOT, should_cancel=self.should_cancel,
@@ -1770,7 +1874,7 @@ class Api:
 
     # ───────── установить всю сборку С ЗАВИСИМОСТЯМИ ─────────
     def install_set_with_deps(self):
-        """Установить всю сборку: bulk-записи (лагерь/пак/zip) обычной логикой +
+        """Установить всю сборку: bulk-записи (сборка/пак/zip) обычной логикой +
         каталожные моды (desc/unit-мод) через resolve_set (подтянуть Dependence)."""
         if self.busy:
             return {'ok': False, 'error': 'Уже идёт операция.'}
@@ -1778,10 +1882,10 @@ class Api:
         if err:
             return {'ok': False, 'error': err}
         if not self.profile.get('mods'):
-            return {'ok': False, 'error': 'В сборке пока нет позиций. Нажмите «➕ Добавить мод».'}
+            return {'ok': False, 'error': 'В профиле пока нет позиций. Нажмите «➕ Добавить мод».'}
         self.busy = True
         self._cancel.clear()
-        self._emit('op_begin', {'name': 'Установка сборки'})
+        self._emit('op_begin', {'name': 'Установка профиля'})
         threading.Thread(target=self._resolve_set_worker, daemon=True).start()
         return {'ok': True}
 
@@ -1798,7 +1902,7 @@ class Api:
                     sel['source'] = f"{m['camp']}/{m['unit']}"
                 sels.append(sel)
             else:
-                bulk.append(m)                    # лагерь / весь пак / zip
+                bulk.append(m)                    # сборка / весь пак / zip
         plan = None
         if sels:
             self.log('Разрешаю зависимости модов…')
@@ -1835,7 +1939,7 @@ class Api:
 
     def cancel_deps(self):
         self._pending_set = None
-        self.log('Установка сборки отменена.')
+        self.log('Установка профиля отменена.')
         self._finish_set('Отменено')
         return {'ok': True}
 
@@ -1846,7 +1950,7 @@ class Api:
         plan, bulk = ps['plan'], ps['bulk']
         done = []
         try:
-            for m in bulk:                        # лагерь/пак/zip — обычной логикой
+            for m in bulk:                        # сборка/пак/zip — обычной логикой
                 if self.should_cancel():
                     raise core.OperationCancelled()
                 self.log(f'=== {m.get("name", "?")} ===')
@@ -1903,7 +2007,7 @@ class Api:
 
     # ───────── добавление мода в сборку ─────────
     def get_camp_packs(self):
-        """{лагерь: [{key,camp,unit,name,tier,load_order}]} для каскада добавления."""
+        """{сборка: [{key,camp,unit,name,tier,load_order}]} для каскада добавления."""
         try:
             packs = self._get_packs(self._token())
             return {'ok': True, 'camps': core.camp_packs(packs)}
@@ -1913,7 +2017,7 @@ class Api:
     def get_unit_mods(self, camp, unit):
         """Список модов пака (для выбора конкретного мода). Каждый мод — объект
         {key, name, camps, desc}: key — папка (мод-ключ для установки), а имя/описание/
-        метки берём у варианта ИМЕННО этого лагеря (redux→Pol*, orig/uni→Shu*), чтобы в
+        метки берём у варианта ИМЕННО этой сборки (redux→Pol*, orig/uni→Shu*), чтобы в
         диалоге не показывались Shu*-названия для redux-пака."""
         try:
             keys = core.list_unit_mods(self._repo(), camp, unit, self._token())
@@ -1965,16 +2069,16 @@ class Api:
             return {'ok': True}
         camp = (payload.get('camp') or '').strip()
         if not camp:
-            return {'ok': False, 'error': 'Выберите лагерь.'}
+            return {'ok': False, 'error': 'Выберите сборку.'}
         pack = payload.get('pack')
-        if not pack:                                   # весь лагерь
-            # дедуп: повторный клик по тому же пресету не должен плодить записи лагеря
+        if not pack:                                   # всю сборку
+            # дедуп: повторный клик по тому же пресету не должен плодить записи сборки
             if any(m.get('type') == 'camp' and m.get('camp') == camp
                    for m in self.profile.get('mods', [])):
                 return {'ok': True, 'dup': True}
             self.profile.setdefault('mods', []).append({
                 'type': 'camp', 'camp': camp, 'repo': repo,
-                'name': f'{camp} — весь лагерь'})
+                'name': f'{camp} — вся сборка'})
             self._save_profile()
             return {'ok': True}
         mod = {'type': 'unit', 'repo': repo, 'camp': pack['camp'], 'unit': pack['unit'],
@@ -2031,8 +2135,8 @@ class Api:
                 skipped += 1
         if not targets:
             return {'ok': False, 'error':
-                    'Выберите мод из сборки (добавленный из каталога/по ссылке) '
-                    'или мод из «Установлено в игре». Паки/лагеря обновляются кнопкой «Установить».'}
+                    'Выберите мод из профиля (добавленный из каталога/по ссылке) '
+                    'или мод из «Установлено в игре». Паки/сборки обновляются кнопкой «Установить».'}
         self.busy = True
         self._cancel.clear()
         self._merge_queue = targets
@@ -2040,7 +2144,7 @@ class Api:
         self._merge_remember_on = False    # «больше не спрашивать» до конца серии
         self._emit('op_begin', {'name': 'Обновление'})
         if skipped:
-            self.log(f'Пропущено {skipped} (паки/лагеря — через «Установить»).')
+            self.log(f'Пропущено {skipped} (паки/сборки — через «Установить»).')
         threading.Thread(target=self._merge_next, daemon=True).start()
         return {'ok': True}
 
@@ -2149,11 +2253,11 @@ class Api:
         self._emit_plan_or_skip(('profile', i), desc, plan, index)
 
     def _full_variant_descriptor(self, key, cat, repo, tok, source=None):
-        """Полный дескриптор варианта: НАБОР ФАЙЛОВ = слияние ВСЕХ источников его лагеря
+        """Полный дескриптор варианта: НАБОР ФАЙЛОВ = слияние ВСЕХ источников его сборки
         (base-installer + *_fixes), fixes поверх base. Иначе default_source, указывающий
         на куцый *_fixes-пак (напр. 5 файлов из 54), даёт неполный «theirs» — и апдейт
         сносит остальные файлы мода: «при смене Pol/Shu мод полностью удаляется».
-        source задаёт лагерь (по умолчанию default_source записи). Все дескрипторы
+        source задаёт сборка (по умолчанию default_source записи). Все дескрипторы
         адресуют один общий HF-индекс, поэтому блобы из разных паков резолвятся."""
         ent = cat.get(key) or {}
         src = source or ent.get('default_source') or ''
@@ -2188,9 +2292,9 @@ class Api:
                 ib = core.detect_installed_base(mods_dir)
             except Exception:
                 ib = None
-            # целевой лагерь = тот же, что выбрал детект (ups[mid]['camp']); иначе первый в
+            # целевая сборка = тот же, что выбрал детект (ups[mid]['camp']); иначе первый в
             # порядке проверки, где мод есть; иначе — определённая база. Обновляем мод по
-            # ЭТОМУ лагерю (как при проверке), а не по случайному лучшему совпадению.
+            # ЭТОМУ сборке (как при проверке), а не по случайному лучшему совпадению.
             bid = mid.split('@', 1)[0]
             allowed = set()
             for k, e in cat.items():
@@ -2212,8 +2316,8 @@ class Api:
                 else:
                     self.log('Дескриптор выбранного варианта не найден — подбираю по диску.')
             if not desc and tcamp:
-                # целевой лагерь известен из порядка проверки — берём его вариант (полный
-                # набор base+fixes лагеря), а не подбор по лучшему совпадению среди всех
+                # целевая сборка известен из порядка проверки — берём его вариант (полный
+                # набор base+fixes сборки), а не подбор по лучшему совпадению среди всех
                 kv = self._camp_variant_entry(mid, tcamp)
                 if kv:
                     key, ent = kv
@@ -2224,7 +2328,7 @@ class Api:
                     if d and d.get('files'):
                         d = dict(d); d['id'] = key
                         desc, info = d, {'source': src}
-                        self.log(f'Целевой лагерь по порядку проверки: {tcamp} ({src}).')
+                        self.log(f'Целевая сборка по порядку проверки: {tcamp} ({src}).')
             if not desc:
                 self.log('Подбираю вариант мода по файлам на диске…')
                 desc, info = core.pick_disk_variant(cat, mid, mods_dir, repo, tok,
@@ -2232,7 +2336,7 @@ class Api:
                                                     should_cancel=self.should_cancel)
                 if desc:
                     # подобран лучший ОДИН источник по совпадению; расширяем до полного
-                    # набора лагеря (base+fixes), иначе *_fixes-выбор снёс бы файлы
+                    # набора сборки (base+fixes), иначе *_fixes-выбор снёс бы файлы
                     full = self._full_variant_descriptor(desc.get('id'), cat, repo, tok,
                                                          source=info.get('source'))
                     if full and full.get('files'):
@@ -2400,9 +2504,10 @@ class Api:
         if err:
             return {'ok': False, 'error': err}
         d = self._mods_dir()
-        self.log(f'🧹 Очистка папки Mods: {d}')
+        self.log('🧹 Очищаю папку модов…')
+        self.vlog(f'Папка Mods: {d}')
         if not d.exists():
-            self.log('Папки Mods нет — очищать нечего.')
+            self.log('Папки с модами нет — очищать нечего.')
             return {'ok': True, 'removed': 0, 'kept': 0}
         removed = kept = 0
         # удаляем снизу вверх (сначала файлы, потом опустевшие папки); базовые моды
@@ -2423,8 +2528,9 @@ class Api:
         for m in self.profile.get('mods', []):
             m['last_downloaded'] = None
         self._save_profile()
-        self.log(f'Очищено: {removed} файлов из {d}'
-                 + (f' (сохранено базовых модов игры: {kept})' if kept else ''))
+        self.log(f'Готово. Удалено файлов: {removed}'
+                 + (f' (базовые моды игры сохранены: {kept}).' if kept else '.'))
+        self.vlog(f'Очищена папка: {d}')
         self._emit('tree_dirty')
         return {'ok': True, 'removed': removed, 'kept': kept}
 
@@ -2472,12 +2578,12 @@ class Api:
                           'text': 'Не выбрана база (нужна для модов/фиксов) — добавьте базовый пак.'})
         if rep.get('base_conflict'):
             names = ', '.join(nm(b) for b in rep.get('bases', []))
-            items.append({'level': 'warn', 'text': f'В сборке несколько баз ({names}) — оставьте одну.'})
+            items.append({'level': 'warn', 'text': f'В профиле несколько баз ({names}) — оставьте одну.'})
         if rep.get('save_warning'):
             items.append({'level': 'warn', 'text': rep['save_warning']})
         for fix, parent in rep.get('fix_orphans', []):
             items.append({'level': 'warn',
-                          'text': f'Фикс «{nm(fix)}» требует родительский пак «{parent}», которого нет в сборке.'})
+                          'text': f'Фикс «{nm(fix)}» требует родительский пак «{parent}», которого нет в профиле.'})
         if rep.get('mandatory'):
             names = ', '.join(nm(u) for u in rep['mandatory'])
             items.append({'level': 'info', 'text': f'Обязательны к обновлению (база/фикс): {names}'})
@@ -2485,14 +2591,14 @@ class Api:
         for d in setrep.get('dep_issues', []):
             if d.get('available'):
                 items.append({'level': 'warn',
-                              'text': f'Моду «{d.get("name")}» нужен «{d.get("dep")}», но он не в сборке — подключите его (или включение мода подтянет его само).'})
+                              'text': f'Моду «{d.get("name")}» нужен «{d.get("dep")}», но он не в профиле — подключите его (или включение мода подтянет его само).'})
             else:
                 items.append({'level': 'warn',
-                              'text': f'Моду «{d.get("name")}» нужен «{d.get("dep")}», которого нет ни в сборке, ни в каталоге, ни на диске.'})
+                              'text': f'Моду «{d.get("name")}» нужен «{d.get("dep")}», которого нет ни в профиле, ни в каталоге, ни на диске.'})
         # направление 2/2: два конфликтующих мода оба в сборке
         for a, b in setrep.get('conflicts', []):
             items.append({'level': 'warn',
-                          'text': f'Конфликт: «{mn(a)}» и «{mn(b)}» оба в сборке — оставьте один.'})
+                          'text': f'Конфликт: «{mn(a)}» и «{mn(b)}» оба в профиле — оставьте один.'})
         # зависимости подключённых в игре модов по ИМЕНИ (ModuleInfo Name, как делает
         # сама игра): ловит «PolMercsHQ требует PolMercs, а на диске лежит ShuMercs»
         try:

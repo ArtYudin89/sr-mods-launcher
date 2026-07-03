@@ -28,6 +28,13 @@ body{
 }
 button{font-family:inherit;cursor:pointer;border:none;color:inherit;}
 input,select{font-family:inherit;}
+/* Выпадающий список <select>: раскрытые <option> рендерятся нативно и наследуют
+   прозрачный фон родителя (напр. у .base-pick) → на тёмной теме получался тёмный
+   текст на тёмном фоне. Задаём сплошные фон/цвет из темы — читаемо и в тёмной, и
+   в светлой. */
+select option{background:var(--panel);color:var(--fg);}
+select option:checked{background:var(--panel-2);color:var(--fg);}
+select option:disabled{color:var(--muted);}
 /* доступность: единая видимая рамка фокуса для клавиатурной навигации.
    :focus-visible срабатывает только при заходе с клавиатуры, поэтому мышиные
    клики рамку не рисуют — «нативный» вид для мышиной аудитории сохранён. */
@@ -97,6 +104,71 @@ input:focus-visible,select:focus-visible,textarea:focus-visible,
 
 /* инструменты */
 .toolbar{display:flex;align-items:center;gap:9px;flex-wrap:wrap;}
+
+/* ===== Раскладка v0.17: двухрядная шапка · левый рельс · вкладки · «Ещё» ===== */
+.topbar.two-row{flex-direction:column;align-items:stretch;gap:8px;padding:10px 16px;}
+.topbar.two-row .tr{display:flex;align-items:center;gap:14px;}
+.topbar.two-row .tr2{gap:9px;border-top:1px solid var(--line);padding-top:8px;}
+.tr2 .tr2-lbl{font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);}
+
+/* левый рельс: отображение + фильтры (скрываемый) */
+.filter-rail{width:178px;flex:none;background:var(--head);border-right:1px solid var(--line);
+  display:flex;flex-direction:column;gap:14px;padding:14px 12px;overflow:visible;
+  transition:width .18s ease,padding .18s ease;}
+.filter-rail.collapsed{width:0;padding-left:0;padding-right:0;border-right:none;overflow:hidden;}
+.filter-rail .fr-sec{display:flex;flex-direction:column;gap:6px;}
+.filter-rail .fr-lbl{font-size:10px;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);white-space:nowrap;}
+.filter-rail .btn.ghost{width:100%;justify-content:flex-start;}
+.filter-rail .camp-chips{display:flex;flex-wrap:wrap;gap:6px;}
+.filter-rail .pop-host{width:100%;}
+
+/* переключатели-радио (экономят место в рельсе) */
+.radio-group{display:flex;flex-direction:column;gap:3px;}
+.radio-group label{display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--fg);
+  cursor:pointer;padding:3px 4px;border-radius:6px;white-space:nowrap;}
+.radio-group label:hover{background:var(--row-hover);}
+.radio-group input{accent-color:var(--accent);width:14px;height:14px;flex:none;}
+
+/* тулбар действий над таблицей + меню «Ещё» */
+.actions-toolbar .tb-divider{width:1px;height:22px;background:var(--line);margin:0 2px;flex:none;}
+.rail-toggle.active{background:var(--panel-2);border-color:var(--accent);color:var(--accent);}
+.more-wrap{position:relative;}
+.more-menu{position:absolute;top:calc(100% + 6px);left:0;z-index:45;min-width:210px;
+  background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:var(--shadow);
+  padding:6px;display:flex;flex-direction:column;gap:2px;}
+.more-menu.hidden{display:none;}
+.more-menu button{text-align:left;justify-content:flex-start;padding:8px 11px;border-radius:6px;
+  font-size:13px;color:var(--fg);background:transparent;border:none;cursor:pointer;font-family:inherit;}
+.more-menu button:hover{background:var(--row-hover);}
+.more-menu button.danger{color:var(--danger);}
+.more-menu button:disabled{opacity:.5;cursor:default;}
+.more-menu .mm-sep{height:1px;background:var(--line);margin:4px 2px;}
+.mm-only-narrow{display:none;}
+.actions-toolbar.narrow .collapsible-action{display:none;}
+.actions-toolbar.narrow .mm-only-narrow{display:block;}
+
+/* правая панель на вкладках */
+.side-tabs{display:flex;gap:4px;padding:10px 12px 0;flex:none;}
+.side-tab{flex:1;text-align:center;padding:8px 6px;font-size:12px;color:var(--muted);
+  background:transparent;border:none;border-bottom:2px solid transparent;cursor:pointer;font-family:inherit;}
+.side-tab:hover{color:var(--fg);}
+.side-tab.on{color:var(--fg);font-weight:600;border-bottom-color:var(--accent);}
+.side-pane{flex:1;display:flex;flex-direction:column;min-height:0;}
+.side-pane.hidden{display:none;}
+.tab-note{font-size:11.5px;color:var(--muted);line-height:1.45;padding:10px 16px 4px;}
+.log-verbose{padding:7px 16px;flex:none;border-top:1px solid var(--line);}
+
+/* схема синхронизации: Игра (слева) ↔ Профиль (справа), как столбцы таблицы */
+.sync-card{padding:6px 16px 12px;border-bottom:1px solid var(--line);}
+.sync-arrows{display:flex;align-items:center;justify-content:space-between;gap:8px;
+  background:var(--panel-2);border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin:4px 0 10px;}
+.sync-arrows .end{font-size:12.5px;color:var(--fg);font-weight:600;text-align:center;flex:1;}
+.sync-arrows .end small{display:block;font-size:10px;color:var(--muted);font-weight:400;letter-spacing:0;margin-top:2px;}
+.sync-arrows .arr{display:flex;flex-direction:column;gap:5px;flex:none;}
+.sync-arrows .arr button{font-size:11px;padding:4px 9px;border-radius:6px;background:var(--panel);
+  border:1px solid var(--line);color:var(--fg);cursor:pointer;font-family:inherit;white-space:nowrap;}
+.sync-arrows .arr button:hover{border-color:var(--accent);}
+.sync-arrows .arr button:disabled{opacity:.5;cursor:default;}
 .seg{display:flex;background:var(--panel-2);border:1px solid var(--line);border-radius:8px;overflow:hidden;}
 .seg button{background:transparent;color:var(--muted);padding:6px 12px;font-size:12.5px;}
 .seg button.on{background:var(--accent);color:var(--accent-fg);font-weight:600;}
@@ -205,6 +277,20 @@ input:focus-visible,select:focus-visible,textarea:focus-visible,
 .modal .note{background:var(--panel-2);border-radius:8px;padding:10px 13px;font-size:12.5px;color:var(--muted);margin:8px 0;border-left:3px solid var(--warn);}
 /* окно (i): карточка мода */
 .info-modal{width:560px;}
+/* Настройки в две колонки — чтобы всё влезало без вертикальной прокрутки.
+   Верхние строки (папка игры / версия) — по колонкам; блок «Дополнительно»
+   растягивается на всю ширину и внутри тоже делится на две колонки. */
+.settings-modal{width:880px;}
+.settings-modal .m-body{display:grid;grid-template-columns:1fr 1fr;column-gap:26px;align-items:start;}
+.settings-modal .m-body > .m-row{margin:12px 0;}
+.settings-modal .m-body > details{grid-column:1 / -1;}
+/* содержимое «Дополнительно» — в две колонки (masonry-поток, строки не рвутся) */
+.settings-modal .adv-grid{columns:2;column-gap:26px;}
+.settings-modal .adv-grid > .m-row{break-inside:avoid;-webkit-column-break-inside:avoid;margin:0 0 14px;}
+@media (max-width:760px){
+  .settings-modal .m-body{grid-template-columns:1fr;}
+  .settings-modal .adv-grid{columns:1;}
+}
 .info-modal .m-body .sub{font-size:12px;color:var(--muted);}
 .info-modal .i-row{display:grid;grid-template-columns:104px 1fr;gap:6px 14px;padding:7px 0;border-bottom:1px solid var(--line);}
 .info-modal .i-row:last-child{border-bottom:none;}
