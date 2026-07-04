@@ -97,7 +97,7 @@ IS_RWT = bool(EMBEDDED_TOKEN)
 # из репозитория ({version, url?, notes?}). url можно оставить пустым — тогда показ без
 # ссылки на скачивание (просто «доступна новая версия»).
 # ВНИМАНИЕ: при релизе выставить реальный следующий номер (текущий публичный > 0.13.1).
-LAUNCHER_VERSION = '0.17.0'
+LAUNCHER_VERSION = '0.17.1'
 RELEASE_REF = 'state/launcher_release.json'
 # Ссылка на полную справку в репозитории (ИНСТРУКЦИЯ-ПРОСТАЯ.md, имя в percent-encoding —
 # кириллица в пути; так браузер откроет её без ручного кодирования).
@@ -254,11 +254,12 @@ class Api:
         self._emit('log', str(msg))
 
     def vlog(self, msg):
-        """Технические подробности (пути, хеши, тексты ошибок, служебные термины) —
-        попадают в журнал ТОЛЬКО при включённой галочке «Подробный лог». Обычному
-        пользователю они не нужны и лишь засоряют журнал."""
-        if core.LOG_VERBOSE:
-            self._emit('log', str(msg))
+        """Технические подробности (пути, хеши, тексты ошибок, служебные термины).
+        Отправляются во фронт ВСЕГДА, помеченными как verbose (v=True): фронт хранит
+        их постоянно и лишь показывает/прячет по галочке «Подробный лог». Благодаря
+        этому при включении галочки видны и ранее накопленные подробные записи, а не
+        только новые."""
+        self._emit('log', {'msg': str(msg), 'v': True})
 
     def _save_config(self):
         CONFIG_FILE.write_text(json.dumps(self.config, ensure_ascii=False, indent=2),
@@ -785,20 +786,33 @@ class Api:
         self._emit('op_end', {'status': 'Готово'})
 
     def _game_root(self):
+        """Папка игры по НАСТРОЕННОМУ пути. Определяется ДЕТЕРМИНИРОВАННО из строки, без
+        решающей опоры на «живой» is_dir(): сетевой/съёмный диск (или антивирус-блокировка)
+        может на миг не ответить, а по прежней логике это молча возвращало None → моды
+        уходили в Mods рядом с лаунчером (см. баг «папка сменилась в процессе установки»).
+        Возвращаем None ТОЛЬКО когда путь вообще не задан. Проверку доступности делает
+        _require_game (внятная ошибка вместо тихой подмены папки)."""
         gp = (self.profile.get('game_path') or '').strip()
         if not gp:
             return None
         p = Path(gp)
-        if p.is_file():
+        # путь может указывать на Rangers.exe — тогда берём его папку; иначе трактуем сам
+        # путь как папку игры (даже если прямо сейчас недоступна)
+        if p.suffix.lower() == '.exe':
             return p.parent
-        if p.is_dir():
-            return p
-        return None
+        try:
+            if p.is_file():
+                return p.parent
+        except OSError:
+            pass
+        return p
 
     def _mods_dir(self):
         # Папку Mods создаём ТОЛЬКО когда задан реальный путь игры — иначе вернём
         # путь-заглушку рядом с exe, НО НЕ создаём её (чтобы не плодить пустую Mods
         # около лаунчера до выбора игры). Читающие вызовы переживают отсутствие папки.
+        # ВАЖНО: root is None теперь бывает лишь при НЕзаданном пути игры — при заданном
+        # пути моды никогда не уедут в папку лаунчера, даже при осечке файловой системы.
         root = self._game_root()
         if root is None:
             return ROOT / 'Mods'
@@ -810,9 +824,20 @@ class Api:
         return d
 
     def _require_game(self):
-        """None, если путь игры задан; иначе текст ошибки для UI."""
-        if self._game_root() is None:
+        """None, если путь игры задан И доступен; иначе текст ошибки для UI. Проверку
+        существования держим здесь (а не в _game_root), чтобы недоступный путь давал явную
+        ошибку и операция прерывалась, а не сыпала моды мимо игры."""
+        gp = (self.profile.get('game_path') or '').strip()
+        if not gp:
             return 'Сначала укажите папку игры (где лежит Rangers.exe).'
+        root = self._game_root()
+        try:
+            ok = root is not None and root.exists()
+        except OSError:
+            ok = False
+        if not ok:
+            return (f'Папка игры недоступна: {gp}\n'
+                    'Проверьте, что диск подключён и путь верный, затем повторите.')
         return None
 
     def _autofind_game(self):
@@ -1780,6 +1805,7 @@ class Api:
     def _install_worker(self, indices):
         tok = self._token()
         mods_dir = self._mods_dir()
+        self.vlog(f'Папка установки: {mods_dir}')
         self._dl_bytes = 0
         done = []
         try:
@@ -1921,8 +1947,13 @@ class Api:
                 self.log(f'⚠ КОНФЛИКТ: {a} ⟷ {b}')
         self._pending_set = {'plan': plan, 'bulk': bulk, 'repo': repo, 'tok': tok}
         order = (plan or {}).get('order', [])
+        # bulk-записи (целые сборки/паки/архивы) — считать в них моды поштучно не выходит
+        # (сборка ставится пофайлово через reconstruct_camp), поэтому передаём их описания,
+        # а фронт покажет «все моды сборки …» вместо бессмысленного «сборок: 1».
+        bulk_items = [{'type': m.get('type'), 'name': m.get('name', ''),
+                       'camp': m.get('camp', '')} for m in bulk]
         self._emit('deps_confirm', {
-            'count': len(order), 'bulk': len(bulk),
+            'count': len(order), 'bulk': len(bulk), 'bulk_items': bulk_items,
             'added_deps': (plan or {}).get('added_deps', []),
             'missing_deps': (plan or {}).get('missing_deps', []),
             'conflicts': [list(p) for p in (plan or {}).get('conflicts', [])],
@@ -1946,6 +1977,7 @@ class Api:
     def _install_set_worker(self, ps):
         repo, tok = ps['repo'], ps['tok']
         mods_dir = self._mods_dir()
+        self.vlog(f'Папка установки: {mods_dir}')
         self._dl_bytes = 0
         plan, bulk = ps['plan'], ps['bulk']
         done = []

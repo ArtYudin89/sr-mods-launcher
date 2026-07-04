@@ -120,6 +120,7 @@ function applyState() {
   $('repoDot').classList.toggle('on', !!STATE.repo);
   $('tokenDot').classList.toggle('on', !!STATE.has_token);
   $('verboseChk').checked = !!STATE.log_verbose;
+  $('logBox').classList.toggle('show-verbose', !!STATE.log_verbose);
   reflowToolbar();
 }
 
@@ -173,6 +174,8 @@ function wireUI() {
   $('railToggle').onclick = toggleRail;
   document.querySelectorAll('.side-tab').forEach((t) => t.onclick = () => setSideTab(t.dataset.tab));
   $('moreBtn').onclick = (e) => { e.stopPropagation(); $('moreMenu').classList.toggle('hidden'); };
+  $('moreAdd').onclick = () => { hideMoreMenu(); openAdd(); };
+  $('moreInstall').onclick = () => { hideMoreMenu(); onInstallClick(); };
   $('moreMerge').onclick = () => { hideMoreMenu(); startMerge(); };
   $('moreCompat').onclick = () => { hideMoreMenu(); checkCompat(); };
   window.addEventListener('resize', reflowToolbar);
@@ -214,7 +217,12 @@ function wireUI() {
   $('disableAllBtn').onclick = disableAllMods;
   $('clearLogBtn').onclick = () => { $('logBox').innerHTML = ''; };
   $('saveLogBtn').onclick = saveLog;
-  $('verboseChk').onchange = (e) => api().set_verbose(e.target.checked);
+  $('verboseChk').onchange = (e) => {
+    // подробные записи в журнале уже накоплены — просто показываем/прячем их
+    $('logBox').classList.toggle('show-verbose', e.target.checked);
+    $('logBox').scrollTop = $('logBox').scrollHeight;
+    api().set_verbose(e.target.checked);
+  };
   $('cancelBtn').onclick = () => api().cancel();
 
   // контекстное меню журнала (ПКМ)
@@ -417,7 +425,7 @@ function renderTree() {
   for (const { label, mods } of packs) {
     const pkey = 'p:' + label;
     const pCol = collapsed.has(pkey);
-    rows.push(groupRow('pack', label, pkey, pCol, mods.length, statusCounts(mods)));
+    rows.push(groupRow('pack', label, pkey, pCol, mods.length, statusCounts(mods), toggleCounts(mods)));
     if (pCol) continue;
     for (const n of mods) { NODE[n.iid] = n; rows.push(leafRow(n, 2)); }
   }
@@ -510,17 +518,27 @@ function onTreeKey(e) {
   }
 }
 
-function groupRow(kind, label, key, isCol, count, counts) {
+function groupRow(kind, label, key, isCol, count, counts, tc) {
   const icon = kind === 'camp' ? '🗂' : '■';
   const tw = isCol ? '▸' : '▾';
   const lvl = 'lvl1';                     // паки/разделы теперь верхний уровень (сборка убран)
   // в свёрнутом состоянии содержимое не видно → показываем разбивку по статусам
   // (цветные цифры через «/»); в развёрнутом достаточно общего счётчика.
   const cell = (isCol && counts) ? statusCountHtml(counts) : `<span class="tag">${count}</span>`;
-  return `<div class="row group ${kind} ${lvl}" data-key="${esc(key)}" role="treeitem" aria-level="1" aria-expanded="${isCol ? 'false' : 'true'}" aria-label="${esc(label)}, группа, ${count}">
+  // сколько модов группы подключено в игре / входит в профиль (0 не показываем)
+  const gc = (n, title) => n ? `<span class="gcnt" title="${title}: ${n} из ${count}">${n}</span>` : '';
+  const inGame = tc ? gc(tc.g, 'Подключено в игре') : '';
+  const inProf = tc ? gc(tc.p, 'В профиле') : '';
+  return `<div class="row group ${kind} ${lvl}" data-key="${esc(key)}" role="treeitem" aria-level="1" aria-expanded="${isCol ? 'false' : 'true'}" aria-label="${esc(label)}, группа, ${count}, в игре ${tc ? tc.g : 0}, в профиле ${tc ? tc.p : 0}">
     <div class="name"><span class="tw">${tw}</span><span class="label">${icon} ${esc(label)}</span></div>
-    <div class="cell"></div><div class="cell"></div><div class="cell"></div>
+    <div class="cell"></div><div class="cell">${inGame}</div><div class="cell">${inProf}</div>
     <div class="cell">${cell}</div></div>`;
+}
+// сколько модов группы подключено в игре / входит в профиль
+function toggleCounts(mods) {
+  let g = 0, p = 0;
+  (mods || []).forEach((n) => { if (n.in_game) g++; if (n.in_profile) p++; });
+  return { g, p };
 }
 // разбивка узлов по статусам (status_class -> количество)
 function statusCounts(mods, packsVis) {
@@ -659,6 +677,8 @@ function updateActionButtons() {
   }
   $('compatBtn').disabled = busy;
   // дубли в меню «Ещё» (для узкого окна) синхронизируем с оригиналами
+  const ma = $('moreAdd'); if (ma) { ma.disabled = $('addBtn').disabled; }
+  const mi = $('moreInstall'); if (mi) { mi.textContent = ib.textContent; mi.disabled = ib.disabled; }
   const mm = $('moreMerge'); if (mm) { mm.textContent = mb.textContent; mm.disabled = mb.disabled; }
   const mc = $('moreCompat'); if (mc) { mc.disabled = $('compatBtn').disabled; }
   reflowToolbar();                                 // текст кнопок мог измениться → пересчитать перенос
@@ -766,16 +786,27 @@ function onDepsConfirm(d) {
   const order = d.order || [], deps = new Set(d.added_deps || []);
   const lines = order.map((mid) => '• ' + mid + (deps.has(mid) ? '   (зависимость)' : ''));
   if ((d.count || 0) > order.length) lines.push(`… и ещё ${d.count - order.length}`);
-  let head = `Будет установлено модов из каталога: <b>${d.count || 0}</b>`;
-  if (d.bulk) head += ` + паков/сборок: <b>${d.bulk}</b>`;
-  if (deps.size) head += ` <span style="color:var(--muted)">(из них зависимостей: ${deps.size})</span>`;
-  let body = head + '.';
+  // Не показываем «сборок: N» (для пользователя это ничего не значит): выводим
+  // количество модов, когда оно известно (каталожные моды), а целые сборки/паки
+  // называем по-человечески — «все моды сборки …».
+  const parts = [];
+  if (d.count) {
+    let s = `Будет установлено модов: <b>${d.count}</b>`;
+    if (deps.size) s += ` <span style="color:var(--muted)">(из них зависимостей: ${deps.size})</span>`;
+    parts.push(s);
+  }
+  (d.bulk_items || []).forEach((b) => {
+    if (b.type === 'camp') parts.push(`Все моды сборки: <b>${esc(campLabel(b.camp))}</b>`);
+    else if (b.type === 'unit') parts.push(`Весь пак «<b>${esc(b.name || 'пак')}</b>»`);
+    else parts.push(`Архив «<b>${esc(b.name || 'архив')}</b>»`);
+  });
+  let body = parts.length ? parts.join('<br>') + '.' : '';
   if (lines.length) body += `<div style="margin-top:8px;font-family:var(--mono);font-size:12px;max-height:190px;overflow:auto;color:var(--muted)">${lines.map(esc).join('<br>')}</div>`;
   if (d.missing_deps && d.missing_deps.length)
     body += `<div class="note">⚠ Не найдены в каталоге: ${esc(d.missing_deps.join(', '))}</div>`;
   if (d.conflicts && d.conflicts.length)
     body += `<div class="note">⚠ Конфликты (показаны, не снимаются): ${d.conflicts.map((p) => esc(p[0] + '⟷' + p[1])).join('; ')}</div>`;
-  if (!order.length && !d.bulk) body += '<div class="note">Нечего устанавливать.</div>';
+  if (!parts.length) body += '<div class="note">Нечего устанавливать.</div>';
   confirmBox('Установить все', body,
     () => api().confirm_install_deps(),
     () => api().cancel_deps());
@@ -869,7 +900,12 @@ function disableAllMods() {
 
 // ───────── журнал: контекстное меню / копирование / сохранение ─────────
 function logText() {
-  return [...$('logBox').children].map((el) => el.textContent).join('\n');
+  // копируем/сохраняем ровно то, что видно: подробные строки — только при включённом
+  // «Подробном логе» (иначе они скрыты и в файл попадать не должны)
+  const showV = $('logBox').classList.contains('show-verbose');
+  return [...$('logBox').children]
+    .filter((el) => showV || !el.classList.contains('l-v'))
+    .map((el) => el.textContent).join('\n');
 }
 function selectLog() {
   const box = $('logBox');
@@ -929,15 +965,19 @@ function setSideTab(name) {
   if (name === 'log') $('logBox').scrollTop = $('logBox').scrollHeight;
 }
 function hideMoreMenu() { const m = $('moreMenu'); if (m) m.classList.add('hidden'); }
-// Переполнение тулбара: если кнопки не влезают в одну строку — «Обновить/Совместимость»
-// уезжают в меню «Ещё» (класс narrow), чтобы панель не разрасталась в 2–3 этажа.
+// Переполнение тулбара: панель ВСЕГДА одна строка (flex-wrap:nowrap). При нехватке
+// ширины кнопки прогрессивно уезжают в меню «Ещё»: narrow (Обновить+Совместимость) →
+// narrow2 (+Установить) → narrow3 (+Добавить). Замеряем реальное переполнение по
+// scrollWidth: пока не влезает — добавляем следующий уровень свёртки.
 function reflowToolbar() {
   const tb = $('actionsToolbar');
   if (!tb) return;
-  tb.classList.add('narrow');            // минимальный набор → эталон высоты одной строки
-  const oneRow = tb.offsetHeight;
-  tb.classList.remove('narrow');         // полный набор
-  if (tb.offsetHeight > oneRow + 4) tb.classList.add('narrow');   // перенос → сворачиваем
+  const tiers = ['narrow', 'narrow2', 'narrow3'];
+  tiers.forEach((t) => tb.classList.remove(t));
+  for (const t of tiers) {
+    if (tb.scrollWidth <= tb.clientWidth + 1) break;   // влезает → дальше не сворачиваем
+    tb.classList.add(t);                               // ещё переполнено → следующий уровень
+  }
 }
 
 // ───────── запуск/папка ─────────
@@ -1416,7 +1456,7 @@ function doMergeApply() {
 // контролы таблицы/тулбара, блокируемые на время операции (прокрутку не трогаем)
 const BUSY_CTRLS = ['addBtn', 'installBtn', 'mergeBtn', 'compatBtn', 'removeBtn',
   'launchBtn', 'clearModsBtn', 'refreshBtn', 'searchInp', 'expandBtn', 'collapseBtn', 'filterBtn',
-  'disableAllBtn', 'modcfgReadBtn', 'modcfgWriteBtn', 'moreMerge', 'moreCompat'];
+  'disableAllBtn', 'modcfgReadBtn', 'modcfgWriteBtn', 'moreAdd', 'moreInstall', 'moreMerge', 'moreCompat'];
 function setBusyControls(on) {
   document.body.classList.toggle('busy', on);
   BUSY_CTRLS.forEach((id) => { const e = $(id); if (e) e.disabled = on; });
@@ -1459,7 +1499,12 @@ function onProgress(d) {
     $('progRight').textContent = (d.pct || 0) + '%';
   }
 }
-function appendLog(msg, cls) {
+function appendLog(data, cls) {
+  // data — либо строка (обычная запись), либо {msg, v:true} (подробная/verbose).
+  // Подробные записи хранятся всегда и лишь скрываются классом .l-v, пока не включён
+  // «Подробный лог» — поэтому при переключении режима видны и старые подробные строки.
+  const verbose = data && typeof data === 'object' && data.v;
+  const msg = verbose ? data.msg : data;
   const box = $('logBox');
   const line = document.createElement('div');
   let klass = cls;
@@ -1469,7 +1514,7 @@ function appendLog(msg, cls) {
     else if (/^===|^---|готово/i.test(s)) klass = 'acc';
     else if (/✓/.test(s)) klass = 'ok';
   }
-  if (klass) line.className = 'l-' + klass;
+  line.className = (klass ? 'l-' + klass : '') + (verbose ? ' l-v' : '');
   const ts = document.createElement('span');
   ts.className = 'l-ts';
   ts.textContent = logStamp() + ' ';
