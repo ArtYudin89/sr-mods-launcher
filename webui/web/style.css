@@ -558,6 +558,25 @@ body.busy .toggle.click{pointer-events:none;opacity:.5;}
 #promptOverlay input,#promptOverlay textarea{background:var(--panel-2);border:1px solid var(--line);
   border-radius:7px;padding:8px 10px;color:var(--fg);font-family:inherit;font-size:13px;box-sizing:border-box;}
 #promptOverlay textarea{resize:vertical;}
+/* ───────── второй список: связи выбранного мода ───────── */
+.rel-wrap{flex:none;margin-top:8px;background:var(--panel);border:1px solid var(--line);
+  border-radius:var(--radius);overflow:hidden;display:flex;flex-direction:column;max-height:42vh;}
+.rel-wrap.collapsed{max-height:none;}
+.rel-head{display:flex;align-items:center;gap:8px;padding:8px 12px;cursor:pointer;flex:none;
+  background:var(--panel-2);border-bottom:1px solid var(--line);user-select:none;}
+.rel-wrap.collapsed .rel-head{border-bottom:none;}
+.rel-head .rel-tw{width:14px;text-align:center;color:var(--muted);font-size:11px;flex:none;}
+.rel-head .rel-title{font-weight:700;font-size:13px;color:var(--fg);flex:none;}
+.rel-head .rel-sub{font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.rel-list{display:flex;flex-direction:column;min-height:0;overflow:hidden;}
+.rel-wrap.collapsed .rel-list{display:none;}
+.rel-list .tree-body{max-height:36vh;}
+.rel-group{background:var(--panel-2);cursor:default;}
+.rel-group .name .label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;font-weight:700;}
+.row.leaf.rel-missing{opacity:.75;cursor:pointer;}
+.row.leaf.rel-missing:hover{opacity:1;}
+/* иконка личной заметки — у правого края строки (перед бейджем состояния) */
+.cell .note-ic{margin-right:6px;cursor:help;font-size:12px;vertical-align:middle;}
 /* ───────── плавающие карточки мода (немодальные, перетаскиваемые, ресайз, несколько сразу) ───────── */
 .mod-card{position:fixed;width:520px;height:auto;min-width:340px;min-height:150px;max-width:94vw;max-height:92vh;
   display:flex;flex-direction:column;resize:both;overflow:hidden;

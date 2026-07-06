@@ -172,6 +172,7 @@ function wireUI() {
   $('nameSeg').querySelectorAll('input').forEach((r) => r.onchange = () => setNameMode(r.value));
   $('searchInp').oninput = renderTree;
   $('expandBtn').onclick = () => { collapsed.clear(); renderTree(); };
+  $('relHead').onclick = toggleRelPanel;
   $('collapseBtn').onclick = collapseAll;
   $('treeBody').addEventListener('keydown', onTreeKey);   // доступность: стрелки/Enter/Space по дереву
   $('clearModsBtn').onclick = doClearMods;
@@ -454,6 +455,7 @@ async function refreshTree() {
   if ($('hiddenCnt')) $('hiddenCnt').textContent = hc ? `(${hc})` : '';
   if ($('fShowHidden')) $('fShowHidden').checked = !!TREE.show_hidden;
   renderTree();
+  paintRelList();                         // обновить строки-копии в списке связей из свежих узлов
   const q = TREE.queue || {};
   $('queueLbl').textContent = q.count ? `в профиле: ${q.count}${q.size ? ' · ~' + q.size : ''}` : '';
 }
@@ -659,13 +661,13 @@ function leafRow(n, lvl) {
   const alt = (STATE.name_mode === 'module' && n.name && n.name !== n.label)
     ? `<span class="alt-name" title="имя папки на диске">${esc(n.label)}</span>` : '';
   const hidMark = n.hidden ? '<span class="hid-mark" title="Скрыт из списка (виден, т.к. включён показ скрытых)">🙈</span>' : '';
-  return `<div class="row leaf lvl${lvl}${sel}${hid}" data-iid="${esc(n.iid)}" role="treeitem" aria-level="${lvl}" aria-selected="${isSel ? 'true' : 'false'}" aria-label="${esc(disp)}, ${esc(n.status)}${n.in_profile ? ', в профиле' : ''}${n.hidden ? ', скрыт' : ''}">
+  return `<div class="row leaf lvl${lvl}${sel}${hid}" data-iid="${esc(n.iid)}" data-mid="${esc(n.mid || '')}" role="treeitem" aria-level="${lvl}" aria-selected="${isSel ? 'true' : 'false'}" aria-label="${esc(disp)}, ${esc(n.status)}${n.in_profile ? ', в профиле' : ''}${n.hidden ? ', скрыт' : ''}">
     <div class="name">${check}<span class="tw">·</span>
-      <span class="label-wrap"><span class="name-line">${hidMark}<span class="label">${esc(disp)}</span>${labelBadges(n.labels)}${userTags(n.tags)}${noteIc}${alt}${date}</span>${variantSwitch(n)}${desc}</span>${info}</div>
+      <span class="label-wrap"><span class="name-line">${hidMark}<span class="label">${esc(disp)}</span>${labelBadges(n.labels)}${userTags(n.tags)}${alt}${date}</span>${variantSwitch(n)}${desc}</span>${info}</div>
     <div class="cell">${esc(colValue(n) || '')}</div>
     <div class="cell">${inGame}</div>
     <div class="cell">${inProf}</div>
-    <div class="cell"><span class="badge b-${n.status_class}">${esc(n.status)}</span></div></div>`;
+    <div class="cell">${noteIc}<span class="badge b-${n.status_class}">${esc(n.status)}</span></div></div>`;
 }
 
 // переключатель варианта мода (Pol/Shu) в одной папке: смена = пометка «обновление»
@@ -738,6 +740,9 @@ function onLeafClick(e, iid, opt) {
   }
   lastClickedIid = iid;                   // новый якорь для будущего Shift-диапазона
   renderTree();
+  // выбор одного мода → показать его связи во втором списке
+  const cn = NODE[iid] || allNodes().find((x) => x.iid === iid);
+  if (cn && cn.mid) renderRelList(cn.mid);
 }
 // индекс записи профиля из iid: 'p3' (обычная) или 'p3#Кат/Мод' (мод развёрнутого сборки)
 function pidxOf(iid) { const m = /^p(\d+)(#|$)/.exec(iid || ''); return m ? parseInt(m[1]) : null; }
@@ -754,6 +759,96 @@ function allNodes() {
     c.packs.forEach((p) => out.push(...p.mods));
   });
   return out;
+}
+
+// ───────── второй список: связи выбранного мода (те же колонки, строки-копии) ─────────
+let relMid = null;      // mid, для которого сейчас показаны связи
+let relInfo = null;     // закэшированная карточка (requires/dependents/conflicts) — чтобы
+                        // перерисовывать строки из свежих узлов дерева без повторной загрузки
+function _confArr(i) {
+  return (i.conflicts_ref && i.conflicts_ref.length) ? i.conflicts_ref
+    : (i.conflicts || []).map((c) => ({ name: c, mid: '' }));
+}
+// подгрузить связи мода и показать (из клика по строке основного/связанного списка)
+async function renderRelList(mid) {
+  relMid = mid || null;
+  const sub = $('relSub'), body = $('relBody');
+  if (!mid) { relInfo = null; sub.textContent = '— выберите мод в списке'; body.innerHTML = ''; return; }
+  $('relWrap').classList.remove('collapsed'); $('relHead').querySelector('.rel-tw').textContent = '▾';
+  sub.textContent = '— загрузка…';
+  let r; try { r = await api().get_mod_info(mid, null); } catch (e) { r = null; }
+  if (relMid !== mid) return;                  // успели выбрать другой мод
+  relInfo = (r && r.ok) ? r.info : null;
+  paintRelList();
+}
+// перерисовать строки из кэша relInfo + СВЕЖИХ узлов дерева (после refresh/переключений)
+function paintRelList() {
+  const sub = $('relSub'), body = $('relBody');
+  if (!relMid || !relInfo) { if (!relMid) sub.textContent = '— выберите мод в списке'; return; }
+  const i = relInfo;
+  const groups = [
+    ['Требует', i.requires, 'Моды, которые нужны этому'],
+    ['Нужен для', i.dependents, 'Моды, которые зависят от этого'],
+    ['Конфликтует', _confArr(i), 'Несовместимо одновременно'],
+  ];
+  const total = groups.reduce((s, g) => s + ((g[1] || []).length), 0);
+  sub.textContent = `— ${i.name || relMid.split('/').pop()} · связей: ${total}`;
+  if (!total) { body.innerHTML = '<div class="tree-empty">У этого мода нет связей (требований, зависимостей, конфликтов).</div>'; return; }
+  const byMid = new Map();
+  allNodes().forEach((n) => { if (n.mid && !byMid.has(n.mid)) byMid.set(n.mid, n); });
+  const rows = [];
+  for (const [label, arr, tip] of groups) {
+    if (!arr || !arr.length) continue;
+    rows.push(relGroupRow(label, arr.length, tip));
+    for (const x of arr) {
+      const node = x && x.mid ? byMid.get(x.mid) : null;
+      rows.push(node ? leafRow(node, 2) : relMissingRow(x));
+    }
+  }
+  body.innerHTML = rows.join('');
+  wireRelBody(body);
+}
+function relGroupRow(label, count, tip) {
+  return `<div class="row group rel-group" title="${esc(tip)}">
+    <div class="name"><span class="label">${esc(label)}</span></div>
+    <div class="cell"></div><div class="cell"></div><div class="cell"></div>
+    <div class="cell"><span class="tag">${count}</span></div></div>`;
+}
+// мод-связь, которого нет в текущем списке (не установлен и не в профиле)
+function relMissingRow(x) {
+  const nm = (x && (x.name || x.mid)) || '?';
+  const info = x && x.mid ? `<span class="info-btn" data-mid="${esc(x.mid)}" title="Подробнее о моде">ⓘ</span>` : '';
+  return `<div class="row leaf lvl2 rel-missing" data-mid="${esc((x && x.mid) || '')}">
+    <div class="name"><span class="row-check ghost"></span><span class="tw">·</span>
+      <span class="label-wrap"><span class="name-line"><span class="label">${esc(nm)}</span></span></span>${info}</div>
+    <div class="cell"></div><div class="cell"></div><div class="cell"></div>
+    <div class="cell"><span class="badge b-miss" title="Мода нет в вашем списке (не установлен и не в профиле)">нет в списке</span></div></div>`;
+}
+function wireRelBody(body) {
+  body.querySelectorAll('.row.leaf').forEach((el) => {
+    el.onclick = (e) => { if (e.target.closest('.info-btn,.toggle.click,.var-opt,.row-check')) return; selectRelMid(el.dataset.mid); };
+    el.oncontextmenu = (e) => { if (!el.dataset.iid) return; e.preventDefault(); openCtxMenu(e, el.dataset.iid); };
+  });
+  body.querySelectorAll('.info-btn').forEach((el) =>
+    el.onclick = (e) => { e.stopPropagation(); openModInfo(el.dataset.mid); });
+  body.querySelectorAll('.toggle.click').forEach((el) =>
+    el.onclick = (e) => { e.stopPropagation(); onToggleClick(el); });
+  body.querySelectorAll('.var-opt').forEach((el) =>
+    el.onclick = (e) => { e.stopPropagation(); onVariantClick(el); });
+}
+// выбрать связанный мод: подсветить в основном списке (если есть) + показать ЕГО связи
+function selectRelMid(mid) {
+  if (!mid) return;
+  const el = [...$('treeBody').querySelectorAll('.row.leaf')].find((r) => r.dataset.mid === mid);
+  const node = allNodes().find((n) => n.mid === mid);
+  if (node) { selected.clear(); selected.add(node.iid); lastClickedIid = node.iid; renderTree(); }
+  if (el) el.scrollIntoView({ block: 'nearest' });
+  renderRelList(mid);
+}
+function toggleRelPanel() {
+  const w = $('relWrap');
+  const col = w.classList.toggle('collapsed');
+  $('relHead').querySelector('.rel-tw').textContent = col ? '▸' : '▾';
 }
 function updateActionButtons() {
   const pidx = selectedPidx();
@@ -1812,70 +1907,12 @@ function cardInfoRows(i, mid) {
     : 'Мод ещё не установлен — показаны данные из каталога (без описания).'}</div>`);
   return rows.join('');
 }
-// кликабельные связи: {name, mid}. Есть mid → развернуть полную карточку того мода ниже.
-function depChipsHtml(arr) {
-  return (arr && arr.length)
-    ? arr.map((x) => x && x.mid
-        ? `<button class="chip dep-link" data-mid="${esc(x.mid)}" title="Показать полную информацию о «${esc(x.name)}» ниже">${esc(x.name)} ▾</button>`
-        : `<span class="chip" title="Мода нет в каталоге — только имя">${esc((x && x.name) || x)}</span>`).join(' ')
-    : '<span class="sub">—</span>';
-}
-function relCountOf(i) {
-  const conf = (i.conflicts_ref && i.conflicts_ref.length) ? i.conflicts_ref : (i.conflicts || []);
-  return (i.requires || []).length + (i.dependents || []).length + conf.length;
-}
-function relTableHtml(i) {
-  const conf = (i.conflicts_ref && i.conflicts_ref.length) ? i.conflicts_ref
-    : (i.conflicts || []).map((c) => ({ name: c, mid: '' }));
-  const relRow = (k, arr, tip) => `<tr><th title="${tip}">${k}</th><td>${depChipsHtml(arr)}</td></tr>`;
-  return `<table class="rel-tbl">
-      ${relRow('Требует', i.requires, 'Моды, которые нужны этому')}
-      ${relRow('Нужен для', i.dependents, 'Моды, которые зависят от этого')}
-      ${relRow('Конфликтует', conf, 'Несовместимо одновременно')}
-    </table>`;
-}
-
 function renderModCard(card, mid, i) {
   card.querySelector('.mc-title').textContent = i.name || mid.split('/').pop();
-  const relCount = relCountOf(i);
   card.querySelector('.mc-body').innerHTML = cardInfoRows(i, mid)
-    + `<div class="mc-foot"><button class="mc-rel-toggle" type="button">🔗 Связи${relCount ? ' <span class="mc-relcnt">' + relCount + '</span>' : ''}</button>
-        <span class="mc-drag-hint" title="Перетаскивайте за шапку · тяните за угол для размера · ▾ свернуть">⠿ окно подвижное</span></div>
-       <div class="mc-rel hidden">${relTableHtml(i)}<div class="mc-sub hidden"></div></div>`;
-
-  const body = card.querySelector('.mc-body');
-  body.querySelectorAll('.info-var').forEach((el) =>
+    + `<div class="mc-foot"><span class="mc-drag-hint" title="Перетаскивайте за шапку · тяните за угол для размера · ▾ свернуть">⠿ окно подвижное · связи мода — в списке «🔗 Связи» под таблицей</span></div>`;
+  card.querySelector('.mc-body').querySelectorAll('.info-var').forEach((el) =>
     el.onclick = () => { if (!el.classList.contains('on')) openModInfo(mid, el.dataset.key); });
-  const rel = card.querySelector('.mc-rel');
-  const relBtn = card.querySelector('.mc-rel-toggle');
-  relBtn.onclick = () => { rel.classList.toggle('hidden'); relBtn.classList.toggle('on', !rel.classList.contains('hidden')); };
-  // клик по связи → развернуть полную карточку связанного мода ВТОРОЙ таблицей ниже
-  rel.querySelectorAll('.rel-tbl .dep-link').forEach((el) =>
-    el.onclick = () => showRelated(card, el.dataset.mid));
-}
-
-// развернуть полную информацию о связанном моде во второй таблице (внутри той же карточки)
-async function showRelated(card, depMid, variant) {
-  const sub = card.querySelector('.mc-sub');
-  if (!sub) return;
-  sub.classList.remove('hidden');
-  sub.innerHTML = '<div class="mc-sub-head"><span class="mc-sub-title">Загрузка…</span><button class="mc-sub-close" title="Скрыть">✕</button></div>';
-  sub.querySelector('.mc-sub-close').onclick = () => { sub.classList.add('hidden'); sub.innerHTML = ''; };
-  let r;
-  try { r = await api().get_mod_info(depMid, variant || null); } catch (e) { r = null; }
-  if (!card.isConnected) return;
-  if (!r || !r.ok) { sub.querySelector('.mc-sub-title').textContent = 'Нет информации'; return; }
-  const j = r.info;
-  sub.innerHTML = `<div class="mc-sub-head"><span class="mc-sub-title">🔗 ${esc(j.name || depMid.split('/').pop())}</span><button class="mc-sub-close" title="Скрыть">✕</button></div>`
-    + cardInfoRows(j, depMid)
-    + `<div class="mc-subrel-lbl">Связи этого мода:</div>` + relTableHtml(j);
-  sub.querySelector('.mc-sub-close').onclick = () => { sub.classList.add('hidden'); sub.innerHTML = ''; };
-  sub.querySelectorAll('.info-var').forEach((el) =>
-    el.onclick = () => { if (!el.classList.contains('on')) showRelated(card, depMid, el.dataset.key); });
-  // связи связанного мода — навигация в той же второй таблице
-  sub.querySelectorAll('.rel-tbl .dep-link').forEach((el) =>
-    el.onclick = () => showRelated(card, el.dataset.mid));
-  sub.scrollIntoView({ block: 'nearest' });
 }
 
 // ───────── утилиты ─────────
@@ -1904,7 +1941,7 @@ const TOUR_STEPS = [
   { sel: '#addBtn', title: 'Добавить мод',
     text: 'Окно добавления: поиск по названию, выбор по цепочке Сборка → Пак → Мод или по ссылке. Можно добавить и целую сборку сразу.' },
   { sel: '#treeBody', title: 'Список модов',
-    text: 'Все моды профиля. Галочка «В профиле» включает/выключает мод, «В игре» — подключён ли он сейчас в самой игре. Слева — чекбоксы выделения (Shift — диапазон). Правый клик по строке: скрыть мод с глаз, свои теги, личная заметка (📝). Кнопка ⓘ открывает карточку мода — её можно двигать, менять размер и держать несколько сразу; внизу «🔗 Связи» покажет, что мод требует, для чего нужен и с чем конфликтует.' },
+    text: 'Все моды профиля. Галочка «В профиле» включает/выключает мод, «В игре» — подключён ли он сейчас в самой игре. Слева — чекбоксы выделения (Shift — диапазон). Правый клик по строке: скрыть мод с глаз, свои теги, личная заметка (📝 справа в строке). Кнопка ⓘ открывает карточку мода — её можно двигать, менять размер и держать несколько сразу. Под списком — сворачиваемый список «🔗 Связи»: выберите мод, и там появятся моды, которые он требует, для которых нужен и с которыми конфликтует (теми же строками).' },
   { sel: '#installBtn', title: 'Установить и обновить',
     text: 'Кнопки над списком: «Установить все» качает моды профиля; «Обновить все» (после «Проверить обновления») ставит новые версии, сохраняя ваши правки. Редкие действия спрятаны в «⋯ Ещё».' },
   { sel: '.side-tabs', title: 'Игра и Журнал',
