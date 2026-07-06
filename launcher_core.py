@@ -1621,6 +1621,9 @@ def install_descriptor(desc, mods_dir, index, token=None, progress_cb=None,
     _parallel_fetch_extract(need, mods_dir, tmp, resolve, log,
                             should_cancel=should_cancel, part_cb=part_cb, byte_cb=byte_cb,
                             sha_sink=sha_sink)
+    # убрать файлы-сироты прошлого варианта/версии этого мода (по прошлому снимку),
+    # ДО сохранения нового снимка — иначе на диске остаются лишние файлы (п.10)
+    prune_orphans_by_snapshot(mods_dir, desc, snap_dir, log)
     # снимок установки -> база для будущего 3-way merge при обновлении (Фаза 4)
     save_snapshot_from_desc(mods_dir, desc, snap_dir)
     log(f'Готово: {desc.get("id")} -> {mods_dir}')
@@ -1728,6 +1731,56 @@ def save_snapshot_from_desc(mods_dir, desc, snap_dir=None):
     flat = {rp: m['sha256'] for rp, m in desc_files_flat(desc).items()}
     return save_install_snapshot(mods_dir, desc.get('id'), desc.get('version'),
                                  flat, desc.get('source'), snap_dir)
+
+
+def prune_orphans_by_snapshot(mods_dir, desc, snap_dir=None, log=print):
+    """Удалить файлы-СИРОТЫ мода: те, что были в ПРЕДЫДУЩЕМ снимке этого мода, но
+    которых НЕТ в новом наборе `desc`, — чтобы при смене варианта/версии на диске не
+    оставались лишние файлы (напр. Lang.dat варианта, где его нет). БЕЗОПАСНО: удаляем
+    только МОДОВЫЕ файлы (в Mods) и только если их sha на диске СОВПАДАЕТ со снимком
+    (т.е. это наш неизменённый файл — правки игрока не трогаем). Вызывать ПОСЛЕ записи
+    новых файлов и ДО сохранения нового снимка. Возвращает число удалённых.
+
+    ВАЖНО: применимо только там, где ставится ПОЛНЫЙ набор мода (install_descriptor,
+    reconstruct_camp с уже слитым eff). Для одиночного пак-юнита (частичный фикс поверх
+    базы) прунить НЕЛЬЗЯ — снесёт базовые файлы."""
+    mods_dir = Path(mods_dir)
+    old = load_install_snapshot(mods_dir, desc.get('id'), snap_dir)
+    if not old:
+        return 0
+    old_flat = old.get('files') or {}
+    # install-rel новых файлов (только модовые)
+    new_rel = set()
+    for rp in desc_files_flat(desc):
+        where, rel = install_route(rp)
+        if where == 'mods' and rel is not None:
+            new_rel.add(rel.replace('\\', '/'))
+    removed, dirs = 0, set()
+    for rp, sha in old_flat.items():
+        where, rel = install_route(rp)
+        if where != 'mods' or rel is None:
+            continue                                  # игровые/корневые файлы не трогаем
+        rel = rel.replace('\\', '/')
+        if rel in new_rel:
+            continue                                  # файл остаётся в новом наборе
+        p = mods_dir / rel
+        try:
+            if p.is_file() and file_sha256(p) == sha:  # наш неизменённый файл — сирота
+                p.unlink()
+                removed += 1
+                dirs.add(p.parent)
+        except Exception:
+            pass
+    for d in sorted(dirs, key=lambda x: len(str(x)), reverse=True):
+        try:
+            cur = d
+            while cur != mods_dir and cur.is_dir() and not any(cur.iterdir()):
+                cur.rmdir(); cur = cur.parent
+        except Exception:
+            pass
+    if removed:
+        log(f'  убрано устаревших файлов мода «{desc.get("id")}»: {removed}')
+    return removed
 
 
 def fetch_blobs(index, shas, token, tmp, log=print, progress_cb=None, should_cancel=None,
