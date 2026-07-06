@@ -590,8 +590,10 @@ body.busy .toggle.click{pointer-events:none;opacity:.5;}
 .mc-collapse{flex:none;width:22px;height:22px;border:none;background:transparent;color:var(--muted);
   cursor:pointer;border-radius:6px;font-size:12px;line-height:1;}
 .mc-collapse:hover{background:var(--row-hover);color:var(--fg);}
-.mc-head .mc-title{font-weight:700;font-size:14px;color:var(--fg);flex:1;white-space:nowrap;overflow:hidden;
-  text-overflow:ellipsis;cursor:text;user-select:text;}
+.mc-head .mc-title{font-weight:700;font-size:14px;color:var(--fg);flex:1;min-width:0;overflow:hidden;
+  cursor:move;user-select:none;}
+.mc-head .mc-title-txt{display:inline-block;max-width:100%;white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis;vertical-align:bottom;cursor:text;user-select:text;}
 .mc-close{flex:none;width:24px;height:24px;border:none;background:transparent;color:var(--muted);
   cursor:pointer;border-radius:6px;font-size:14px;line-height:1;}
 .mc-close:hover{background:var(--danger);color:#fff;}

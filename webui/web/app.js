@@ -774,7 +774,8 @@ async function renderRelList(mid) {
   relMid = mid || null;
   const sub = $('relSub'), body = $('relBody');
   if (!mid) { relInfo = null; sub.textContent = '— выберите мод в списке'; body.innerHTML = ''; return; }
-  $('relWrap').classList.remove('collapsed'); $('relHead').querySelector('.rel-tw').textContent = '▾';
+  // панель НЕ разворачиваем автоматически — состояние сворачивания за пользователем (#1);
+  // содержимое обновляем всегда, чтобы при разворачивании показать текущий выбор
   sub.textContent = '— загрузка…';
   let r; try { r = await api().get_mod_info(mid, null); } catch (e) { r = null; }
   if (relMid !== mid) return;                  // успели выбрать другой мод
@@ -1813,7 +1814,7 @@ function saveCardGeom(card) {
 
 function makeCardDraggable(card, handle) {
   handle.addEventListener('mousedown', (e) => {
-    if (e.target.closest('.mc-close, .mc-collapse, .mc-title')) return;   // кнопки/имя — не тащим (имя можно выделить/скопировать)
+    if (e.target.closest('.mc-close, .mc-collapse, .mc-title-txt')) return;   // кнопки и САМ текст имени — не тащим (текст можно выделить/скопировать); пустая область шапки тащит
     bringCardFront(card);
     const r = card.getBoundingClientRect();
     const dx = e.clientX - r.left, dy = e.clientY - r.top;
@@ -1855,7 +1856,7 @@ async function openModInfo(mid, variant) {
       card.style.left = clamp(Math.max(20, window.innerWidth / 2 - 300) + off, window.innerWidth - 80) + 'px';
       card.style.top = (70 + off) + 'px';
     }
-    card.innerHTML = `<div class="mc-head"><button class="mc-collapse" title="Свернуть в заголовок">▾</button><span class="mc-title">Загрузка…</span><button class="mc-close" title="Закрыть (Esc)">✕</button></div>
+    card.innerHTML = `<div class="mc-head"><button class="mc-collapse" title="Свернуть в заголовок">▾</button><span class="mc-title"><span class="mc-title-txt">Загрузка…</span></span><button class="mc-close" title="Закрыть (Esc)">✕</button></div>
       <div class="mc-body"><div class="sub">Загрузка…</div></div>`;
     document.body.appendChild(card);
     modCards.set(mid, card);
@@ -1908,9 +1909,8 @@ function cardInfoRows(i, mid) {
   return rows.join('');
 }
 function renderModCard(card, mid, i) {
-  card.querySelector('.mc-title').textContent = i.name || mid.split('/').pop();
-  card.querySelector('.mc-body').innerHTML = cardInfoRows(i, mid)
-    + `<div class="mc-foot"><span class="mc-drag-hint" title="Перетаскивайте за шапку · тяните за угол для размера · ▾ свернуть">⠿ окно подвижное · связи мода — в списке «🔗 Связи» под таблицей</span></div>`;
+  card.querySelector('.mc-title-txt').textContent = i.name || mid.split('/').pop();
+  card.querySelector('.mc-body').innerHTML = cardInfoRows(i, mid);
   card.querySelector('.mc-body').querySelectorAll('.info-var').forEach((el) =>
     el.onclick = () => { if (!el.classList.contains('on')) openModInfo(mid, el.dataset.key); });
 }
