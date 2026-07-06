@@ -97,7 +97,7 @@ IS_RWT = bool(EMBEDDED_TOKEN)
 # из репозитория ({version, url?, notes?}). url можно оставить пустым — тогда показ без
 # ссылки на скачивание (просто «доступна новая версия»).
 # ВНИМАНИЕ: при релизе выставить реальный следующий номер (текущий публичный > 0.13.1).
-LAUNCHER_VERSION = '0.18.3'
+LAUNCHER_VERSION = '0.18.4'
 RELEASE_REF = 'state/launcher_release.json'
 # Ссылка на полную справку в репозитории (ИНСТРУКЦИЯ-ПРОСТАЯ.md, имя в percent-encoding —
 # кириллица в пути; так браузер откроет её без ручного кодирования).
@@ -659,10 +659,11 @@ class Api:
                 # выбранный вариант — если диск ему не соответствует, будет «обновление»
                 choice = (self.profile.get('variants') or {}).get(mid)
                 theirs, tcamp = None, None
-                if choice and choice in cat:
-                    theirs = self._variant_files(
-                        mid, unit_maps, cat[choice].get('default_source'))
-                    tcamp = (cat[choice].get('default_source') or '').split('/')[0] or None
+                if choice:
+                    _, csrc = self._variant_ref(choice)   # реальный или '<base>#<source>'
+                    if csrc:
+                        theirs = self._variant_files(mid, unit_maps, csrc)
+                        tcamp = csrc.split('/')[0] or None
                 if not theirs:
                     # целевая сборка = первый в порядке, где этот мод есть; проверяем ТОЛЬКО
                     # его вариант (внутри сборки — лучший по совпадению файлов)
@@ -1060,6 +1061,10 @@ class Api:
         if not cat or not mid:
             return []
         chosen = (self.profile.get('variants') or {}).get(mid.split('@', 1)[0])
+        # versions_differ: метка = камп ВЫБРАННОГО источника (или дефолтного варианта)
+        if self._source_variants(mid):
+            _, src = self._variant_ref(self._chosen_variant(mid))
+            return [src.split('/')[0]] if src and '/' in src else []
         key = chosen if (chosen and chosen in cat) else self._installed_variant_key(mid)
         if key and key in cat:
             return sorted(self._entry_camps(cat[key]))
@@ -1069,10 +1074,61 @@ class Api:
         return sorted(camps)
 
     # ───────── выбор варианта Pol/Shu в общей папке ─────────
+    def _source_variants(self, mid):
+        """versions_differ-мод с ОДНИМ каталожным ключом и НЕСКОЛЬКИМИ источниками (один
+        и тот же мод в разных паках с разными билдами, напр. Huk'sShit/Mod_Interface из
+        solyanka/huk/universe): синтетические варианты по ИСТОЧНИКУ. Возвращает
+        [(key, source, subentry)], key = '<base>#<source>'. [] если это не такой случай
+        (обычный мод или Pol/Shu с несколькими @-ключами — там своя схема)."""
+        cat = self._catalog_cache or {}
+        base = mid.split('@', 1)[0]
+        by_base = self._variant_index()[0]
+        if len(by_base.get(base) or []) != 1:        # есть @-сиблинги (Pol/Shu) → не наш случай
+            return []
+        e = cat.get(base)
+        if not e or not e.get('versions_differ'):
+            return []
+        subs = [v for v in (e.get('variants') or []) if v.get('source')]
+        if len(subs) < 2:
+            return []
+        return [(f'{base}#{v["source"]}', v['source'], v) for v in subs]
+
+    def _variant_ref(self, key):
+        """Разобрать ключ варианта в (base_key, source). Реальный каталожный ключ →
+        (key, default_source); синтетический '<base>#<source>' → (base, source)."""
+        cat = self._catalog_cache or {}
+        if key and '#' in key and key.rsplit('#', 1)[0] in cat:
+            base, src = key.rsplit('#', 1)
+            return base, src
+        e = cat.get(key) or {}
+        return (key, e.get('default_source')) if key in cat else (key, None)
+
+    def _variant_sub(self, key):
+        """Под-запись variants[] для варианта key (для карточки/имени/зависимостей).
+        Для реального каталожного ключа — сам cat[key]."""
+        cat = self._catalog_cache or {}
+        if key in cat:
+            return cat[key]
+        base, src = self._variant_ref(key)
+        e = cat.get(base) or {}
+        for v in e.get('variants', []):
+            if v.get('source') == src:
+                return {**e, **v, 'source': src}     # мета берём с базы, уточняем вариантом
+        return e
+
     def _variants_of(self, mid):
         """Список вариантов папки mid для переключателя: [{key,name,camps}]. Пусто, если
-        вариант один (переключать нечего)."""
+        вариант один. Покрывает и Pol/Shu (@-ключи), и versions_differ (по источникам)."""
         cat = self._catalog_cache or {}
+        sv = self._source_variants(mid)
+        if sv:                                        # versions_differ: варианты по источнику
+            out = []
+            for k, src, v in sv:
+                unit = src.split('/')[-1]             # различаем источники по имени пака
+                out.append({'key': k, 'name': unit,
+                            'camps': [src.split('/')[0]] if '/' in src else []})
+            out.sort(key=lambda x: x['name'])
+            return out
         keys = self._variant_keys(mid)
         if len(keys) < 2:
             return []
@@ -1086,11 +1142,25 @@ class Api:
 
     def _chosen_variant(self, mid):
         """Выбранный игроком вариант папки mid (profile['variants']) или, если не
-        выбирал, — установленный на диске. '' если не определить."""
+        выбирал, — установленный на диске / дефолтный. '' если не определить."""
+        cat = self._catalog_cache or {}
         base = mid.split('@', 1)[0]
         ch = (self.profile.get('variants') or {}).get(base)
-        if ch and ch in (self._catalog_cache or {}):
+        if ch and ch in cat:
             return ch
+        sv = self._source_variants(mid)
+        if sv:                                        # versions_differ: по источнику
+            keys = {k for k, _s, _v in sv}
+            if ch in keys:
+                return ch                             # синтетический выбор игрока
+            inst = self._installed_variant_key(mid)
+            if inst in keys:
+                return inst
+            e = cat.get(base) or {}
+            for k, s, _v in sv:                       # дефолт — по default_source
+                if s == e.get('default_source'):
+                    return k
+            return sv[0][0]
         return self._installed_variant_key(mid) or ''
 
     def set_variant(self, mid, key):
@@ -1098,15 +1168,19 @@ class Api:
         помечаем мод как требующий обновления (перекачки); иначе снимаем пометку."""
         cat = self._catalog_cache or {}
         base = mid.split('@', 1)[0]
-        if key not in cat:
+        sv_keys = {k for k, _s, _v in self._source_variants(mid)}
+        if key not in cat and key not in sv_keys:
             return {'ok': False, 'error': 'Неизвестный вариант.'}
         self.profile.setdefault('variants', {})[base] = key
         self._save_profile()
         installed = self._installed_variant_key(mid)
-        want_name = (cat.get(key) or {}).get('name')
-        inst_name = (cat.get(installed) or {}).get('name') if installed else None
-        if key != installed and want_name != inst_name:
-            self._updates[base] = {'n': 1, 'variant': key}   # нужно перекачать вариант
+        # различаем варианты по ИСТОЧНИКУ (у versions_differ имена совпадают, по имени
+        # не отличить); source отсутствует → считаем «другим», т.е. предлагаем перекачку
+        _, want_src = self._variant_ref(key)
+        inst_src = self._variant_ref(installed)[1] if installed else None
+        if key != installed and want_src != inst_src:
+            self._updates[base] = {'n': 1, 'variant': key,
+                                   'camp': (want_src.split('/')[0] if want_src else None)}
         else:
             self._updates.pop(base, None)
         self._emit('tree_dirty')
@@ -1252,6 +1326,19 @@ class Api:
             info = self._card_from_entry(cat[variant])
             shown_key = variant
             mi_ok = (variant == self._installed_variant_key(mid))
+        elif variant and '#' in variant and self._variant_ref(variant)[1]:
+            # versions_differ: карточка конкретного ИСТОЧНИКА (мета с базы, зависимости варианта)
+            base_k, _src = self._variant_ref(variant)
+            e = cat.get(base_k) or {}
+            sub = self._variant_sub(variant)
+            info = {'name': e.get('name', ''), 'authors': e.get('author', ''),
+                    'small': e.get('description', ''),
+                    'full': core._strip_color(e.get('full_description', '')),
+                    'full_raw': e.get('full_description', ''),
+                    'requires': sub.get('depends', []), 'conflicts': sub.get('conflicts', []),
+                    'section': e.get('section', ''), 'priority': sub.get('priority', '')}
+            shown_key = variant
+            mi_ok = (variant == self._chosen_variant(mid))
         else:
             if mid:
                 p = self._mi_path(mid)
@@ -2577,14 +2664,17 @@ class Api:
             desc = info = None
             # выбор варианта игроком (переключатель Pol/Shu) — ставим ИМЕННО его
             choice = (self.profile.get('variants') or {}).get(mid.split('@', 1)[0])
-            if choice and choice in cat:
-                src = cat[choice].get('default_source')
-                self.log(f'Выбранный вариант: {cat[choice].get("name")} ({src}).')
-                d = self._full_variant_descriptor(choice, cat, repo, tok, source=src)
-                if d:
-                    desc, info = d, {'source': src}
-                else:
-                    self.log('Дескриптор выбранного варианта не найден — подбираю по диску.')
+            if choice:
+                base_k, src = self._variant_ref(choice)   # реальный ключ или '<base>#<source>'
+                if src and base_k in cat:
+                    nm = self._variant_sub(choice).get('name') or base_k.split('/')[-1]
+                    self.log(f'Выбранный вариант: {nm} ({src}).')
+                    d = self._full_variant_descriptor(base_k, cat, repo, tok, source=src)
+                    if d:
+                        d = dict(d); d['id'] = base_k
+                        desc, info = d, {'source': src}
+                    else:
+                        self.log('Дескриптор выбранного варианта не найден — подбираю по диску.')
             if not desc and tcamp:
                 # целевая сборка известен из порядка проверки — берём его вариант (полный
                 # набор base+fixes сборки), а не подбор по лучшему совпадению среди всех
