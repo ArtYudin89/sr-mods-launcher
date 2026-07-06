@@ -80,5 +80,34 @@ check('карточка huk: есть конфликт', [x['name'] for x in inf
 check('карточка solyanka: конфликтов нет', info_s['conflicts_ref'] == [], str(info_s.get('conflicts_ref')))
 check('в карточке показан выбранный вариант', info_s['variant_key'] == k_sol)
 
+# 7) file-match детект установленного источника (versions_differ: имена совпадают,
+#    различить можно только по байтам файлов на диске)
+b = app.Api.__new__(app.Api)
+b.busy = False; b._cancel = threading.Event(); b._updates = {}
+b.profile = {'name': 't', 'game_path': '', 'mods': [], 'enabled': [], 'variants': {}}
+b._save_profile = lambda: None; b._emit = lambda *x, **k: None; b.log = lambda *x: None
+b._camps_idx = None; b._descs = {}; b._names = {}
+b._catalog_cache = a._catalog_cache
+b._catalog_entry = lambda m: b._catalog_cache.get(m)
+huk = {f"{mid}/ModuleInfo.txt": 'mi_h', f"{mid}/CFG/Data.dat": 'd_h'}
+sol = {f"{mid}/ModuleInfo.txt": 'mi_s', f"{mid}/CFG/Data.dat": 'd_s',
+       f"{mid}/CFG/Rus/Lang.dat": 'lang'}      # solyanka несёт Lang.dat, huk — нет
+uni = {f"{mid}/ModuleInfo.txt": 'mi_u'}
+b._pub_cache_all = [('redux/huk_mods', huk), ('redux/solyanka_main', sol),
+                    ('universe/universe_prochee', uni)]
+b._disk_index = {'mods': {mid: {'files': {r: {'sha': s} for r, s in sol.items()}}}}
+check('детект установленного источника = solyanka',
+      b._installed_variant_key(mid) == f"{mid}#redux/solyanka_main", b._installed_variant_key(mid))
+check('_chosen_variant следует за диском (solyanka)',
+      b._chosen_variant(mid) == f"{mid}#redux/solyanka_main", b._chosen_variant(mid))
+check('метка сборки установленного = redux', b._camps_of(mid) == ['redux'], str(b._camps_of(mid)))
+b._disk_index = {'mods': {mid: {'files': {r: {'sha': s} for r, s in huk.items()}}}}
+check('детект переключается на huk при смене файлов на диске',
+      b._installed_variant_key(mid) == f"{mid}#redux/huk_mods", b._installed_variant_key(mid))
+b._pub_cache_all = None                          # холодный кэш → без форс-загрузки
+check('холодный кэш → детект None', b._installed_source_key(mid) is None)
+check('_chosen_variant при холодном кэше = default_source',
+      b._chosen_variant(mid) == f"{mid}#redux/huk_mods", b._chosen_variant(mid))
+
 print(f'\n===== ИТОГ: PASS={len(PASS)} FAIL={len(FAIL)} =====')
 sys.exit(1 if FAIL else 0)

@@ -844,9 +844,20 @@ def published_files(code_man, asset_man, fork_files=None):
 COSMETIC_BASENAMES = {'lang.dat', 'cachedata.dat'}
 
 
-def is_cosmetic_rel(rel):
-    """Файл, чьи байты не стоит сверять при детекте апдейта без снимка (локализация/кэш)."""
-    return (rel or '').replace('\\', '/').rsplit('/', 1)[-1].lower() in COSMETIC_BASENAMES
+def is_cosmetic_rel(rel, fileset=None):
+    """Файл, чьи байты не стоит сверять при детекте апдейта без снимка (локализация/кэш).
+    Помимо известных имён (Lang.dat/CacheData.dat) — ЛЮБОЙ .dat, скомпилированный из
+    соседнего .txt того же имени в наборе мода (Main.dat←Main.txt и т.п.): игра
+    пересобирает .dat из .txt, поэтому его байтовый дрейф у скачавших вручную — не
+    обновление. fileset (install-rel набора мода, напр. `theirs`) включает эвристику;
+    агрегатор помечает те же файлы авторитетно в desc['cosmetic'] (см. _cosmetic_installs)."""
+    low = (rel or '').replace('\\', '/').lower()
+    if low.rsplit('/', 1)[-1] in COSMETIC_BASENAMES:
+        return True
+    if fileset and low.endswith('.dat'):
+        stem = low[:-4]
+        return any((k or '').replace('\\', '/').lower() == stem + '.txt' for k in fileset)
+    return False
 
 
 def plan_actionable_sha(theirs, base, disk):
@@ -865,7 +876,7 @@ def plan_actionable_sha(theirs, base, disk):
         elif msha == tsha:
             pass                         # unchanged
         elif bsha is None:
-            if not is_cosmetic_rel(rel):
+            if not is_cosmetic_rel(rel, theirs):
                 n += 1                   # нет базы → отличие = обновление (кроме косметики)
         elif msha == bsha:
             n += 1                       # update: мод изменил, игрок не трогал

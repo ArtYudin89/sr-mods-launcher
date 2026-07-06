@@ -97,7 +97,7 @@ IS_RWT = bool(EMBEDDED_TOKEN)
 # из репозитория ({version, url?, notes?}). url можно оставить пустым — тогда показ без
 # ссылки на скачивание (просто «доступна новая версия»).
 # ВНИМАНИЕ: при релизе выставить реальный следующий номер (текущий публичный > 0.13.1).
-LAUNCHER_VERSION = '0.18.4'
+LAUNCHER_VERSION = '0.18.5'
 RELEASE_REF = 'state/launcher_release.json'
 # Ссылка на полную справку в репозитории (ИНСТРУКЦИЯ-ПРОСТАЯ.md, имя в percent-encoding —
 # кириллица в пути; так браузер откроет её без ручного кодирования).
@@ -1032,12 +1032,47 @@ class Api:
         pick = match[0] if match else (mid if mid in cat else keys[0])
         return (pick, cat.get(pick) or {})
 
+    def _disk_files(self, mid):
+        """Файлы установленного мода mid с диска {install_rel: sha} из индекса. {} если нет."""
+        m = ((self._disk_index or {}).get('mods') or {}).get(mid) or {}
+        return {rel: f['sha'] for rel, f in (m.get('files') or {}).items()}
+
+    def _installed_source_key(self, mid, sv=None):
+        """Синтетический ключ '<base>#<source>' ИСТОЧНИКА versions_differ-мода, чьи файлы
+        лучше всего совпадают с тем, что реально лежит на диске (cover, match). Имена
+        вариантов у versions_differ совпадают (по ModuleInfo Name не различить) — детект
+        только по байтам, стиль _best_unit_files/pick_disk_variant. None, если данных нет
+        (каталог/манифесты ещё не прогреты — не форсируем сетевую загрузку в рендере)."""
+        sv = sv if sv is not None else self._source_variants(mid)
+        if not sv:
+            return None
+        disk = self._disk_files(mid)
+        unit_maps = self._pub_cache_all            # только прогретый кэш, без форс-загрузки
+        if not disk or unit_maps is None:
+            return None
+        best, best_score = None, (0, 0)
+        for key, src, _v in sv:
+            fmap = self._variant_files(mid, unit_maps, src)
+            if not fmap:
+                continue
+            cover = sum(1 for r in fmap if r in disk)
+            match = sum(1 for r, s in fmap.items() if disk.get(r) == s)
+            score = (match, cover)
+            if score > best_score:
+                best_score, best = score, key
+        return best                                # None, если ни один вариант не лёг на диск
+
     def _installed_variant_key(self, mid):
-        """Ключ каталога ИМЕННО установленного варианта папки mid — по ModuleInfo Name
-        (Pol/Shu-папка общая, на диске один вариант). None, если не определить."""
+        """Ключ каталога/источника ИМЕННО установленного варианта папки mid. Pol/Shu —
+        по ModuleInfo Name (папка общая, на диске один вариант). versions_differ (имена
+        совпадают) — по совпадению файлов с диском (_installed_source_key). None, если не
+        определить."""
         cat = self._catalog_cache or {}
         if '@' in mid and mid in cat:
             return mid                               # явный вариант
+        sv = self._source_variants(mid)
+        if sv:                                       # versions_differ → различаем по байтам
+            return self._installed_source_key(mid, sv)
         cands = self._variant_keys(mid)
         if len(cands) == 1:
             return cands[0]

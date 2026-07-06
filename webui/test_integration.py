@@ -1352,6 +1352,23 @@ try:
     )
     check('T54: update со снимком (msha==bsha) → n=1', 1, n)
 
+    print('\n--- T54b: косметика без снимка не считается обновлением ---')
+    # Lang.dat (известное имя) + Main.dat (производный от соседнего Main.txt) дрейфнули,
+    # снимка нет → не обновление. Обычный отличающийся файл — обновление.
+    n = core.plan_actionable_sha(
+        theirs={'M/CFG/Rus/Lang.dat': SHA_V2, 'M/CFG/Main.dat': SHA_V2,
+                'M/CFG/Main.txt': SHA_V1, 'M/DATA/data.txt': SHA_V1},
+        base={},
+        disk={'M/CFG/Rus/Lang.dat': SHA_V1, 'M/CFG/Main.dat': SHA_V1,
+              'M/CFG/Main.txt': SHA_V1, 'M/DATA/data.txt': SHA_V1},
+    )
+    check('T54b: Lang.dat+производный Main.dat дрейф → 0 обновлений', 0, n)
+    n = core.plan_actionable_sha(
+        theirs={'M/CFG/Binary.dat': SHA_V2},   # .dat без соседнего .txt — реальный апдейт
+        base={}, disk={'M/CFG/Binary.dat': SHA_V1},
+    )
+    check('T54b: .dat без соседнего .txt → 1 обновление', 1, n)
+
 finally:
     g.cleanup()
 
