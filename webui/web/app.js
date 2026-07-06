@@ -291,9 +291,8 @@ function wireUI() {
 
   // закрытие по клику на фон — только для «безопасных» модалок
   // (confirm/merge завязаны на состояние бэкенда → закрываются только кнопками)
-  ['settingsOverlay', 'profileOverlay', 'addOverlay', 'infoOverlay', 'compatOverlay', 'helpOverlay', 'promptOverlay'].forEach((id) =>
+  ['settingsOverlay', 'profileOverlay', 'addOverlay', 'compatOverlay', 'helpOverlay', 'promptOverlay'].forEach((id) =>
     $(id).onclick = (e) => { if (e.target === $(id)) hide(id); });
-  $('infoCloseBtn').onclick = () => hide('infoOverlay');
   $('compatCloseBtn').onclick = () => hide('compatOverlay');
   // контекстное меню (ПКМ)
   $('ctxOpenMod').onclick = () => { if (ctxMid) api().open_mod_folder(ctxMid); hideCtxMenu(); };
@@ -337,7 +336,13 @@ function wireUI() {
     if (!$('logCtxMenu').classList.contains('hidden')) { hideLogCtxMenu(); return; }
     if (!$('moreMenu').classList.contains('hidden')) { hideMoreMenu(); return; }
     if (!$('filterPop').classList.contains('hidden')) { $('filterPop').classList.add('hidden'); return; }
-    for (const id of ['helpOverlay', 'infoOverlay', 'compatOverlay', 'addOverlay', 'profileOverlay', 'settingsOverlay']) {
+    // Esc закрывает верхнюю (последнюю по z-index) плавающую карточку мода
+    if (modCards.size) {
+      let top = null, tz = -1;
+      modCards.forEach((c, m) => { const z = +c.style.zIndex || 0; if (z >= tz) { tz = z; top = m; } });
+      if (top) { closeModCard(top); return; }
+    }
+    for (const id of ['helpOverlay', 'compatOverlay', 'addOverlay', 'profileOverlay', 'settingsOverlay']) {
       if (!$(id).classList.contains('hidden')) { hide(id); return; }
     }
     if (!$('confirmOverlay').classList.contains('hidden')) { $('confirmCancel').click(); return; }
@@ -656,7 +661,7 @@ function leafRow(n, lvl) {
   const hidMark = n.hidden ? '<span class="hid-mark" title="Скрыт из списка (виден, т.к. включён показ скрытых)">🙈</span>' : '';
   return `<div class="row leaf lvl${lvl}${sel}${hid}" data-iid="${esc(n.iid)}" role="treeitem" aria-level="${lvl}" aria-selected="${isSel ? 'true' : 'false'}" aria-label="${esc(disp)}, ${esc(n.status)}${n.in_profile ? ', в профиле' : ''}${n.hidden ? ', скрыт' : ''}">
     <div class="name">${check}<span class="tw">·</span>
-      <span class="label-wrap"><span class="label">${hidMark}${esc(disp)}${labelBadges(n.labels)}${userTags(n.tags)}${noteIc}${alt}${date}</span>${variantSwitch(n)}${desc}</span>${info}</div>
+      <span class="label-wrap"><span class="name-line">${hidMark}<span class="label">${esc(disp)}</span>${labelBadges(n.labels)}${userTags(n.tags)}${noteIc}${alt}${date}</span>${variantSwitch(n)}${desc}</span>${info}</div>
     <div class="cell">${esc(colValue(n) || '')}</div>
     <div class="cell">${inGame}</div>
     <div class="cell">${inProf}</div>
@@ -1688,33 +1693,109 @@ function openCtxMenu(e, iid) {
 }
 function hideCtxMenu() { $('ctxMenu').classList.add('hidden'); }
 
-// ───────── окно (i): информация о моде ─────────
+// ───────── окно (i): плавающие немодальные карточки мода ─────────
+// Карточки — не модалки: перетаскиваются за заголовок, ресайзятся за угол, сворачиваются
+// в шапку, и можно держать НЕСКОЛЬКО открытыми (сравнить два мода). Дедуп по mid.
+// «Связи» разворачиваются ВТОРОЙ таблицей ПОД основной (в том же окне, не попап): клик по
+// связи показывает ПОЛНУЮ карточку связанного мода ниже, с такой же информацией.
+const modCards = new Map();     // mid -> элемент .mod-card
+let cardZ = 500;                // текущий верхний z-index (растёт при фокусе карточки)
+
+function bringCardFront(card) { card.style.zIndex = String(++cardZ); }
+
+// геометрия (позиция+размер) запоминается между открытиями (localStorage)
+function loadCardGeom() {
+  try { return JSON.parse(localStorage.getItem('modCardGeom') || 'null'); } catch (e) { return null; }
+}
+function saveCardGeom(card) {
+  try {
+    localStorage.setItem('modCardGeom', JSON.stringify({
+      left: parseInt(card.style.left) || 0, top: parseInt(card.style.top) || 0,
+      width: card.offsetWidth, height: card.offsetHeight,
+    }));
+  } catch (e) {}
+}
+
+function makeCardDraggable(card, handle) {
+  handle.addEventListener('mousedown', (e) => {
+    if (e.target.closest('.mc-close, .mc-collapse, .mc-title')) return;   // кнопки/имя — не тащим (имя можно выделить/скопировать)
+    bringCardFront(card);
+    const r = card.getBoundingClientRect();
+    const dx = e.clientX - r.left, dy = e.clientY - r.top;
+    card.classList.add('dragging');
+    const move = (ev) => {
+      let x = ev.clientX - dx, y = ev.clientY - dy;
+      x = Math.max(2, Math.min(x, window.innerWidth - 60));
+      y = Math.max(2, Math.min(y, window.innerHeight - 30));
+      card.style.left = x + 'px'; card.style.top = y + 'px';
+    };
+    const up = () => { card.classList.remove('dragging'); saveCardGeom(card); document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up); };
+    document.addEventListener('mousemove', move);
+    document.addEventListener('mouseup', up);
+    e.preventDefault();
+  });
+}
+
+function closeModCard(mid) {
+  const c = modCards.get(mid);
+  if (c) { if (c._ro) c._ro.disconnect(); c.remove(); modCards.delete(mid); }
+}
+
 async function openModInfo(mid, variant) {
   if (!mid) return;
-  $('infoTitle').textContent = mid.split('/').pop();
-  $('infoBody').innerHTML = '<div class="sub">Загрузка…</div>';
-  show('infoOverlay');
+  let card = modCards.get(mid);
+  if (!card) {
+    card = document.createElement('div');
+    card.className = 'mod-card';
+    // геометрия из памяти + каскад-смещение, если уже открыты другие карточки
+    const g = loadCardGeom();
+    const off = modCards.size * 26;
+    const clamp = (v, max) => Math.max(2, Math.min(v, max));
+    if (g) {
+      card.style.left = clamp((g.left || 40) + off, window.innerWidth - 80) + 'px';
+      card.style.top = clamp((g.top || 60) + off, window.innerHeight - 40) + 'px';
+      if (g.width) card.style.width = g.width + 'px';
+      if (g.height) card.style.height = g.height + 'px';
+    } else {
+      card.style.left = clamp(Math.max(20, window.innerWidth / 2 - 300) + off, window.innerWidth - 80) + 'px';
+      card.style.top = (70 + off) + 'px';
+    }
+    card.innerHTML = `<div class="mc-head"><button class="mc-collapse" title="Свернуть в заголовок">▾</button><span class="mc-title">Загрузка…</span><button class="mc-close" title="Закрыть (Esc)">✕</button></div>
+      <div class="mc-body"><div class="sub">Загрузка…</div></div>`;
+    document.body.appendChild(card);
+    modCards.set(mid, card);
+    makeCardDraggable(card, card.querySelector('.mc-head'));
+    card.querySelector('.mc-close').onclick = () => closeModCard(mid);
+    const collBtn = card.querySelector('.mc-collapse');
+    collBtn.onclick = () => {
+      const c = card.classList.toggle('collapsed');
+      collBtn.textContent = c ? '▸' : '▾';
+      collBtn.title = c ? 'Развернуть' : 'Свернуть в заголовок';
+    };
+    card.addEventListener('mousedown', () => bringCardFront(card));
+    // ресайз за угол (CSS resize:both) → запоминаем размер
+    if (window.ResizeObserver) {
+      card._ro = new ResizeObserver(() => { clearTimeout(card._rot); card._rot = setTimeout(() => saveCardGeom(card), 250); });
+      card._ro.observe(card);
+    }
+  }
+  bringCardFront(card);
   let r;
   try { r = await api().get_mod_info(mid, variant || null); } catch (e) { r = null; }
-  if (!r || !r.ok) { $('infoBody').innerHTML = '<div class="sub">Нет информации (ModuleInfo не найден).</div>'; return; }
-  const i = r.info;
-  $('infoTitle').textContent = i.name || mid.split('/').pop();
+  if (!modCards.has(mid)) return;                    // карточку закрыли, пока грузилось
+  if (!r || !r.ok) { card.querySelector('.mc-body').innerHTML = '<div class="sub">Нет информации (ModuleInfo не найден).</div>'; return; }
+  renderModCard(card, mid, r.info);
+}
+
+// полные строки карточки (вариант/авторы/кратко/описание/раздел/расположение) — общие
+// для основной карточки и для развёрнутой ниже связанной (одинаковая полнота информации)
+function cardInfoRows(i, mid) {
   const para = (t) => esc(t).replace(/\n/g, '<br>');
-  const chips = (arr) => (arr && arr.length)
-    ? arr.map((x) => `<span class="chip">${esc(x)}</span>`).join(' ') : '<span class="sub">—</span>';
-  // зависимости в виде кликабельных чипов: {name, mid}. Есть mid → ведёт в окно (i) того мода.
-  const depChips = (arr) => (arr && arr.length)
-    ? arr.map((x) => x && x.mid
-        ? `<button class="chip dep-link" data-mid="${esc(x.mid)}" title="Открыть карточку «${esc(x.name)}»">${esc(x.name)} ↗</button>`
-        : `<span class="chip" title="Мода нет в каталоге — только имя">${esc((x && x.name) || x)}</span>`).join(' ')
-    : '<span class="sub">—</span>';
   const rows = [];
-  // переключатель вариантов Pol/Shu прямо в окне (i): посмотреть описание обоих
   if (i.variants && i.variants.length > 1) {
     const tabs = i.variants.map((v) => {
       const on = v.key === i.variant_key ? ' on' : '';
-      const tag = (v.camps || []).filter((c) => c !== 'shared')
-        .map((c) => CAMP_BADGE[c] || c).join(',');
+      const tag = (v.camps || []).filter((c) => c !== 'shared').map((c) => CAMP_BADGE[c] || c).join(',');
       return `<button class="var-opt info-var${on}" data-key="${esc(v.key)}"
         title="Показать описание варианта «${esc(v.name)}»${tag ? ' [' + esc(tag) + ']' : ''}">${esc(v.name)}${tag ? ' <span class="sub">' + esc(tag) + '</span>' : ''}</button>`;
     }).join('');
@@ -1722,25 +1803,79 @@ async function openModInfo(mid, variant) {
   }
   if (i.authors) rows.push(`<div class="i-row"><div class="i-k">Авторы</div><div class="i-v">${para(i.authors)}</div></div>`);
   if (i.small) rows.push(`<div class="i-row"><div class="i-k">Кратко</div><div class="i-v">${para(i.small)}</div></div>`);
-  // полное описание: HTML с цветовой разметкой (<clr>) приходит готовым из бэкенда
-  // (color_to_html — текст уже экранирован, оставлены только наши <span>/<br>)
   if (i.full) rows.push(`<div class="i-row"><div class="i-k">Описание</div><div class="i-v">${i.full_html || para(i.full)}</div></div>`);
-  if (i.requires && i.requires.length) rows.push(`<div class="i-row"><div class="i-k">Требует</div><div class="i-v">${depChips(i.requires)}</div></div>`);
-  if (i.dependents && i.dependents.length) rows.push(`<div class="i-row"><div class="i-k">Нужен для</div><div class="i-v" title="Моды, которые зависят от этого">${depChips(i.dependents)}</div></div>`);
-  if (i.conflicts && i.conflicts.length) rows.push(`<div class="i-row"><div class="i-k">Конфликтует</div><div class="i-v">${depChips(i.conflicts_ref && i.conflicts_ref.length ? i.conflicts_ref : i.conflicts.map((c) => ({ name: c, mid: '' })))}</div></div>`);
   if (i.section) rows.push(`<div class="i-row"><div class="i-k">Раздел</div><div class="i-v">${esc(i.section)}</div></div>`);
   rows.push(`<div class="i-row"><div class="i-k">Расположение</div><div class="i-v"><code>${esc(i.location || '')}</code></div></div>`);
   const multi = i.variants && i.variants.length > 1;
   if (!i.installed) rows.push(`<div class="note" style="margin-top:8px">${multi
     ? 'Показан вариант из каталога — на диске может стоять другой.'
     : 'Мод ещё не установлен — показаны данные из каталога (без описания).'}</div>`);
-  $('infoBody').innerHTML = rows.join('');
-  // переключение вариантов внутри окна (i)
-  $('infoBody').querySelectorAll('.info-var').forEach((el) =>
+  return rows.join('');
+}
+// кликабельные связи: {name, mid}. Есть mid → развернуть полную карточку того мода ниже.
+function depChipsHtml(arr) {
+  return (arr && arr.length)
+    ? arr.map((x) => x && x.mid
+        ? `<button class="chip dep-link" data-mid="${esc(x.mid)}" title="Показать полную информацию о «${esc(x.name)}» ниже">${esc(x.name)} ▾</button>`
+        : `<span class="chip" title="Мода нет в каталоге — только имя">${esc((x && x.name) || x)}</span>`).join(' ')
+    : '<span class="sub">—</span>';
+}
+function relCountOf(i) {
+  const conf = (i.conflicts_ref && i.conflicts_ref.length) ? i.conflicts_ref : (i.conflicts || []);
+  return (i.requires || []).length + (i.dependents || []).length + conf.length;
+}
+function relTableHtml(i) {
+  const conf = (i.conflicts_ref && i.conflicts_ref.length) ? i.conflicts_ref
+    : (i.conflicts || []).map((c) => ({ name: c, mid: '' }));
+  const relRow = (k, arr, tip) => `<tr><th title="${tip}">${k}</th><td>${depChipsHtml(arr)}</td></tr>`;
+  return `<table class="rel-tbl">
+      ${relRow('Требует', i.requires, 'Моды, которые нужны этому')}
+      ${relRow('Нужен для', i.dependents, 'Моды, которые зависят от этого')}
+      ${relRow('Конфликтует', conf, 'Несовместимо одновременно')}
+    </table>`;
+}
+
+function renderModCard(card, mid, i) {
+  card.querySelector('.mc-title').textContent = i.name || mid.split('/').pop();
+  const relCount = relCountOf(i);
+  card.querySelector('.mc-body').innerHTML = cardInfoRows(i, mid)
+    + `<div class="mc-foot"><button class="mc-rel-toggle" type="button">🔗 Связи${relCount ? ' <span class="mc-relcnt">' + relCount + '</span>' : ''}</button>
+        <span class="mc-drag-hint" title="Перетаскивайте за шапку · тяните за угол для размера · ▾ свернуть">⠿ окно подвижное</span></div>
+       <div class="mc-rel hidden">${relTableHtml(i)}<div class="mc-sub hidden"></div></div>`;
+
+  const body = card.querySelector('.mc-body');
+  body.querySelectorAll('.info-var').forEach((el) =>
     el.onclick = () => { if (!el.classList.contains('on')) openModInfo(mid, el.dataset.key); });
-  // кликабельные зависимости: открыть карточку связанного мода (второй попап поверх)
-  $('infoBody').querySelectorAll('.dep-link').forEach((el) =>
-    el.onclick = () => openModInfo(el.dataset.mid));
+  const rel = card.querySelector('.mc-rel');
+  const relBtn = card.querySelector('.mc-rel-toggle');
+  relBtn.onclick = () => { rel.classList.toggle('hidden'); relBtn.classList.toggle('on', !rel.classList.contains('hidden')); };
+  // клик по связи → развернуть полную карточку связанного мода ВТОРОЙ таблицей ниже
+  rel.querySelectorAll('.rel-tbl .dep-link').forEach((el) =>
+    el.onclick = () => showRelated(card, el.dataset.mid));
+}
+
+// развернуть полную информацию о связанном моде во второй таблице (внутри той же карточки)
+async function showRelated(card, depMid, variant) {
+  const sub = card.querySelector('.mc-sub');
+  if (!sub) return;
+  sub.classList.remove('hidden');
+  sub.innerHTML = '<div class="mc-sub-head"><span class="mc-sub-title">Загрузка…</span><button class="mc-sub-close" title="Скрыть">✕</button></div>';
+  sub.querySelector('.mc-sub-close').onclick = () => { sub.classList.add('hidden'); sub.innerHTML = ''; };
+  let r;
+  try { r = await api().get_mod_info(depMid, variant || null); } catch (e) { r = null; }
+  if (!card.isConnected) return;
+  if (!r || !r.ok) { sub.querySelector('.mc-sub-title').textContent = 'Нет информации'; return; }
+  const j = r.info;
+  sub.innerHTML = `<div class="mc-sub-head"><span class="mc-sub-title">🔗 ${esc(j.name || depMid.split('/').pop())}</span><button class="mc-sub-close" title="Скрыть">✕</button></div>`
+    + cardInfoRows(j, depMid)
+    + `<div class="mc-subrel-lbl">Связи этого мода:</div>` + relTableHtml(j);
+  sub.querySelector('.mc-sub-close').onclick = () => { sub.classList.add('hidden'); sub.innerHTML = ''; };
+  sub.querySelectorAll('.info-var').forEach((el) =>
+    el.onclick = () => { if (!el.classList.contains('on')) showRelated(card, depMid, el.dataset.key); });
+  // связи связанного мода — навигация в той же второй таблице
+  sub.querySelectorAll('.rel-tbl .dep-link').forEach((el) =>
+    el.onclick = () => showRelated(card, el.dataset.mid));
+  sub.scrollIntoView({ block: 'nearest' });
 }
 
 // ───────── утилиты ─────────
@@ -1769,7 +1904,7 @@ const TOUR_STEPS = [
   { sel: '#addBtn', title: 'Добавить мод',
     text: 'Окно добавления: поиск по названию, выбор по цепочке Сборка → Пак → Мод или по ссылке. Можно добавить и целую сборку сразу.' },
   { sel: '#treeBody', title: 'Список модов',
-    text: 'Все моды профиля. Галочка «В профиле» включает/выключает мод, «В игре» — подключён ли он сейчас в самой игре. Правый клик по строке — доп. действия.' },
+    text: 'Все моды профиля. Галочка «В профиле» включает/выключает мод, «В игре» — подключён ли он сейчас в самой игре. Слева — чекбоксы выделения (Shift — диапазон). Правый клик по строке: скрыть мод с глаз, свои теги, личная заметка (📝). Кнопка ⓘ открывает карточку мода — её можно двигать, менять размер и держать несколько сразу; внизу «🔗 Связи» покажет, что мод требует, для чего нужен и с чем конфликтует.' },
   { sel: '#installBtn', title: 'Установить и обновить',
     text: 'Кнопки над списком: «Установить все» качает моды профиля; «Обновить все» (после «Проверить обновления») ставит новые версии, сохраняя ваши правки. Редкие действия спрятаны в «⋯ Ещё».' },
   { sel: '.side-tabs', title: 'Игра и Журнал',

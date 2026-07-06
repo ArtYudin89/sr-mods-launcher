@@ -223,7 +223,10 @@ input:focus-visible,select:focus-visible,textarea:focus-visible,
 .row.sel{background:var(--row-sel);}
 .row .name{display:flex;align-items:center;gap:7px;min-width:0;overflow:hidden;}
 .row .name .tw{width:14px;color:var(--muted);text-align:center;flex:none;cursor:pointer;font-size:11px;}
-.row .name .label{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.row .name .name-line{display:flex;align-items:center;min-width:0;}
+.row .name .name-line>:not(.label){flex:none;}   /* бейджи/теги/📝/дата — всегда видны, не клипаются */
+.row .name .label{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:0 1 auto;
+  user-select:text;cursor:text;}
 .row .name .label-wrap{display:flex;flex-direction:column;min-width:0;gap:1px;flex:1 1 auto;}
 /* переключатель варианта не должен вылезать за колонку «Мод» при узком окне */
 .row .name .var-switch{max-width:100%;overflow:hidden;}
@@ -555,3 +558,57 @@ body.busy .toggle.click{pointer-events:none;opacity:.5;}
 #promptOverlay input,#promptOverlay textarea{background:var(--panel-2);border:1px solid var(--line);
   border-radius:7px;padding:8px 10px;color:var(--fg);font-family:inherit;font-size:13px;box-sizing:border-box;}
 #promptOverlay textarea{resize:vertical;}
+/* ───────── плавающие карточки мода (немодальные, перетаскиваемые, ресайз, несколько сразу) ───────── */
+.mod-card{position:fixed;width:520px;height:auto;min-width:340px;min-height:150px;max-width:94vw;max-height:92vh;
+  display:flex;flex-direction:column;resize:both;overflow:hidden;
+  background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);}
+.mod-card.dragging{box-shadow:0 12px 40px rgba(0,0,0,.5);}
+.mod-card.dragging .mc-body{user-select:none;}
+.mod-card.collapsed{height:auto!important;min-height:0;resize:none;}
+.mod-card.collapsed .mc-body{display:none;}
+.mc-head{display:flex;align-items:center;gap:8px;padding:9px 12px;cursor:move;flex:none;
+  background:var(--panel-2);border-bottom:1px solid var(--line);}
+.mc-collapse{flex:none;width:22px;height:22px;border:none;background:transparent;color:var(--muted);
+  cursor:pointer;border-radius:6px;font-size:12px;line-height:1;}
+.mc-collapse:hover{background:var(--row-hover);color:var(--fg);}
+.mc-head .mc-title{font-weight:700;font-size:14px;color:var(--fg);flex:1;white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis;cursor:text;user-select:text;}
+.mc-close{flex:none;width:24px;height:24px;border:none;background:transparent;color:var(--muted);
+  cursor:pointer;border-radius:6px;font-size:14px;line-height:1;}
+.mc-close:hover{background:var(--danger);color:#fff;}
+.mc-body{padding:8px 14px 12px;overflow:auto;flex:1 1 auto;}
+/* весь текст карточки выделяется/копируется (имя, описание, расположение, связи) */
+.mc-body,.mc-body *{-webkit-user-select:text;user-select:text;}
+.mod-card.dragging .mc-body,.mod-card.dragging .mc-body *{user-select:none;}
+/* вторая таблица — полная карточка связанного мода ниже (не попап) */
+.mc-sub{margin-top:10px;border-top:2px solid var(--accent);padding-top:8px;}
+.mc-sub.hidden{display:none;}
+.mc-sub-head{display:flex;align-items:center;gap:8px;margin-bottom:4px;}
+.mc-sub-title{font-weight:700;font-size:13px;color:var(--accent);flex:1;user-select:text;}
+.mc-sub-close{flex:none;width:20px;height:20px;border:none;background:transparent;color:var(--muted);
+  cursor:pointer;border-radius:5px;font-size:12px;}
+.mc-sub-close:hover{background:var(--danger);color:#fff;}
+.mc-subrel-lbl{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;margin:8px 0 2px;}
+.mod-card .i-row{display:grid;grid-template-columns:104px 1fr;gap:6px 14px;padding:7px 0;border-bottom:1px solid var(--line);}
+.mod-card .i-row:last-child{border-bottom:none;}
+.mod-card .i-k{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;padding-top:1px;}
+.mod-card .i-v{color:var(--fg);font-size:13px;line-height:1.5;word-break:break-word;}
+.mod-card .i-v code{background:var(--panel-2);border-radius:5px;padding:1px 6px;font-size:12px;}
+.mod-card .i-v .sr-clr{color:var(--accent);}
+.mod-card .chip{display:inline-block;background:var(--chip);color:var(--fg);border-radius:6px;padding:2px 8px;font-size:12px;margin:1px 0;}
+.mod-card .chip.dep-link{cursor:pointer;border:1px solid var(--line);background:var(--panel-2);font-family:inherit;}
+.mod-card .chip.dep-link:hover{border-color:var(--accent);color:var(--accent);}
+.mc-foot{display:flex;align-items:center;gap:10px;margin-top:10px;padding-top:9px;border-top:1px dashed var(--line);}
+.mc-rel-toggle{border:1px solid var(--line);background:var(--panel-2);color:var(--fg);border-radius:7px;
+  padding:5px 11px;cursor:pointer;font-family:inherit;font-size:12.5px;}
+.mc-rel-toggle:hover{border-color:var(--accent);}
+.mc-rel-toggle.on{border-color:var(--accent);color:var(--accent);}
+.mc-relcnt{display:inline-block;background:var(--accent);color:#fff;border-radius:999px;padding:0 6px;font-size:10.5px;font-weight:700;margin-left:4px;}
+.mc-drag-hint{font-size:11px;color:var(--muted);opacity:.65;margin-left:auto;white-space:nowrap;}
+.mc-rel{padding:2px 14px 12px;}
+.mc-rel.hidden{display:none;}
+.rel-tbl{width:100%;border-collapse:collapse;}
+.rel-tbl th{text-align:left;vertical-align:top;width:96px;font-size:11px;color:var(--muted);
+  text-transform:uppercase;letter-spacing:.4px;padding:7px 10px 7px 0;font-weight:600;white-space:nowrap;}
+.rel-tbl td{padding:7px 0;border-bottom:1px solid var(--line);}
+.rel-tbl tr:last-child td{border-bottom:none;}
