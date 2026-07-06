@@ -1740,6 +1740,82 @@ finally:
     shutil.rmtree(_w, ignore_errors=True)
 
 # ═══════════════════════════════════════════════
+#  ГРУППА 21: reconstruct_multi — cross-entry merge + прунинг (п.10)
+# ═══════════════════════════════════════════════
+print('\n=== ГРУППА 21: reconstruct_multi cross-entry merge (п.10) ===')
+
+# Два пака несут ОДИН мод-id Huk'sShit/Mod_Interface: solyanka с уникальным Lang.dat,
+# huk без. Отдельные проходы затирали общий файл и оставляли Lang.dat сиротой. Слияние
+# в один eff + прунинг снимка это чинит.
+_HUK_DATA = b'HUK-data'; _SOL_DATA = b'SOL-data-diff'; _MI = b'MI'; _LANG = b'LANG-solyanka'
+_S_HUK, _S_SOL, _S_MI, _S_LANG = map(_sha, (_HUK_DATA, _SOL_DATA, _MI, _LANG))
+_HUK_MAN = {'files': {
+    "Mods/HuksShit/Mod_Interface/data.dat": {'sha256': _S_HUK, 'size': len(_HUK_DATA)},
+    "Mods/HuksShit/Mod_Interface/ModuleInfo.txt": {'sha256': _S_MI, 'size': len(_MI)}}}
+_SOL_MAN = {'files': {
+    "Mods/HuksShit/Mod_Interface/data.dat": {'sha256': _S_SOL, 'size': len(_SOL_DATA)},
+    "Mods/HuksShit/Mod_Interface/ModuleInfo.txt": {'sha256': _S_MI, 'size': len(_MI)},
+    "Mods/HuksShit/Mod_Interface/CFG/Rus/Lang.dat": {'sha256': _S_LANG, 'size': len(_LANG)}}}
+_M_IDX = {'blobs': {_S_HUK: {'chunk': 'c1'}, _S_SOL: {'chunk': 'c1'},
+                    _S_MI: {'chunk': 'c1'}, _S_LANG: {'chunk': 'c1'}},
+          'chunks': {'c1': {'url': 'http://fake/c1', 'store': 'hf'}}}
+
+def _m_rfb(repo, path, token, should_cancel=None, branch=None):
+    if path == 'state/asset_index.json':
+        return json.dumps(_M_IDX).encode()
+    tbl = {'mods/redux/huk_mods/code.manifest.json': _HUK_MAN,
+           'mods/redux/huk_mods/assets.manifest.json': _EMPTY_MAN,
+           'mods/redux/solyanka_main/code.manifest.json': _SOL_MAN,
+           'mods/redux/solyanka_main/assets.manifest.json': _EMPTY_MAN}
+    if path in tbl:
+        return json.dumps(tbl[path]).encode()
+    import requests
+    raise requests.HTTPError(f'404 {path}')
+
+def _m_dl(url, token, dest, progress_cb=None, should_cancel=None, byte_cb=None):
+    with _zip.ZipFile(dest, 'w') as z:
+        z.writestr(_S_HUK, _HUK_DATA); z.writestr(_S_SOL, _SOL_DATA)
+        z.writestr(_S_MI, _MI); z.writestr(_S_LANG, _LANG)
+
+_HUK = {'camp': 'redux', 'unit': 'huk_mods', 'tier': 'mod', 'fork_files': None, 'fork_index': None}
+_SOL = {'camp': 'redux', 'unit': 'solyanka_main', 'tier': 'mod', 'fork_files': None, 'fork_index': None}
+
+def _run_multi(units, mods, tmp, snap):
+    with patch.object(core, 'repo_file_bytes', side_effect=_m_rfb), \
+         patch.object(core, 'download_url', side_effect=_m_dl):
+        return core.reconstruct_multi('repo', units, mods, 'tok', log=lambda *_: None,
+                                      tmp_dir=tmp, prune_snap_id='__b', snap_dir=snap)
+
+_w2 = Path(tempfile.mkdtemp(prefix='multi_')); _snap = _w2 / 'snap'
+try:
+    _mods = _w2 / 'Game' / 'Mods'; _tmp = _w2 / 'tmp'; _mods.mkdir(parents=True); _tmp.mkdir()
+    _data = _mods / 'HuksShit' / 'Mod_Interface' / 'data.dat'
+    _lang = _mods / 'HuksShit' / 'Mod_Interface' / 'CFG' / 'Rus' / 'Lang.dat'
+
+    print('\n--- T69: слияние — solyanka позже побеждает общий файл, Lang.dat записан ---')
+    _run_multi([_HUK, _SOL], _mods, _tmp, _snap)
+    check('T69: общий data.dat = solyanka (позже в порядке)', _SOL_DATA, _data.read_bytes())
+    check_true('T69: уникальный Lang.dat записан', _lang.exists())
+
+    print('\n--- T70: повторный проход идемпотентен ---')
+    s = _run_multi([_HUK, _SOL], _mods, _tmp, _snap)
+    check('T70: всё skipped (3)', 3, s['skipped'])
+
+    print('\n--- T71: игрок убрал solyanka → только huk → Lang.dat-сирота удалён ---')
+    _run_multi([_HUK], _mods, _tmp, _snap)
+    check('T71: data.dat стал huk', _HUK_DATA, _data.read_bytes())
+    check_true('T71: сирота Lang.dat удалён', not _lang.exists())
+
+    print('\n--- T72: правка игрока не удаляется прунингом ---')
+    _run_multi([_HUK, _SOL], _mods, _tmp, _snap)     # вернуть Lang.dat
+    _lang.write_bytes(b'PLAYER-EDIT')                 # игрок изменил
+    _run_multi([_HUK], _mods, _tmp, _snap)            # снова без solyanka
+    check_true('T72: изменённый игроком Lang.dat НЕ удалён', _lang.exists())
+    check('T72: правка игрока цела', b'PLAYER-EDIT', _lang.read_bytes())
+finally:
+    shutil.rmtree(_w2, ignore_errors=True)
+
+# ═══════════════════════════════════════════════
 #  Итог
 # ═══════════════════════════════════════════════
 print(f'\n{"="*50}')

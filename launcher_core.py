@@ -521,7 +521,20 @@ def reconstruct_unit(repo, camp, unit, mods_dir, token, progress_cb=None,
 def reconstruct_camp(repo, camp, units, mods_dir, token, log=print, tmp_dir=None,
                      should_cancel=None, part_cb=None, byte_cb=None, sha_sink=None,
                      dry_run=False):
-    """Установить ВЕСЬ лагерь одним идемпотентным проходом.
+    """Установить ВЕСЬ лагерь одним идемпотентным проходом (обёртка над reconstruct_multi:
+    все юниты одного лагеря camp). См. reconstruct_multi. Прунинг не включаем — лагерь и так
+    ставится полным набором, а per-мод сироты чистит install_descriptor."""
+    umulti = [{**u, 'camp': u.get('camp', camp)} for u in units]
+    return reconstruct_multi(repo, umulti, mods_dir, token, log=log, tmp_dir=tmp_dir,
+                             should_cancel=should_cancel, part_cb=part_cb, byte_cb=byte_cb,
+                             sha_sink=sha_sink, dry_run=dry_run)
+
+
+def reconstruct_multi(repo, units, mods_dir, token, log=print, tmp_dir=None,
+                      should_cancel=None, part_cb=None, byte_cb=None, sha_sink=None,
+                      dry_run=False, prune_snap_id=None, snap_dir=None):
+    """Установить НЕСКОЛЬКО юнитов (возможно из РАЗНЫХ лагерей и с фильтром на один мод)
+    одним идемпотентным проходом.
 
     Раньше лагерь ставился по юниту за раз (reconstruct_unit в цикле), и каждый юнит
     сверял диск ТОЛЬКО со своим манифестом. Но base / fixes / разные моды нередко
@@ -530,17 +543,25 @@ def reconstruct_camp(repo, camp, units, mods_dir, token, log=print, tmp_dir=None
     файлы друг друга на КАЖДОЙ установке и «сверка хешей» никогда не сходилась к нулю
     — отсюда «постоянно что-то устанавливается».
 
+    То же и при установке НЕСКОЛЬКИХ bulk-записей (паков/сборок), несущих ОДИН мод-id:
+    отдельные reconstruct_unit-проходы затирали файлы друг друга (2-й перезаписывал
+    общие, уникальные файлы 1-го, напр. Lang.dat, оставались сиротами, порядок плавал).
+    Слияние всех в ОДИН eff убирает недетерминизм (п.10 cross-entry merge).
+
     Здесь манифесты всех юнитов сливаются в ОДИН эффективный набор с приоритетом:
     `units` идёт в порядке низший→высший приоритет, и более поздний юнит перезаписывает
     того же по ЦЕЛЕВОМУ пути на диске (регистронезависимо). Затем — одна сверка хешей и
     одна запись. Каждый спорный файл пишется ровно раз победителем → повторная установка
-    видит совпадение и не пишет ничего. Финальное состояние игры прежнее (побеждает тот
-    же юнит, что и при старом «кто последний в порядке установки»).
+    видит совпадение и не пишет ничего.
 
     units: список dict в порядке приоритета (низший→высший):
-      {'unit': имя, 'tier': 'base'|'fixes'|..., 'fork_files': {relpath:(sha,kind)}|None,
+      {'camp': лагерь, 'unit': имя, 'tier': 'base'|'fixes'|..., 'mod': 'Кат/Имя'|None
+       (фильтр на один мод по mod_key), 'fork_files': {relpath:(sha,kind)}|None,
        'fork_index': idx|None}.
-    """
+    prune_snap_id: если задан — ПОСЛЕ записи убрать файлы-сироты слитого набора (те, что
+      были в прошлом снимке этого набора, но которых нет в новом eff; только модовые и
+      только если disk-sha == снимку — правки игрока целы) и сохранить новый снимок.
+      Так чистятся уникальные файлы пака, который игрок убрал из профиля."""
     mods_dir = Path(mods_dir)
     tmp = Path(tmp_dir or mods_dir.parent)
     tmp.mkdir(parents=True, exist_ok=True)
@@ -556,15 +577,18 @@ def reconstruct_camp(repo, camp, units, mods_dir, token, log=print, tmp_dir=None
     conflicts = 0
     for u in units:
         _check_cancel(should_cancel)
-        unit = u['unit']
-        code_man = _load_manifest(repo, f'mods/{camp}/{unit}/code.manifest.json', token)
-        asset_man = _load_manifest(repo, f'mods/{camp}/{unit}/assets.manifest.json', token)
+        cu, unit = u['camp'], u['unit']
+        umod = u.get('mod')                    # фильтр на один мод (mod_key), None = весь юнит
+        code_man = _load_manifest(repo, f'mods/{cu}/{unit}/code.manifest.json', token)
+        asset_man = _load_manifest(repo, f'mods/{cu}/{unit}/assets.manifest.json', token)
         if not code_man and not asset_man:
-            log(f'⚠ нет манифестов для {camp}/{unit} — пропускаю')
+            log(f'⚠ нет манифестов для {cu}/{unit} — пропускаю')
             continue
         umap = {}       # relpath -> (sha, kind)
         for kind, man in (('code', code_man), ('asset', asset_man)):
             for relpath, meta in man.items():
+                if umod is not None and mod_key(relpath) != umod:
+                    continue
                 umap[relpath] = (meta['sha256'], kind)
         ff = u.get('fork_files')
         if ff:
@@ -617,7 +641,8 @@ def reconstruct_camp(repo, camp, units, mods_dir, token, log=print, tmp_dir=None
         for targets in shamap.values():
             for _relpath, kind in targets:
                 stats[f'{kind}_files'] += 1
-    log(f'Лагерь {camp}: {stats["code_files"]} код + {stats["asset_files"]} ассетов '
+    scope = 'Набор' if prune_snap_id else 'Лагерь ' + (units[0]['camp'] if units else '?')
+    log(f'{scope}: {stats["code_files"]} код + {stats["asset_files"]} ассетов '
         f'в {len(need)} частях'
         + (f' (конфликтов путей разрешено по приоритету: {conflicts})' if conflicts else '')
         + (f', НЕ найдено файлов: {stats["missing"]}' if stats['missing'] else ''))
@@ -641,6 +666,16 @@ def reconstruct_camp(repo, camp, units, mods_dir, token, log=print, tmp_dir=None
     _parallel_fetch_extract(need, mods_dir, tmp, resolve, log,
                             should_cancel=should_cancel, part_cb=part_cb, byte_cb=byte_cb,
                             sha_sink=sha_sink)
+    # прунинг сирот слитого набора (п.10): файлы прошлого снимка набора, которых нет в
+    # новом eff, — только модовые и только если disk-sha == снимку (правки игрока целы).
+    # Псевдо-дескриптор из eff переиспользует prune_orphans_by_snapshot/снимок набора.
+    if prune_snap_id is not None:
+        pseudo = {'id': prune_snap_id, 'version': None, 'files': {'code': {}, 'assets': {}}}
+        for info in eff.values():
+            sub = 'code' if info['kind'] == 'code' else 'assets'
+            pseudo['files'][sub][info['relpath']] = {'sha256': info['sha']}
+        prune_orphans_by_snapshot(mods_dir, pseudo, snap_dir, log)
+        save_snapshot_from_desc(mods_dir, pseudo, snap_dir)
     log(f'Готово: {stats["code_files"]} код + {stats["asset_files"]} ассетов в {mods_dir}')
     return stats
 

@@ -97,7 +97,7 @@ IS_RWT = bool(EMBEDDED_TOKEN)
 # из репозитория ({version, url?, notes?}). url можно оставить пустым — тогда показ без
 # ссылки на скачивание (просто «доступна новая версия»).
 # ВНИМАНИЕ: при релизе выставить реальный следующий номер (текущий публичный > 0.13.1).
-LAUNCHER_VERSION = '0.18.5'
+LAUNCHER_VERSION = '0.18.6'
 RELEASE_REF = 'state/launcher_release.json'
 # Ссылка на полную справку в репозитории (ИНСТРУКЦИЯ-ПРОСТАЯ.md, имя в percent-encoding —
 # кириллица в пути; так браузер откроет её без ручного кодирования).
@@ -2159,6 +2159,50 @@ class Api:
         self._emit('op_end', {'status': status})
         self._emit('tree_dirty')
 
+    def _install_bulk_merged(self, entries, mods_dir, tok, repo):
+        """Установить НЕСКОЛЬКО манифестных bulk-записей (сборок/паков) ОДНИМ проходом
+        reconstruct_multi: манифесты всех юнитов сливаются в один eff с приоритетом
+        (base<mod<fixes, внутри — load_order), общий мод-id пишется один раз победителем,
+        сироты убранного набора прунятся по снимку. Устраняет коллизию, когда два
+        отдельных пака несут один мод-id в одну папку (п.10 cross-entry merge)."""
+        packs = self._get_packs(tok)
+        seen, order = {}, []
+
+        def add_unit(p, tier=None, rank=None, lo=None):
+            c, u = p.get('camp'), p.get('name')
+            if (c, u) in seen:
+                return
+            ff, fidx = self._fork_unit_overlay(c, u)
+            d = {'camp': c, 'unit': u, 'tier': p.get('tier', tier),
+                 'fork_files': ff, 'fork_index': fidx,
+                 '_rank': self._unit_install_rank(p, packs) if rank is None else rank,
+                 '_lo': p.get('load_order', 999) if lo is None else lo}
+            seen[(c, u)] = d
+            order.append(d)
+            if d['tier'] == 'base':
+                self.profile['installed_base'] = u
+
+        for m in entries:
+            if m.get('type') == 'camp':
+                for p in packs.values():
+                    if p.get('camp') == m.get('camp'):
+                        add_unit(p)
+            else:                                 # целый юнит
+                p = packs.get(f"{m.get('camp')}/{m.get('unit')}")
+                if p:
+                    add_unit(p)
+                else:                             # нет в packs (форк/нестандарт) — минимум
+                    add_unit({'camp': m.get('camp'), 'name': m.get('unit')},
+                             tier=None, rank=1, lo=999)
+
+        order.sort(key=lambda d: (d['_rank'], d['_lo']))
+        units = [{k: v for k, v in d.items() if not k.startswith('_')} for d in order]
+        self._pack_ctx = 'объединённые паки'
+        core.reconstruct_multi(
+            repo, units, mods_dir, tok, log=self.log, tmp_dir=ROOT,
+            should_cancel=self.should_cancel, part_cb=self._part_progress,
+            byte_cb=self._byte_progress, prune_snap_id='__bulk_merge__')
+
     def _install_one(self, m, mods_dir, tok):
         """Установить ОДНУ запись сборки (camp / unit / desc / zip)."""
         if m.get('type') == 'camp':
@@ -2297,7 +2341,29 @@ class Api:
         plan, bulk = ps['plan'], ps['bulk']
         done = []
         try:
-            for m in bulk:                        # сборка/пак/zip — обычной логикой
+            # cross-entry merge (п.10): 2+ манифестных bulk-записей (паков/сборок) ставим
+            # ОДНИМ проходом reconstruct_multi — иначе отдельные reconstruct_* затирают
+            # общий мод-id и плодят сирот (напр. Mod_Interface из «Солянки» и Huk'sShit).
+            # zip и одиночная запись — прежней логикой (нулевой риск регрессий).
+            man_bulk = [m for m in bulk if m.get('type') in ('camp', 'unit')]
+            if len(man_bulk) >= 2:
+                for m in man_bulk:
+                    self.log(f'=== {m.get("name", "?")} ===')
+                try:
+                    self._install_bulk_merged(man_bulk, mods_dir, tok, repo)
+                    now = datetime.now().isoformat()
+                    for m in man_bulk:
+                        m['last_downloaded'] = now
+                        m['update_available'] = False
+                        done.append(m)
+                    self._save_profile()
+                    self._emit('tree_dirty')
+                except core.OperationCancelled:
+                    raise
+                except Exception as e:
+                    self.log(f'ОШИБКА объединённой установки паков: {e}')
+                bulk = [m for m in bulk if m not in man_bulk]
+            for m in bulk:                        # zip / одиночная запись — обычной логикой
                 if self.should_cancel():
                     raise core.OperationCancelled()
                 self.log(f'=== {m.get("name", "?")} ===')
