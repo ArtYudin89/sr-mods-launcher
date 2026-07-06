@@ -79,6 +79,10 @@
               <label class="pop-chk"><input type="checkbox" id="fInGame"> только подключённые в игре</label>
               <label class="pop-chk"><input type="checkbox" id="fInProfile"> только входящие в профиль</label>
             </div>
+            <div class="pop-sec">
+              <div class="pop-head">Скрытые</div>
+              <label class="pop-chk"><input type="checkbox" id="fShowHidden"> показывать скрытые моды <span class="sub" id="hiddenCnt"></span></label>
+            </div>
           </div>
         </div>
         <button class="btn ghost" id="legendBtn" title="Что означают значки состояний">ⓘ Обозначения</button>
@@ -86,6 +90,10 @@
       <div class="fr-sec">
         <span class="fr-lbl">Метки сборок</span>
         <div class="camp-chips" id="campChips" title="Быстрый фильтр по метке сборки"></div>
+      </div>
+      <div class="fr-sec" id="tagSec" style="display:none">
+        <span class="fr-lbl">Мои теги</span>
+        <div class="camp-chips" id="tagChips" title="Быстрый фильтр по вашему тегу"></div>
       </div>
     </div>
 
@@ -222,6 +230,16 @@
             <span id="setUpdateStatus" class="sub" style="margin:0"></span>
           </div>
         </div>
+        <div class="m-row">
+          <label>Обновление модов</label>
+          <div class="sub">Тихий режим (по умолчанию): бесконфликтные обновления применяются автоматически, без окна — только итог-уведомление. Окно всплывает, лишь когда нужно ваше решение. Включите галочку, если хотите видеть план перед каждым обновлением.</div>
+          <label class="check"><input type="checkbox" id="setAlwaysPlan"> Всегда показывать план перед обновлением</label>
+        </div>
+        <div class="m-row">
+          <label>Список модов</label>
+          <label class="check"><input type="checkbox" id="setDescInList"> Показывать полное описание прямо в списке</label>
+          <label class="check"><input type="checkbox" id="setShowHidden2"> Показывать скрытые моды</label>
+        </div>
         <details>
           <summary style="cursor:pointer;color:var(--muted);font-size:12.5px;margin:6px 0">Дополнительно (база, репозиторий и токен) — обычно менять не нужно</summary>
           <div class="adv-grid">
@@ -281,6 +299,22 @@
       <div class="m-foot">
         <button class="btn ghost" id="confirmCancel">Отмена</button>
         <button class="btn primary" id="confirmOk">Продолжить</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- МОДАЛКА: ввод тегов / заметки -->
+  <div class="overlay hidden" id="promptOverlay">
+    <div class="modal">
+      <h2 id="promptTitle">Ввод</h2>
+      <div class="m-body">
+        <div class="sub" id="promptHint" style="margin-bottom:6px"></div>
+        <input id="promptInput" style="width:100%;display:none">
+        <textarea id="promptArea" rows="4" style="width:100%;display:none"></textarea>
+      </div>
+      <div class="m-foot">
+        <button class="btn ghost" id="promptCancel">Отмена</button>
+        <button class="btn primary" id="promptOk">Сохранить</button>
       </div>
     </div>
   </div>
@@ -374,15 +408,15 @@
 
   <!-- МОДАЛКА: обновление (превью + конфликты) -->
   <div class="overlay hidden" id="mergeOverlay">
-    <div class="modal" style="width:640px">
-      <h2>Обновление мода</h2>
+    <div class="modal" style="width:560px">
+      <h2 id="mergeTitle">Обновление мода</h2>
       <div class="m-body">
-        <div id="mergeHead" class="note" style="border-left-color:var(--accent)"></div>
-        <div id="mergeGroups"></div>
+        <div id="mergeHead"></div>
         <div id="mergeConflicts"></div>
+        <div id="mergeGroups"></div>
       </div>
       <div class="m-foot">
-        <label style="margin-right:auto;display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--muted)"
+        <label id="mergeRememberWrap" style="margin-right:auto;display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--muted)"
                title="Применять выбранные решения по типам конфликтов ко всем оставшимся модам этого обновления, не спрашивая по каждому">
           <input type="checkbox" id="mergeRemember"> Запомнить решения для остальных модов
         </label>
@@ -418,6 +452,11 @@
   <div class="ctx-menu hidden" id="ctxMenu">
     <button id="ctxOpenMod">📂 Открыть папку мода</button>
     <button id="ctxOpenMods">📁 Открыть папку Mods</button>
+    <div class="mm-sep"></div>
+    <button id="ctxHide">🙈 Скрыть из списка</button>
+    <button id="ctxTags">🏷 Теги…</button>
+    <button id="ctxNote">📝 Заметка…</button>
+    <div class="mm-sep"></div>
     <button id="ctxRemoveOne">🗑 Убрать из профиля (эту строку)</button>
     <button id="ctxCancelAdd">✖ Отменить добавление (всё)</button>
   </div>

@@ -881,6 +881,7 @@ try:
         patch.object(core, 'plan_update_merge', return_value=fake_plan_e2e),
         patch.object(core, 'load_chunk_index', return_value=FAKE_IDX),
     ]
+    a.config['always_show_plan'] = True     # модальный путь: показать план даже без конфликтов
     for p in mp_list:
         p.start()
     try:
@@ -913,6 +914,40 @@ try:
         check_false('E2E: _updates снят', 'ShusRangers/ShuNukes' in a._updates)
     else:
         PASS.append('T31-merge-skipped')
+
+    print('\n--- T31b: тихий режим — бесконфликтный апдейт применяется БЕЗ окна ---')
+    nuke_path.write_bytes(NUKE_V1)              # откат к v1
+    a.config['always_show_plan'] = False        # тихий режим (по умолчанию)
+    a._updates = {'ShusRangers/ShuNukes': {'camp': 'redux', 'n': 1}}
+    evts2 = []
+    a._emit = lambda ev, pl=None: evts2.append((ev, pl))
+
+    def fake_apply_silent(desc, plan, decisions, mods_dir, index, **kw):
+        (Path(mods_dir) / 'ShusRangers' / 'ShuNukes' / 'ModuleInfo.txt').write_bytes(NUKE_V2)
+        return 'update=1'
+
+    mp_silent = [
+        patch.object(core, 'load_catalog', return_value=dict(FAKE_CATALOG)),
+        patch.object(core, 'detect_installed_base', return_value=None),
+        patch.object(core, 'descriptor_for', return_value=V2_DESC),
+        patch.object(core, 'load_install_snapshot', return_value=None),
+        patch.object(core, 'plan_update_merge', return_value=fake_plan_e2e),
+        patch.object(core, 'load_chunk_index', return_value=FAKE_IDX),
+        patch.object(core, 'apply_update_plan', side_effect=fake_apply_silent),
+    ]
+    for p in mp_silent:
+        p.start()
+    try:
+        a.start_merge(['d:ShusRangers/ShuNukes'])
+        wait_idle(a, timeout=8)
+    finally:
+        for p in mp_silent:
+            p.stop()
+
+    names2 = [e[0] for e in evts2]
+    check_false('T31b: merge_plan НЕ emitted (тихо)', 'merge_plan' in names2)
+    check_true('T31b: merge_silent emitted (тост-итог)', 'merge_silent' in names2)
+    check('T31b: файл обновлён до v2 без окна', NUKE_V2, nuke_path.read_bytes())
 
     print('\n--- T32: E2E удалить мод с диска → mods_info = 0 → reinstall → mods_info > 0 ---')
     g2 = TempGame()

@@ -837,12 +837,25 @@ def published_files(code_man, asset_man, fork_files=None):
     return out
 
 
+# Локализационно-кэшевые файлы игры: перепаковка агрегатора (декомпиляция→сборка) даёт
+# байты, не совпадающие 1:1 с оригиналом раздачи (Lang.dat отличался на 4 байта, см.
+# фидбэк по RevDiggers) → у скачанных руками модов БЕЗ снимка это вечный «фантомный
+# апдейт». CacheData.dat — вообще кэш. Такое расхождение без базы обновлением не считаем.
+COSMETIC_BASENAMES = {'lang.dat', 'cachedata.dat'}
+
+
+def is_cosmetic_rel(rel):
+    """Файл, чьи байты не стоит сверять при детекте апдейта без снимка (локализация/кэш)."""
+    return (rel or '').replace('\\', '/').rsplit('/', 1)[-1].lower() in COSMETIC_BASENAMES
+
+
 def plan_actionable_sha(theirs, base, disk):
     """Сколько файлов реально требуют обновления — та же классификация, что в
     plan_update_merge, но ТОЛЬКО по sha (без скачивания), для детекта обновлений.
     theirs/base/disk: {install_rel: sha}. Считаются add/update/конфликт; player_only
     (мод не менял, правил игрок) и unchanged — НЕ считаются. Без снимка (base пуст)
-    любое отличие = обновление (как конфликт)."""
+    любое отличие = обновление (как конфликт), КРОМЕ косметических файлов (is_cosmetic_rel):
+    их расхождение без базы — почти всегда перепаковка агрегатора, не апдейт."""
     n = 0
     for rel, tsha in theirs.items():
         bsha = base.get(rel)
@@ -852,7 +865,8 @@ def plan_actionable_sha(theirs, base, disk):
         elif msha == tsha:
             pass                         # unchanged
         elif bsha is None:
-            n += 1                       # нет базы → отличие = обновление
+            if not is_cosmetic_rel(rel):
+                n += 1                   # нет базы → отличие = обновление (кроме косметики)
         elif msha == bsha:
             n += 1                       # update: мод изменил, игрок не трогал
         elif tsha == bsha:

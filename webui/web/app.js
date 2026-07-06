@@ -24,7 +24,8 @@ const STATES = [
   { k: 'unknown', label: 'не в каталоге', badge: 'b-unknown', tip: 'установлен, но в каталоге его нет' },
   { k: 'load', label: 'каталог грузится', badge: 'b-load', tip: 'каталог ещё загружается' },
 ];
-const filter = { states: new Set(STATES.map((s) => s.k)), inGame: false, inProfile: false, camps: new Set() };
+const filter = { states: new Set(STATES.map((s) => s.k)), inGame: false, inProfile: false, camps: new Set(), tags: new Set() };
+let lastClickedIid = null;           // якорь для выделения диапазона по Shift
 
 // отображаемые названия сборок (внутренние ключи остаются как есть — это только показ)
 const CAMP_LABELS = {
@@ -61,6 +62,7 @@ window.__emit = (event, data) => {
     case 'op_end': onOpEnd(data); break;
     case 'progress': onProgress(data); break;
     case 'merge_plan': onMergePlan(data); break;
+    case 'merge_silent': onMergeSilent(data); break;
     case 'deps_confirm': onDepsConfirm(data); break;
   }
 };
@@ -121,6 +123,9 @@ function applyState() {
   $('tokenDot').classList.toggle('on', !!STATE.has_token);
   $('verboseChk').checked = !!STATE.log_verbose;
   $('logBox').classList.toggle('show-verbose', !!STATE.log_verbose);
+  if ($('setDescInList')) $('setDescInList').checked = !!STATE.desc_in_list;
+  if ($('setShowHidden2')) $('setShowHidden2').checked = !!STATE.show_hidden;
+  if ($('fShowHidden')) $('fShowHidden').checked = !!STATE.show_hidden;
   reflowToolbar();
 }
 
@@ -201,6 +206,7 @@ function wireUI() {
   };
   $('fInGame').onchange = (e) => { filter.inGame = e.target.checked; applyFilter(); };
   $('fInProfile').onchange = (e) => { filter.inProfile = e.target.checked; applyFilter(); };
+  $('fShowHidden').onchange = (e) => toggleShowHidden(e.target.checked);
   $('legendBtn').onclick = () => $('legendBar').classList.toggle('hidden');
 
   // действия
@@ -223,6 +229,15 @@ function wireUI() {
     $('logBox').scrollTop = $('logBox').scrollHeight;
     api().set_verbose(e.target.checked);
   };
+  $('setAlwaysPlan').onchange = (e) => {
+    STATE.always_show_plan = e.target.checked;
+    api().set_always_show_plan(e.target.checked);
+  };
+  $('setDescInList').onchange = (e) => {
+    STATE.desc_in_list = e.target.checked;
+    api().set_desc_in_list(e.target.checked).then(() => refreshTree());
+  };
+  $('setShowHidden2').onchange = (e) => toggleShowHidden(e.target.checked);
   $('cancelBtn').onclick = () => api().cancel();
 
   // контекстное меню журнала (ПКМ)
@@ -276,13 +291,34 @@ function wireUI() {
 
   // закрытие по клику на фон — только для «безопасных» модалок
   // (confirm/merge завязаны на состояние бэкенда → закрываются только кнопками)
-  ['settingsOverlay', 'profileOverlay', 'addOverlay', 'infoOverlay', 'compatOverlay', 'helpOverlay'].forEach((id) =>
+  ['settingsOverlay', 'profileOverlay', 'addOverlay', 'infoOverlay', 'compatOverlay', 'helpOverlay', 'promptOverlay'].forEach((id) =>
     $(id).onclick = (e) => { if (e.target === $(id)) hide(id); });
   $('infoCloseBtn').onclick = () => hide('infoOverlay');
   $('compatCloseBtn').onclick = () => hide('compatOverlay');
   // контекстное меню (ПКМ)
   $('ctxOpenMod').onclick = () => { if (ctxMid) api().open_mod_folder(ctxMid); hideCtxMenu(); };
   $('ctxOpenMods').onclick = () => { api().open_mods_folder(); hideCtxMenu(); };
+  $('ctxHide').onclick = () => {
+    const mid = ctxMid, wasHidden = ctxNode && ctxNode.hidden; hideCtxMenu();
+    if (mid) api().set_mod_hidden(mid, !wasHidden).then(() => { selected.delete('d:' + mid); refreshTree(); });
+  };
+  $('ctxTags').onclick = () => {
+    const mid = ctxMid, cur = (ctxNode && ctxNode.tags || []).join(', '); hideCtxMenu();
+    if (!mid) return;
+    promptModal('Теги мода', 'Через запятую. Пустое поле уберёт все теги.', cur, false).then((v) => {
+      if (v === null) return;
+      const tags = v.split(',').map((s) => s.trim()).filter(Boolean);
+      api().set_mod_tags(mid, tags).then(() => refreshTree());
+    });
+  };
+  $('ctxNote').onclick = () => {
+    const mid = ctxMid, cur = (ctxNode && ctxNode.note) || ''; hideCtxMenu();
+    if (!mid) return;
+    promptModal('Личная заметка', 'Видна как 📝 в строке мода (при наведении).', cur, true).then((v) => {
+      if (v === null) return;
+      api().set_mod_note(mid, v).then(() => refreshTree());
+    });
+  };
   $('ctxRemoveOne').onclick = () => { const p = ctxPidx; hideCtxMenu(); if (p !== null) cancelAdd(p); };
   $('ctxCancelAdd').onclick = () => {
     hideCtxMenu();
@@ -343,7 +379,34 @@ function passFilter(node) {
     const labs = node.labels || [];
     if (!labs.some((c) => filter.camps.has(c))) return false;
   }
+  if (filter.tags.size) {                          // быстрый фильтр по пользовательскому тегу
+    const tags = node.tags || [];
+    if (!tags.some((t) => filter.tags.has(t))) return false;
+  }
   return true;
+}
+// показать/скрыть скрытые моды (синхронизирует обе галочки: фильтр и настройки)
+function toggleShowHidden(val) {
+  STATE.show_hidden = !!val;
+  if ($('fShowHidden')) $('fShowHidden').checked = !!val;
+  if ($('setShowHidden2')) $('setShowHidden2').checked = !!val;
+  api().set_show_hidden(!!val).then(() => refreshTree());
+}
+// быстрые фильтры-чипы по пользовательским тегам (строятся по TREE.all_tags)
+function buildTagChips() {
+  const tags = (TREE && TREE.all_tags) || [];
+  const sec = $('tagSec');
+  if (!tags.length) { sec.style.display = 'none'; filter.tags.clear(); return; }
+  sec.style.display = '';
+  for (const t of [...filter.tags]) if (!tags.includes(t)) filter.tags.delete(t);
+  $('tagChips').innerHTML = tags.map((t) =>
+    `<button class="chip-f utag-f${filter.tags.has(t) ? ' on' : ''}" data-tag="${esc(t)}" title="Показать только с тегом «${esc(t)}»">${esc(t)}</button>`).join('');
+  $('tagChips').querySelectorAll('.chip-f').forEach((b) => b.onclick = () => {
+    const t = b.dataset.tag;
+    filter.tags.has(t) ? filter.tags.delete(t) : filter.tags.add(t);
+    b.classList.toggle('on', filter.tags.has(t));
+    applyFilter();
+  });
 }
 // быстрые фильтры-чипы по метке сборки
 function buildCampChips() {
@@ -381,6 +444,10 @@ async function refreshTree() {
   TREE = await api().get_tree(false);
   STATE.base = TREE.base;
   if ($('baseSel')) $('baseSel').value = TREE.base_manual || '';   // селектор базы в панели
+  buildTagChips();
+  const hc = TREE.hidden_count || 0;
+  if ($('hiddenCnt')) $('hiddenCnt').textContent = hc ? `(${hc})` : '';
+  if ($('fShowHidden')) $('fShowHidden').checked = !!TREE.show_hidden;
   renderTree();
   const q = TREE.queue || {};
   $('queueLbl').textContent = q.count ? `в профиле: ${q.count}${q.size ? ' · ~' + q.size : ''}` : '';
@@ -434,6 +501,8 @@ function renderTree() {
 
   body.querySelectorAll('.row.group').forEach((el) => el.onclick = () => { treeCursor = el.dataset.key; toggleCollapse(el.dataset.key); });
   body.querySelectorAll('.row.leaf').forEach((el) => el.onclick = (e) => { treeCursor = el.dataset.iid; onLeafClick(e, el.dataset.iid); });
+  body.querySelectorAll('.row-check').forEach((el) => el.onclick = (e) => {
+    e.stopPropagation(); treeCursor = el.dataset.iid; onLeafClick(e, el.dataset.iid, { toggle: !e.shiftKey }); });
   body.querySelectorAll('.toggle.click').forEach((el) =>
     el.onclick = (e) => { e.stopPropagation(); onToggleClick(el); });
   body.querySelectorAll('.info-btn').forEach((el) =>
@@ -557,22 +626,37 @@ function statusCountHtml(counts) {
     : '<span class="tag">0</span>';
 }
 
+// пользовательские теги мода (отличны по стилю от меток сборок)
+function userTags(tags) {
+  return (tags || []).map((t) => `<span class="utag" title="ваш тег">${esc(t)}</span>`).join('');
+}
 function leafRow(n, lvl) {
-  const sel = selected.has(n.iid) ? ' sel' : '';
+  const isSel = selected.has(n.iid);
+  const sel = isSel ? ' sel' : '';
+  const hid = n.hidden ? ' hidden-mod' : '';
+  const check = n.iid
+    ? `<span class="row-check${isSel ? ' on' : ''}" data-iid="${esc(n.iid)}" title="Выделить строку (Shift — диапазон, Ctrl — по одной)">${isSel ? '✓' : ''}</span>`
+    : '<span class="row-check ghost"></span>';
   const inGame = `<span class="toggle ro${n.in_game ? ' on' : ''}" title="${n.in_game ? 'подключён в игре' : 'не подключён в игре'}">${n.in_game ? '✓' : ''}</span>`;
   const inProf = n.mid
     ? `<span class="toggle click${n.in_profile ? ' on' : ''}" data-mid="${esc(n.mid)}" data-on="${n.in_profile ? 1 : 0}" title="нажмите, чтобы включить/выключить в профиле">${n.in_profile ? '✓' : ''}</span>`
     : '';
   const info = n.has_info
     ? `<span class="info-btn" data-mid="${esc(n.mid)}" title="Подробнее о моде">ⓘ</span>` : '';
-  const desc = n.desc ? `<div class="mdesc">${esc(n.desc)}</div>` : '';
+  const noteIc = n.note
+    ? `<span class="note-ic" title="Заметка: ${esc(n.note)}">📝</span>` : '';
+  // полное описание в списке (настройка) — иначе краткое; ничего, если пусто
+  const descText = (STATE.desc_in_list && n.full_desc) ? n.full_desc : n.desc;
+  const desc = descText ? `<div class="mdesc${STATE.desc_in_list && n.full_desc ? ' full' : ''}">${esc(descText)}</div>` : '';
+  const date = n.date ? `<span class="mdate" title="дата файлов мода на диске">${esc(n.date)}</span>` : '';
   const disp = (STATE.name_mode === 'module' && n.name) ? n.name : n.label;
   // во втором режиме рядом показываем папку мелким, чтобы не терять ориентир
   const alt = (STATE.name_mode === 'module' && n.name && n.name !== n.label)
     ? `<span class="alt-name" title="имя папки на диске">${esc(n.label)}</span>` : '';
-  return `<div class="row leaf lvl${lvl}${sel}" data-iid="${esc(n.iid)}" role="treeitem" aria-level="${lvl}" aria-selected="${selected.has(n.iid) ? 'true' : 'false'}" aria-label="${esc(disp)}, ${esc(n.status)}${n.in_profile ? ', в профиле' : ''}">
-    <div class="name"><span class="tw">·</span>
-      <span class="label-wrap"><span class="label">${esc(disp)}${labelBadges(n.labels)}${alt}</span>${variantSwitch(n)}${desc}</span>${info}</div>
+  const hidMark = n.hidden ? '<span class="hid-mark" title="Скрыт из списка (виден, т.к. включён показ скрытых)">🙈</span>' : '';
+  return `<div class="row leaf lvl${lvl}${sel}${hid}" data-iid="${esc(n.iid)}" role="treeitem" aria-level="${lvl}" aria-selected="${isSel ? 'true' : 'false'}" aria-label="${esc(disp)}, ${esc(n.status)}${n.in_profile ? ', в профиле' : ''}${n.hidden ? ', скрыт' : ''}">
+    <div class="name">${check}<span class="tw">·</span>
+      <span class="label-wrap"><span class="label">${hidMark}${esc(disp)}${labelBadges(n.labels)}${userTags(n.tags)}${noteIc}${alt}${date}</span>${variantSwitch(n)}${desc}</span>${info}</div>
     <div class="cell">${esc(colValue(n) || '')}</div>
     <div class="cell">${inGame}</div>
     <div class="cell">${inProf}</div>
@@ -624,15 +708,30 @@ function collapseAll() {
 }
 
 // ───────── выбор ─────────
-function onLeafClick(e, iid) {
+function onLeafClick(e, iid, opt) {
   if (!iid) return;
-  if (e.ctrlKey || e.metaKey) {
+  opt = opt || {};
+  // Shift — выделить диапазон от якоря (последний обычный клик) до текущего по видимому порядку
+  if (e.shiftKey && lastClickedIid && lastClickedIid !== iid) {
+    const leaves = [...$('treeBody').querySelectorAll('.row.leaf')].map((r) => r.dataset.iid);
+    const a = leaves.indexOf(lastClickedIid), b = leaves.indexOf(iid);
+    if (a >= 0 && b >= 0) {
+      if (!(e.ctrlKey || e.metaKey)) selected.clear();
+      const [lo, hi] = a < b ? [a, b] : [b, a];
+      for (let i = lo; i <= hi; i++) selected.add(leaves[i]);
+      renderTree();
+      return;                            // якорь НЕ двигаем — можно тянуть диапазон дальше
+    }
+  }
+  const toggle = opt.toggle || e.ctrlKey || e.metaKey;
+  if (toggle) {
     selected.has(iid) ? selected.delete(iid) : selected.add(iid);
   } else {
     const only = selected.size === 1 && selected.has(iid);
     selected.clear();
     if (!only) selected.add(iid);
   }
+  lastClickedIid = iid;                   // новый якорь для будущего Shift-диапазона
   renderTree();
 }
 // индекс записи профиля из iid: 'p3' (обычная) или 'p3#Кат/Мод' (мод развёрнутого сборки)
@@ -1160,6 +1259,7 @@ function openSettings() {
   $('setToken').value = '';
   $('forkRepo').value = ''; $('forkToken').value = '';
   $('setUpdateStatus').innerHTML = `Текущая: v${esc(STATE.version || '?')}`;
+  $('setAlwaysPlan').checked = !!STATE.always_show_plan;
   FORKS = (STATE.forks || []).map((f) => ({ repo: f.repo, has_token: f.has_token, token: '' }));
   renderForks();
   loadSetOrder();
@@ -1388,68 +1488,100 @@ function startMerge() {
   }
   api().start_merge(iids).then((r) => { if (!r.ok) toast(r.error, 'err'); });
 }
-function onMergePlan(plan) {
-  const s = plan.summary || {};
-  $('mergeHead').innerHTML =
-    `<b>${esc(plan.id || '?')}</b> · версия ${esc(plan.version_old || '—')} → ${esc(plan.version_new || '—')}<br>
-     авто-слить: ${s.automerge || 0} · обновить: ${s.update || 0} · добавить: ${s.add || 0} ·
-     удалить: ${s.deleted_clean || 0} · ваших правок сохранится: ${s.player_only || 0} ·
-     <b style="color:var(--warn)">конфликтов: ${s.conflicts || 0}</b>`;
-  // группы (кроме «без изменений»)
-  const groups = plan.groups || {}; const labels = plan.labels || {};
-  const order = ['conflict_text', 'conflict_binary', 'conflict_deleted', 'automerge', 'update', 'add', 'deleted_clean', 'player_only'];
-  let html = '';
+const MG_WHY = {
+  conflict_text: 'и вы, и мод правили этот текст',
+  conflict_binary: 'и вы, и мод правили этот файл',
+  conflict_deleted: 'мод удалил файл, у вас есть правки',
+};
+function mgFiles(n) { return n === 1 ? '1 файлу' : `${n} файлам`; }
+function plF(n) { n = Math.abs(n); const d = n % 10, dd = n % 100;
+  return (dd >= 11 && dd <= 14) ? 'файлов' : d === 1 ? 'файл' : (d >= 2 && d <= 4) ? 'файла' : 'файлов'; }
+// сворачиваемый блок «что применится автоматически»
+function mgAutoDetail(groups, labels) {
+  const order = ['update', 'add', 'automerge', 'deleted_clean', 'player_only'];
+  let inner = '', count = 0;
   for (const st of order) {
     const files = groups[st]; if (!files || !files.length) continue;
-    html += `<div class="mg-group"><div class="mg-title">${esc(labels[st] || st)} (${files.length})</div>
+    count += files.length;
+    inner += `<div class="mg-agroup"><div class="mg-atitle">${esc(labels[st] || st)} (${files.length})</div>
       <div class="mg-files">${files.map(esc).join('<br>')}</div></div>`;
   }
-  $('mergeGroups').innerHTML = html;
-  // конфликты: единый список-таблица + «установить для всех»
+  if (!inner) return '';
+  return `<details class="mg-auto"><summary>Что применится автоматически (${count})</summary>${inner}</details>`;
+}
+function onMergePlan(plan) {
+  const s = plan.summary || {};
   const conflicts = plan.conflicts || [];
-  if (conflicts.length) {
-    const head = `<div class="mg-allrow">
-        <span class="mg-title" style="margin:0">Как поступить с конфликтами (${conflicts.length}):</span>
-        <label class="mg-all">установить для всех:
-          <select id="cfAll">
-            <option value="">— по отдельности —</option>
-            <option value="__mine">оставить мои</option>
-            <option value="__theirs">взять новые</option>
-          </select>
-        </label></div>`;
-    const rows = conflicts.map((c, i) => `
-      <tr>
-        <td class="path" title="${esc(c.relpath)}">${esc(c.display)}</td>
-        <td><select data-relpath="${esc(c.relpath)}" id="cf${i}" class="cf-sel">
-          ${c.options.map((o) => `<option value="${esc(o.code)}" ${o.code === c.default ? 'selected' : ''}>${esc(o.label)}</option>`).join('')}
-        </select></td>
-      </tr>`).join('');
-    $('mergeConflicts').innerHTML = head +
-      `<table class="mg-conflict-table"><thead><tr><th>Файл</th><th>Решение</th></tr></thead>
-       <tbody>${rows}</tbody></table>`;
-    // «установить для всех»: mine/keep — оставить мои, theirs/delete — взять новые
-    $('cfAll').onchange = (e) => {
-      const intent = e.target.value;
-      if (!intent) return;
-      const prefer = intent === '__mine' ? ['mine', 'keep'] : ['theirs', 'delete'];
-      $('mergeConflicts').querySelectorAll('.cf-sel').forEach((s) => {
-        const codes = [...s.options].map((o) => o.value);
-        const pick = prefer.find((c) => codes.includes(c));
-        if (pick) s.value = pick;
-      });
-    };
-  } else {
-    $('mergeConflicts').innerHTML = '';
-  }
+  const groups = plan.groups || {}, labels = plan.labels || {};
+  const head = $('mergeHead'), cf = $('mergeConflicts'), gr = $('mergeGroups');
   $('mergeRemember').checked = false;
+
+  if (conflicts.length) {
+    // ── режим РЕШЕНИЙ: видны только конфликты, авто-изменения — под спойлером ──
+    $('mergeTitle').textContent = `Решения по обновлению · ${plan.id || ''}`;
+    head.innerHTML = `<div class="mg-intro">Всё остальное уже готово к установке. Осталось выбрать по ${mgFiles(conflicts.length)}:</div>`;
+    cf.innerHTML = conflicts.map((c, i) => {
+      const seg = c.options.map((o) =>
+        `<button type="button" class="seg-b${o.code === c.default ? ' on' : ''}" data-code="${esc(o.code)}">${esc(o.label)}</button>`).join('');
+      return `<div class="mg-cf" data-relpath="${esc(c.relpath)}">
+        <div class="mg-cf-h"><span class="mg-num">${i + 1}</span><span class="mg-path" title="${esc(c.relpath)}">${esc(c.display)}</span></div>
+        <div class="mg-why">${esc(MG_WHY[c.status] || '')}</div>
+        <div class="seg">${seg}</div>
+      </div>`;
+    }).join('') +
+      `<div class="mg-bulk">Быстро для всех:
+        <button type="button" class="btn mini" id="cfAllMine">мои везде</button>
+        <button type="button" class="btn mini" id="cfAllTheirs">новые везде</button></div>`;
+    gr.innerHTML = mgAutoDetail(groups, labels);
+    // выбор сегмента внутри строки
+    cf.querySelectorAll('.mg-cf .seg').forEach((seg) => seg.querySelectorAll('.seg-b').forEach((b) => {
+      b.onclick = () => { seg.querySelectorAll('.seg-b').forEach((x) => x.classList.remove('on')); b.classList.add('on'); };
+    }));
+    const bulk = (prefer) => cf.querySelectorAll('.mg-cf .seg').forEach((seg) => {
+      const btns = [...seg.querySelectorAll('.seg-b')];
+      const pick = prefer.map((code) => btns.find((b) => b.dataset.code === code)).find(Boolean);
+      if (pick) { btns.forEach((x) => x.classList.remove('on')); pick.classList.add('on'); }
+    });
+    $('cfAllMine').onclick = () => bulk(['mine', 'keep']);
+    $('cfAllTheirs').onclick = () => bulk(['theirs', 'delete']);
+    $('mergeRememberWrap').style.display = '';
+    $('mergeSkipBtn').textContent = 'Пропустить мод';
+    $('mergeApplyBtn').textContent = 'Применить';
+  } else {
+    // ── режим ВЕРДИКТА: включён «всегда показывать план», конфликтов нет ──
+    $('mergeTitle').textContent = 'Обновление мода';
+    const repl = (s.update || 0) + (s.automerge || 0), kept = s.player_only || 0, gone = s.deleted_clean || 0;
+    const bullets = [];
+    if (repl) bullets.push(`обновляется ${repl} ${plF(repl)}`);
+    if (s.add) bullets.push(`добавляется ${s.add} ${plF(s.add)}`);
+    if (gone) bullets.push(`${gone} ${plF(gone)} больше не нужны новой версии`);
+    if (kept) bullets.push(`ваши правки сохранены (${kept} ${plF(kept)})`);
+    head.innerHTML = `<div class="mg-verdict"><div class="mg-vic ok">✔</div>
+        <div><div class="mg-vt">${esc(plan.id || '')} <span class="mg-ver">· ${esc(plan.version_old || '—')} → ${esc(plan.version_new || '—')}</span></div>
+        <div class="mg-vsub">Всё обновится автоматически.</div></div></div>
+      <ul class="mg-b">${bullets.map((b) => `<li>${esc(b)}</li>`).join('')}</ul>
+      <div class="mg-safe">Ничего из ваших правок не потеряется.</div>`;
+    cf.innerHTML = '';
+    gr.innerHTML = mgAutoDetail(groups, labels);
+    $('mergeRememberWrap').style.display = 'none';
+    $('mergeSkipBtn').textContent = 'Пропустить';
+    $('mergeApplyBtn').textContent = 'Обновить';
+  }
   show('mergeOverlay');
 }
 function doMergeApply() {
   const decisions = {};
-  $('mergeConflicts').querySelectorAll('select.cf-sel').forEach((s) => { decisions[s.dataset.relpath] = s.value; });
+  $('mergeConflicts').querySelectorAll('.mg-cf').forEach((row) => {
+    const on = row.querySelector('.seg-b.on') || row.querySelector('.seg-b');
+    if (on) decisions[row.dataset.relpath] = on.dataset.code;
+  });
   const remember = $('mergeRemember').checked;
   hide('mergeOverlay');
   api().apply_merge(decisions, remember);
+}
+function onMergeSilent(d) {
+  const sub = d && d.sub ? ' · ' + d.sub : '';
+  toast('✔ ' + ((d && d.text) || 'Обновлено') + sub, 'ok');
 }
 
 // ───────── прогресс/лог ─────────
@@ -1530,12 +1662,19 @@ function logStamp() {
 }
 
 // ───────── контекстное меню (ПКМ по моду) ─────────
-let ctxMid = null, ctxPidx = null;
+let ctxMid = null, ctxPidx = null, ctxNode = null;
 function openCtxMenu(e, iid) {
   const n = NODE[iid];
+  ctxNode = n || null;
   ctxMid = (n && n.mid) || null;
   ctxPidx = pidxOf(iid);                 // запись профиля (добавленная) — можно отменить
   $('ctxOpenMod').style.display = ctxMid ? '' : 'none';
+  // скрытие/теги/заметки — только для настоящих модов (есть mid)
+  const hasMid = !!ctxMid;
+  $('ctxHide').style.display = hasMid ? '' : 'none';
+  $('ctxTags').style.display = hasMid ? '' : 'none';
+  $('ctxNote').style.display = hasMid ? '' : 'none';
+  if (hasMid) $('ctxHide').textContent = n.hidden ? '🙈 Показать в списке' : '🙈 Скрыть из списка';
   $('ctxRemoveOne').style.display = (ctxPidx !== null) ? '' : 'none';   // убрать эту строку
   $('ctxCancelAdd').style.display = (ctxPidx !== null) ? '' : 'none';   // отменить все добавления
   const menu = $('ctxMenu');
@@ -1563,6 +1702,12 @@ async function openModInfo(mid, variant) {
   const para = (t) => esc(t).replace(/\n/g, '<br>');
   const chips = (arr) => (arr && arr.length)
     ? arr.map((x) => `<span class="chip">${esc(x)}</span>`).join(' ') : '<span class="sub">—</span>';
+  // зависимости в виде кликабельных чипов: {name, mid}. Есть mid → ведёт в окно (i) того мода.
+  const depChips = (arr) => (arr && arr.length)
+    ? arr.map((x) => x && x.mid
+        ? `<button class="chip dep-link" data-mid="${esc(x.mid)}" title="Открыть карточку «${esc(x.name)}»">${esc(x.name)} ↗</button>`
+        : `<span class="chip" title="Мода нет в каталоге — только имя">${esc((x && x.name) || x)}</span>`).join(' ')
+    : '<span class="sub">—</span>';
   const rows = [];
   // переключатель вариантов Pol/Shu прямо в окне (i): посмотреть описание обоих
   if (i.variants && i.variants.length > 1) {
@@ -1580,8 +1725,9 @@ async function openModInfo(mid, variant) {
   // полное описание: HTML с цветовой разметкой (<clr>) приходит готовым из бэкенда
   // (color_to_html — текст уже экранирован, оставлены только наши <span>/<br>)
   if (i.full) rows.push(`<div class="i-row"><div class="i-k">Описание</div><div class="i-v">${i.full_html || para(i.full)}</div></div>`);
-  if (i.requires && i.requires.length) rows.push(`<div class="i-row"><div class="i-k">Требует</div><div class="i-v">${chips(i.requires)}</div></div>`);
-  if (i.conflicts && i.conflicts.length) rows.push(`<div class="i-row"><div class="i-k">Конфликтует</div><div class="i-v">${chips(i.conflicts)}</div></div>`);
+  if (i.requires && i.requires.length) rows.push(`<div class="i-row"><div class="i-k">Требует</div><div class="i-v">${depChips(i.requires)}</div></div>`);
+  if (i.dependents && i.dependents.length) rows.push(`<div class="i-row"><div class="i-k">Нужен для</div><div class="i-v" title="Моды, которые зависят от этого">${depChips(i.dependents)}</div></div>`);
+  if (i.conflicts && i.conflicts.length) rows.push(`<div class="i-row"><div class="i-k">Конфликтует</div><div class="i-v">${depChips(i.conflicts_ref && i.conflicts_ref.length ? i.conflicts_ref : i.conflicts.map((c) => ({ name: c, mid: '' })))}</div></div>`);
   if (i.section) rows.push(`<div class="i-row"><div class="i-k">Раздел</div><div class="i-v">${esc(i.section)}</div></div>`);
   rows.push(`<div class="i-row"><div class="i-k">Расположение</div><div class="i-v"><code>${esc(i.location || '')}</code></div></div>`);
   const multi = i.variants && i.variants.length > 1;
@@ -1592,6 +1738,9 @@ async function openModInfo(mid, variant) {
   // переключение вариантов внутри окна (i)
   $('infoBody').querySelectorAll('.info-var').forEach((el) =>
     el.onclick = () => { if (!el.classList.contains('on')) openModInfo(mid, el.dataset.key); });
+  // кликабельные зависимости: открыть карточку связанного мода (второй попап поверх)
+  $('infoBody').querySelectorAll('.dep-link').forEach((el) =>
+    el.onclick = () => openModInfo(el.dataset.mid));
 }
 
 // ───────── утилиты ─────────
@@ -1757,6 +1906,30 @@ function confirmBox(title, html, onOk, onCancel, opts) {
     if (e.key === 'Enter' && e.target.tagName !== 'TEXTAREA' && !opts.okHidden) { e.preventDefault(); done(onOk); }
     else if (e.key === 'Escape') { e.preventDefault(); done(onCancel); }
   };
+}
+// модальный ввод строки/текста (замена window.prompt, которого нет в pywebview).
+// Возвращает Promise<string> (значение) или Promise<null> при отмене.
+function promptModal(title, hint, initial, multiline) {
+  return new Promise((resolve) => {
+    $('promptTitle').textContent = title;
+    $('promptHint').textContent = hint || '';
+    $('promptHint').style.display = hint ? '' : 'none';
+    const inp = $('promptInput'), area = $('promptArea');
+    const field = multiline ? area : inp;
+    const other = multiline ? inp : area;
+    other.style.display = 'none';
+    field.style.display = '';
+    field.value = initial || '';
+    show('promptOverlay');
+    setTimeout(() => { try { field.focus(); field.select && field.select(); } catch (e) {} }, 40);
+    const done = (val) => { hide('promptOverlay'); $('promptOverlay').onkeydown = null; resolve(val); };
+    $('promptOk').onclick = () => done(field.value);
+    $('promptCancel').onclick = () => done(null);
+    $('promptOverlay').onkeydown = (e) => {
+      if (e.key === 'Enter' && !multiline) { e.preventDefault(); done(field.value); }
+      else if (e.key === 'Escape') { e.preventDefault(); done(null); }
+    };
+  });
 }
 function toast(msg, kind) {
   const t = document.createElement('div');

@@ -128,20 +128,30 @@ DEFAULT_CONFIG = {
     'tutorial_done': False,
     # Левая панель (фильтры/отображение) свёрнута — запоминается между запусками.
     'rail_collapsed': False,
+    # «Тихий режим» обновления (по умолчанию ВКЛ): бесконфликтный апдейт применяется
+    # автоматически, без окна — только тост-итог; окно всплывает лишь когда есть
+    # конфликты (нужно решение игрока). Редактор может выключить → окно-план всегда.
+    'always_show_plan': False,
+    # Пользовательские метаданные модов (глобально, по mid; переживают смену профиля):
+    # {mid: {'hidden': bool, 'tags': [str], 'note': str}}. Скрытие убирает мод из списка
+    # (пока не включён «показать скрытые»); теги — свои метки-фильтры; note — личная заметка.
+    'mod_meta': {},
+    'show_hidden': False,        # показывать ли скрытые моды в списке
+    'desc_in_list': False,       # показывать полное описание прямо в строке (иначе только (i))
 }
 
 
 # Фаза 4: подписи статусов плана обновления + опции решений конфликтов.
 STATUS_LABELS = {
-    'add': '➕ добавить (новый файл)',
-    'update': '⬆ обновить (вы не меняли)',
-    'automerge': '🔀 авто-слить ваши правки',
-    'player_only': '✋ оставить вашу правку (мод не менял)',
+    'add': '➕ добавляется новый файл',
+    'update': '⬆ заменяется новой версией',
+    'automerge': '🔀 ваши правки сохранены (авто-слияние)',
+    'player_only': '✋ ваш файл сохранён как есть',
     'unchanged': '· без изменений',
-    'deleted_clean': '🗑 удалить (нет в новой версии)',
-    'conflict_text': '⚠ КОНФЛИКТ текста',
-    'conflict_binary': '⚠ КОНФЛИКТ бинарного файла',
-    'conflict_deleted': '⚠ КОНФЛИКТ: удалён в новой версии, вы правили',
+    'deleted_clean': '✓ больше не нужен новой версии',
+    'conflict_text': '⚠ нужно решение (текст)',
+    'conflict_binary': '⚠ нужно решение (файл)',
+    'conflict_deleted': '⚠ мод удалил, у вас есть правки',
 }
 CONFLICT_OPTIONS = {
     'conflict_text': [('оставить мой', 'mine'), ('взять новый', 'theirs'),
@@ -150,6 +160,14 @@ CONFLICT_OPTIONS = {
                         ('сохранить оба (.srnew)', 'both')],
     'conflict_deleted': [('оставить мой', 'keep'), ('удалить', 'delete')],
 }
+def _plF(n):
+    """Русское склонение слова «файл» по числу: 1 файл, 2 файла, 5 файлов."""
+    n = abs(int(n)); d100, d10 = n % 100, n % 10
+    if 11 <= d100 <= 14:
+        return 'файлов'
+    return 'файл' if d10 == 1 else ('файла' if 2 <= d10 <= 4 else 'файлов')
+
+
 ALL_CAMP = '★ вся сборка'
 ALL_PACK = '★ весь пак'
 CAMP_KEYS = ('universe', 'redux', 'original')     # известные сборки (порядок = дефолтный)
@@ -375,13 +393,39 @@ class Api:
         return core.merge_chunk_indexes(indexes) if indexes else None
 
     def _overlay_theirs(self, desc, source, allow=True):
-        """Для merge: «новая версия» мода с наложением форков. -> (desc, index).
-        Без форков (или allow=False, напр. форк-по-URL) — исходный desc + его индекс."""
-        if allow and self._forks() and desc.get('id'):
-            o_desc, o_index = self._overlay(desc.get('id'), source)
-            if o_desc:
-                return o_desc, o_index
-        return desc, core.load_chunk_index(desc=desc, repo=self._repo(), token=self._token())
+        """Для merge: наложить форки НА ПЕРЕДАННЫЙ desc (не перерезолвя основной
+        дескриптор!). -> (desc, index). Важно: `desc` уже может быть слиянием base+fixes
+        варианта (_full_variant_descriptor) — если вместо этого перерезолвить основной по
+        одному источнику (base_installer), теряется слияние fixes и файлы из *_fixes
+        выглядят «правкой игрока» (disk≠theirs). Форки лишь ПЕРЕОПРЕДЕЛЯЮТ отдельные файлы
+        поверх переданного набора. Без форков (или allow=False) — desc как есть + его индекс."""
+        main_index = core.load_chunk_index(desc=desc, repo=self._repo(), token=self._token())
+        mod_id = desc.get('id')
+        if not (allow and self._forks() and mod_id):
+            return desc, main_index
+        fork_descs, fork_indexes = [], []
+        for src in self._forks():                     # только форки, ВЫСШИЙ приоритет первым
+            repo, tok = src['repo'], src['token']
+            cat = self._catalog_for(repo, tok)
+            if mod_id not in cat:
+                continue                              # форк не содержит этот мод
+            try:
+                d = core.descriptor_for({'id': mod_id}, cat, repo, tok)
+            except Exception as e:
+                self.log(f'⚠ форк {repo}: дескриптор {mod_id} не загружен ({e})'); d = None
+            if not d:
+                continue
+            fork_descs.append(d)
+            try:
+                fork_indexes.append(self._index_for(repo, tok, desc=d))
+            except Exception as e:
+                self.log(f'⚠ форк {repo}: индекс частей не загружен ({e})')
+        if not fork_descs:
+            return desc, main_index
+        # форки поверх переданного desc (идентичность/остальные файлы — из desc)
+        merged = core.merge_descriptors(fork_descs + [desc])
+        index = core.merge_chunk_indexes(fork_indexes + [main_index])
+        return merged, index
 
     def _fork_manifest(self, repo, tok, camp, unit, which):
         """Манифест форка для пака camp/unit (which='code'|'assets'). {} если нет."""
@@ -877,6 +921,9 @@ class Api:
             'busy': self.busy,
             'tutorial_done': self.config.get('tutorial_done', False),
             'rail_collapsed': self.config.get('rail_collapsed', False),
+            'always_show_plan': self.config.get('always_show_plan', False),
+            'show_hidden': self.config.get('show_hidden', False),
+            'desc_in_list': self.config.get('desc_in_list', False),
             'help_url': HELP_URL,
         }
 
@@ -1104,6 +1151,81 @@ class Api:
         ce = self._catalog_entry(mid)               # живой фолбэк (каталог грузится лениво)
         return (ce.get('description') or '') if ce else ''
 
+    def _full_desc_of(self, mid):
+        """Полное описание мода (без цветовой разметки) — для показа прямо в списке.
+        С диска (ModuleInfo), фолбэк на каталог. '' если нигде нет."""
+        if not mid:
+            return ''
+        p = self._mi_path(mid)
+        if p.exists():
+            card = core.module_card(p) or {}
+            if card.get('full'):
+                return core._strip_color(card.get('full') or '')
+        ce = self._catalog_entry(mid)
+        return core._strip_color(ce.get('full_description', '')) if ce else ''
+
+    # ───────── пользовательские метаданные модов (скрытие/теги/заметки) ─────────
+    def _meta_of(self, mid):
+        """Метаданные мода {hidden, tags, note} из config['mod_meta'] с дефолтами."""
+        m = (self.config.get('mod_meta') or {}).get(mid) or {}
+        return {'hidden': bool(m.get('hidden')),
+                'tags': list(m.get('tags') or []),
+                'note': str(m.get('note') or '')}
+
+    def _set_meta(self, mid, **kw):
+        """Обновить и сохранить метаданные мода; пустую запись удаляем, чтобы не пухла."""
+        if not mid:
+            return
+        store = self.config.setdefault('mod_meta', {})
+        rec = dict(store.get(mid) or {})
+        rec.update(kw)
+        # нормализация + отбрасывание пустых значений
+        rec = {k: v for k, v in rec.items()
+               if not (k == 'hidden' and not v)
+               and not (k == 'tags' and not v)
+               and not (k == 'note' and not v)}
+        if rec:
+            store[mid] = rec
+        else:
+            store.pop(mid, None)
+        self._save_config()
+
+    def set_mod_hidden(self, mid, val):
+        """Скрыть/показать мод в списке (глобально)."""
+        self._set_meta(mid, hidden=bool(val))
+        self._emit('tree_dirty')
+        return {'ok': True}
+
+    def set_mod_tags(self, mid, tags):
+        """Задать список пользовательских тегов мода (список строк)."""
+        clean, seen = [], set()
+        for t in (tags or []):
+            t = str(t).strip()
+            k = t.lower()
+            if t and k not in seen:
+                seen.add(k); clean.append(t)
+        self._set_meta(mid, tags=clean)
+        self._emit('tree_dirty')
+        return {'ok': True, 'tags': clean}
+
+    def set_mod_note(self, mid, note):
+        """Задать личную заметку мода."""
+        self._set_meta(mid, note=str(note or '').strip())
+        self._emit('tree_dirty')
+        return {'ok': True}
+
+    def set_show_hidden(self, val):
+        self.config['show_hidden'] = bool(val)
+        self._save_config()
+        self._emit('tree_dirty')
+        return {'ok': True}
+
+    def set_desc_in_list(self, val):
+        self.config['desc_in_list'] = bool(val)
+        self._save_config()
+        self._emit('tree_dirty')
+        return {'ok': True}
+
     @staticmethod
     def _card_from_entry(ce):
         """Карточка мода из записи каталога (для варианта, которого нет на диске)."""
@@ -1151,7 +1273,53 @@ class Api:
         info['variant_key'] = shown_key
         # полное описание с цветовой разметкой → безопасный HTML для окна (#12/#13)
         info['full_html'] = core.color_to_html(info.get('full_raw') or info.get('full') or '')
+        # зависимости в кликабельном виде: имя → mid (если такой мод есть в каталоге),
+        # плюс обратные связи «кто зависит от этого мода» (dependents).
+        info['requires'] = [self._dep_ref(x) for x in (info.get('requires') or [])]
+        info['conflicts_ref'] = [self._dep_ref(x) for x in (info.get('conflicts') or [])]
+        info['dependents'] = self._dependents_of(mid) if mid else []
         return {'ok': True, 'info': info}
+
+    def _dep_ref(self, name):
+        """Ссылка на зависимость: {'name', 'mid'} — mid каталожного мода или '' если нет."""
+        return {'name': name, 'mid': self._resolve_dep_name(name)}
+
+    def _resolve_dep_name(self, name):
+        """Разрешить имя зависимости (обычно короткое имя мода) в каталожный id.
+        Совпадение: точный ключ, либо единственный мод с таким листовым именем."""
+        name = (name or '').strip()
+        if not name:
+            return ''
+        cat = self._catalog_cache or {}
+        if name in cat:
+            return name
+        leaf = name.split('/')[-1]
+        hits = [k for k in cat if k.split('/')[-1] == leaf]
+        return hits[0] if len(hits) == 1 else ''
+
+    def _dep_index(self):
+        """Обратный индекс зависимостей {mid_цели: [mid_зависящих]} по каталогу.
+        Кэшируется до перезагрузки каталога (по id объекта каталога)."""
+        cat = self._catalog_cache or {}
+        if getattr(self, '_dep_idx_for', None) is not id(cat):
+            idx = {}
+            for k, ce in cat.items():
+                deps = set()
+                for v in (ce.get('variants') or []):
+                    for d in (v.get('depends') or []):
+                        deps.add(d)
+                for d in deps:
+                    tgt = self._resolve_dep_name(d)
+                    if tgt:
+                        idx.setdefault(tgt, []).append(k)
+            self._dep_idx = {t: sorted(set(v)) for t, v in idx.items()}
+            self._dep_idx_for = id(cat)
+        return self._dep_idx
+
+    def _dependents_of(self, mid):
+        """Кто зависит от мода: [{'name','mid'}] — моды каталога, требующие этот."""
+        dep = self._dep_index().get(mid, [])
+        return [{'name': m.split('/')[-1], 'mid': m} for m in dep]
 
     def _mod_group(self, mid):
         folder = mid.split('/')[0] if '/' in mid else None
@@ -1294,10 +1462,20 @@ class Api:
                 camps[c] = {'label': c, 'kind': 'camp', 'mods': [], 'packs': {}}
             return camps[c]
 
+        show_hidden = self.config.get('show_hidden', False)
+        desc_in_list = self.config.get('desc_in_list', False)
+        all_tags = set()
+        hidden_count = 0
         for camp, pack, kind, label, sc, st, date, iid, mid in sorted(
                 rows, key=lambda x: (x[0] or '', x[1] or '', x[3])):
             if only_attention and sc == 'ok':
                 continue
+            meta = self._meta_of(mid) if mid else {'hidden': False, 'tags': [], 'note': ''}
+            all_tags.update(meta['tags'])
+            if meta['hidden']:
+                hidden_count += 1
+                if not show_hidden:
+                    continue                       # скрытый мод — не показываем в списке
             node = {
                 'iid': iid, 'label': label, 'kind': kind,
                 'name': (self._name_of(mid) if mid else label),
@@ -1309,6 +1487,10 @@ class Api:
                 'folder': (mid.split('/')[0] if mid and '/' in mid else ''),
                 'section': (self._section_of(mid) if mid else ''),
                 'desc': (self._desc_of(mid) if mid else ''),
+                'full_desc': (self._full_desc_of(mid) if (mid and desc_in_list) else ''),
+                'hidden': meta['hidden'],
+                'tags': meta['tags'],
+                'note': meta['note'],
                 'has_info': bool(mid),
                 'labels': (self._camps_of(mid) if mid else []),   # сборки-метки (бейджи)
                 'variants': (self._variants_of(mid) if mid else []),  # Pol/Shu-переключатель
@@ -1338,6 +1520,10 @@ class Api:
             'queue': self._queue_summary(),
             'tree_mode': self._tree_mode(),
             'name_mode': self.config.get('name_mode', 'folder'),
+            'all_tags': sorted(all_tags, key=lambda s: s.lower()),
+            'hidden_count': hidden_count,
+            'show_hidden': show_hidden,
+            'desc_in_list': desc_in_list,
         }
 
     def _queue_summary(self):
@@ -1411,6 +1597,13 @@ class Api:
     def set_rail_collapsed(self, collapsed=True):
         """Запомнить состояние левой панели (свёрнута/развёрнута)."""
         self.config['rail_collapsed'] = bool(collapsed)
+        self._save_config()
+        return True
+
+    def set_always_show_plan(self, v):
+        """«Всегда показывать план обновления» (выключает тихий режим). ВКЛ → окно-план
+        всплывает даже для бесконфликтного апдейта (для тех, кто хочет видеть детали)."""
+        self.config['always_show_plan'] = bool(v)
         self._save_config()
         return True
 
@@ -2174,6 +2367,7 @@ class Api:
         self._merge_queue = targets
         self._merge_remember = {}          # запомненные решения конфликтов (status -> code)
         self._merge_remember_on = False    # «больше не спрашивать» до конца серии
+        self._silent_updates = []          # тихо применённые моды (для итогового тоста)
         self._emit('op_begin', {'name': 'Обновление'})
         if skipped:
             self.log(f'Пропущено {skipped} (паки/сборки — через «Установить»).')
@@ -2184,6 +2378,7 @@ class Api:
         if self.should_cancel():
             self._merge_queue = []
         if not getattr(self, '_merge_queue', None):
+            self._emit_silent_summary()    # тост-итог по тихо применённым модам
             self.busy = False
             self._emit('op_end', {'status': 'Готово'})
             self._emit('tree_dirty')
@@ -2220,7 +2415,47 @@ class Api:
             threading.Thread(target=self._apply_merge_worker, args=(pm, auto),
                              daemon=True).start()
             return
+        # Тихий режим (по умолчанию): бесконфликтный апдейт применяем БЕЗ окна — все
+        # действия автоматические и безопасные, спрашивать нечего. Окно всплывает только
+        # при конфликтах, либо если игрок включил «всегда показывать план».
+        if s.get('conflicts', 0) == 0 and not self.config.get('always_show_plan', False):
+            if not hasattr(self, '_silent_updates'):
+                self._silent_updates = []
+            self._silent_updates.append({'id': plan.get('id'), 'summary': s,
+                                         'version_new': plan.get('version_new')})
+            pm = self._pending_merge
+            self._pending_merge = None
+            self.log(f'{plan.get("id")}: обновление применяется автоматически (нет конфликтов).')
+            threading.Thread(target=self._apply_merge_worker, args=(pm, {}),
+                             daemon=True).start()
+            return
         self._emit('merge_plan', self._serialize_plan(plan))
+
+    def _emit_silent_summary(self):
+        """Тост-итог по модам, применённым в тихом режиме (в конце очереди)."""
+        ups = getattr(self, '_silent_updates', None) or []
+        self._silent_updates = []
+        if not ups:
+            return
+        if len(ups) == 1:
+            u = ups[0]; s = u['summary']
+            repl = s.get('update', 0) + s.get('automerge', 0)
+            kept = s.get('player_only', 0)
+            parts = []
+            if repl:
+                parts.append(f'обновлено {repl} {_plF(repl)}')
+            if s.get('add', 0):
+                parts.append(f'добавлено {s["add"]} {_plF(s["add"])}')
+            if kept:
+                parts.append('ваши правки сохранены')
+            detail = ' · '.join(parts) or 'без изменений файлов'
+            self._emit('merge_silent', {'text': f'{u["id"]} обновлён',
+                                        'sub': detail, 'count': 1})
+        else:
+            self._emit('merge_silent',
+                       {'text': f'Обновлено модов: {len(ups)}',
+                        'sub': 'все — автоматически, ваши правки сохранены',
+                        'count': len(ups)})
 
     def _remembered_decisions(self, plan):
         """Если игрок выбрал «Запомнить» (self._merge_remember_on) — применяем все
@@ -2319,7 +2554,10 @@ class Api:
         mods_dir = self._mods_dir()
         self.log(f'=== Обновление дискового мода: {mid} ===')
         try:
-            cat = core.load_catalog('descriptors/catalog.json', repo, tok)
+            # через _catalog_for → тот же кэш, что читают _camp_variant_entry/_variant_keys.
+            # Иначе при пустом self._catalog_cache (мёрж без предварительной проверки) подбор
+            # Pol/Shu-варианта молча проваливался в default базового id (original).
+            cat = self._catalog_for(repo, tok)
             try:
                 ib = core.detect_installed_base(mods_dir)
             except Exception:
@@ -2383,13 +2621,17 @@ class Api:
             if not desc:
                 self.log(f'Мод {mid} не найден в каталоге — обновить нечем.')
                 self._merge_next(); return
-            # дисковая папка mid — стабильная идентичность мода. Если подобран Pol/Shu-
-            # сиблинг (id вида ShusRangers/X@PolX), ставим его контент, но снимок и детект
-            # ключуются по mid (папке), а не по id варианта — иначе снимок не находится.
+            snap = core.load_install_snapshot(mods_dir, mid)
+            # Наложение форков — по КАТАЛОЖНОМУ ключу варианта (desc['id'], напр.
+            # ShusRangers/ShuPirates@PolPirates), ДО нормализации id к дисковой папке-mid.
+            # Иначе у Pol/Shu-модов ключ mid=ShusRangers/ShuPirates ведёт в _overlay к
+            # ДЕФОЛТНОМУ варианту базового id (original/original_fixes) — теряется и redux-
+            # набор, и сам форк (мод «худеет» до 2 файлов, детект→удалить 9). См. _overlay.
+            desc, index = self._overlay_theirs(desc, info.get('source'))
+            # дисковая папка mid — стабильная идентичность мода: снимок/детект ключуются по
+            # mid (папке), а не по id варианта — иначе снимок не находится.
             if desc.get('id') != mid:
                 desc = dict(desc); desc['id'] = mid
-            snap = core.load_install_snapshot(mods_dir, mid)
-            desc, index = self._overlay_theirs(desc, info.get('source'))
             plan = core.plan_update_merge(desc, mods_dir, index, token=tok, log=self.log,
                                           snapshot=snap, tmp_dir=ROOT,
                                           progress_cb=self._progress,
