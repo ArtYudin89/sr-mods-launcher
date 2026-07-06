@@ -221,6 +221,10 @@ input:focus-visible,select:focus-visible,textarea:focus-visible,
 .row:focus{outline:none;}
 .row:focus-visible{outline:2px solid var(--accent);outline-offset:-2px;background:var(--row-hover);}
 .row.sel{background:var(--row-sel);}
+/* ВЫДЕЛЕНА (активная строка) — акцентная полоса слева + имя акцентом; отлично от ВЫБРАНА
+   (галочка + фоновая заливка). Активная может быть и выбранной одновременно. */
+.row.leaf.active{background:var(--row-sel);box-shadow:inset 3px 0 0 var(--accent);}
+.row.leaf.active > .name .label{color:var(--accent);}
 .row .name{display:flex;align-items:center;gap:7px;min-width:0;overflow:hidden;}
 .row .name .tw{width:14px;color:var(--muted);text-align:center;flex:none;cursor:pointer;font-size:11px;}
 .row .name .name-line{display:flex;align-items:center;min-width:0;}

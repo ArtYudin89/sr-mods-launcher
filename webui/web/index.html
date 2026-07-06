@@ -113,8 +113,8 @@
         <button class="icon-btn rail-toggle active" id="railToggle" title="Показать/скрыть панель фильтров и отображения">▤</button>
         <div class="tb-divider"></div>
         <button class="btn primary" id="addBtn" title="Добавить мод, пак или целую сборку в этот профиль">➕ Добавить мод</button>
-        <button class="btn" id="installBtn" title="Скачать и установить. Без выделения — весь профиль целиком; с выделением — только выбранные строки.">🧩 Установить все</button>
-        <button class="btn collapsible-action" id="mergeBtn" title="Скачать и применить новые версии (после «Проверить обновления»), сохранив ваши ручные правки файлов. Без выделения — все моды с обновлением; с выделением — только выбранные.">🔀 Обновить все</button>
+        <button class="btn" id="installBtn" title="Скачать и установить. Ничего не выбрано галочками — весь профиль целиком; есть выбранные (отмеченные галочкой) — только они.">🧩 Установить все</button>
+        <button class="btn collapsible-action" id="mergeBtn" title="Скачать и применить новые версии (после «Проверить обновления»), сохранив ваши ручные правки файлов. Ничего не выбрано — все моды с обновлением; есть выбранные галочкой — только они.">🔀 Обновить все</button>
         <button class="btn collapsible-action" id="compatBtn" title="Проверить, всё ли совместимо: есть ли база, фиксы, конфликты">🛡 Совместимость</button>
         <div class="more-wrap">
           <button class="btn ghost" id="moreBtn" title="Ещё действия">⋯ Ещё ▾</button>
@@ -151,12 +151,12 @@
         </div>
       </div>
 
-      <!-- второй список: связи выбранного мода (те же колонки, что и у основного) -->
+      <!-- второй список: связи ВЫДЕЛЕННОГО (активного) мода — те же колонки, что и у основного -->
       <div class="rel-wrap collapsed" id="relWrap">
-        <div class="rel-head" id="relHead" title="Связи выбранного мода — свернуть/развернуть">
+        <div class="rel-head" id="relHead" title="Связи выделенного мода — свернуть/развернуть">
           <span class="rel-tw">▸</span>
           <span class="rel-title">🔗 Связи</span>
-          <span class="rel-sub sub" id="relSub">— выберите мод в списке</span>
+          <span class="rel-sub sub" id="relSub">— выделите мод в списке</span>
         </div>
         <div class="rel-list">
           <div class="tree-head">
@@ -166,7 +166,7 @@
             <div class="c">В профиле</div>
             <div class="c">Состояние</div>
           </div>
-          <div class="tree-body" id="relBody" role="tree" aria-label="Связи выбранного мода"></div>
+          <div class="tree-body" id="relBody" role="tree" aria-label="Связи выделенного мода"></div>
         </div>
       </div>
 

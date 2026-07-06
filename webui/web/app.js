@@ -5,7 +5,11 @@ const $ = (id) => document.getElementById(id);
 
 let STATE = {};
 let TREE = null;
-const selected = new Set();          // выбранные iid листьев
+// ДВА независимых понятия (как в проводнике/почте):
+//  • selected — ВЫБОР: строки, отмеченные чекбоксом (Ctrl/Shift), для МАССОВЫХ действий.
+//  • activeIid — ВЫДЕЛЕНИЕ: одна активная (текущая) строка, подсвечена; драйвит связи и (i).
+const selected = new Set();          // «выбрано» чекбоксом — iid листьев (для действий)
+let activeIid = null;                // «выделена» — активная строка (одна), драйвит связи
 const collapsed = new Set();         // свёрнутые узлы
 const NODE = {};                     // iid -> узел (для быстрых проверок)
 let busy = false;
@@ -25,7 +29,7 @@ const STATES = [
   { k: 'load', label: 'каталог грузится', badge: 'b-load', tip: 'каталог ещё загружается' },
 ];
 const filter = { states: new Set(STATES.map((s) => s.k)), inGame: false, inProfile: false, camps: new Set(), tags: new Set() };
-let lastClickedIid = null;           // якорь для выделения диапазона по Shift
+let anchorIid = null;                // якорь для диапазона ВЫБОРА по Shift
 
 // отображаемые названия сборок (внутренние ключи остаются как есть — это только показ)
 const CAMP_LABELS = {
@@ -509,7 +513,7 @@ function renderTree() {
   body.querySelectorAll('.row.group').forEach((el) => el.onclick = () => { treeCursor = el.dataset.key; toggleCollapse(el.dataset.key); });
   body.querySelectorAll('.row.leaf').forEach((el) => el.onclick = (e) => { treeCursor = el.dataset.iid; onLeafClick(e, el.dataset.iid); });
   body.querySelectorAll('.row-check').forEach((el) => el.onclick = (e) => {
-    e.stopPropagation(); treeCursor = el.dataset.iid; onLeafClick(e, el.dataset.iid, { toggle: !e.shiftKey }); });
+    e.stopPropagation(); treeCursor = el.dataset.iid; onLeafClick(e, el.dataset.iid, { check: true }); });
   body.querySelectorAll('.toggle.click').forEach((el) =>
     el.onclick = (e) => { e.stopPropagation(); onToggleClick(el); });
   body.querySelectorAll('.info-btn').forEach((el) =>
@@ -543,6 +547,9 @@ function moveTreeFocus(i) {
   treeCursor = rowId(rows[i]);
   rows.forEach((r, j) => { r.tabIndex = (j === i ? 0 : -1); });
   try { rows[i].focus(); } catch (e) {}
+  // стрелки перемещают ВЫДЕЛЕНИЕ (активную строку) → связи следуют (отложенно)
+  const iid = rows[i].dataset.iid;
+  if (iid && !rows[i].classList.contains('group')) activateRow(iid, false, true);
 }
 function onTreeKey(e) {
   const rows = treeRows();
@@ -567,10 +574,10 @@ function onTreeKey(e) {
     if (isGroup && !collapsed.has(row.dataset.key)) { treeCursor = row.dataset.key; _treeRefocus = true; toggleCollapse(row.dataset.key); }
     else { for (let j = idx - 1; j >= 0; j--) if (rows[j].classList.contains('group')) { moveTreeFocus(j); break; } }
   }
-  else if (key === ' ' || key === 'Spacebar') {          // Space — выделить строку
+  else if (key === ' ' || key === 'Spacebar') {          // Space — ВЫБРАТЬ строку (галочка)
     e.preventDefault();
     if (isGroup) { treeCursor = row.dataset.key; _treeRefocus = true; toggleCollapse(row.dataset.key); }
-    else { _treeRefocus = true; onLeafClick(e, row.dataset.iid); }
+    else { _treeRefocus = true; onLeafClick(e, row.dataset.iid, { check: true }); }
   }
   else if (key === 'Enter') {                              // Enter — свернуть/раскрыть группу или переключить «в профиле»
     e.preventDefault();
@@ -638,11 +645,12 @@ function userTags(tags) {
   return (tags || []).map((t) => `<span class="utag" title="ваш тег">${esc(t)}</span>`).join('');
 }
 function leafRow(n, lvl) {
-  const isSel = selected.has(n.iid);
-  const sel = isSel ? ' sel' : '';
+  const isSel = selected.has(n.iid);            // ВЫБРАНА (галочка, для действий)
+  const isAct = n.iid && n.iid === activeIid;   // ВЫДЕЛЕНА (активная строка)
+  const sel = (isSel ? ' sel' : '') + (isAct ? ' active' : '');
   const hid = n.hidden ? ' hidden-mod' : '';
   const check = n.iid
-    ? `<span class="row-check${isSel ? ' on' : ''}" data-iid="${esc(n.iid)}" title="Выделить строку (Shift — диапазон, Ctrl — по одной)">${isSel ? '✓' : ''}</span>`
+    ? `<span class="row-check${isSel ? ' on' : ''}" data-iid="${esc(n.iid)}" title="Выбрать для массовых действий (Ctrl — по одной, Shift — диапазон)">${isSel ? '✓' : ''}</span>`
     : '<span class="row-check ghost"></span>';
   const inGame = `<span class="toggle ro${n.in_game ? ' on' : ''}" title="${n.in_game ? 'подключён в игре' : 'не подключён в игре'}">${n.in_game ? '✓' : ''}</span>`;
   const inProf = n.mid
@@ -715,34 +723,52 @@ function collapseAll() {
 }
 
 // ───────── выбор ─────────
+let _relTimer = null;
+// подсветить активную строку в DOM без полной перерисовки (для навигации стрелками)
+function markActiveDom(iid) {
+  $('treeBody').querySelectorAll('.row.leaf.active').forEach((r) => r.classList.remove('active'));
+  if (iid) {
+    const el = [...$('treeBody').querySelectorAll('.row.leaf')].find((r) => r.dataset.iid === iid);
+    if (el) el.classList.add('active');
+  }
+}
+// установить активную (ВЫДЕЛЕННУЮ) строку → связи следуют за ней. immediate=false —
+// отложенно (навигация стрелками не спамит бэкенд запросами связей на каждый шаг).
+function activateRow(iid, immediate, dom) {
+  activeIid = iid || null;
+  if (dom) markActiveDom(iid);
+  const cn = iid ? (NODE[iid] || allNodes().find((x) => x.iid === iid)) : null;
+  const mid = cn && cn.mid ? cn.mid : null;
+  clearTimeout(_relTimer);
+  if (immediate) renderRelList(mid);
+  else _relTimer = setTimeout(() => renderRelList(mid), 220);
+}
+function setActiveRow(iid) { activateRow(iid, true, false); }
+// клик по строке. Обычный клик — только ВЫДЕЛЕНИЕ (активная строка). Чекбокс / Ctrl /
+// Shift — ВЫБОР (галочки, набор `selected`) для массовых действий. Понятия независимы:
+// обычный клик НЕ меняет галочки, чекбокс НЕ переносит фокус связей неожиданно.
 function onLeafClick(e, iid, opt) {
   if (!iid) return;
   opt = opt || {};
-  // Shift — выделить диапазон от якоря (последний обычный клик) до текущего по видимому порядку
-  if (e.shiftKey && lastClickedIid && lastClickedIid !== iid) {
+  const wantSelect = opt.check || e.ctrlKey || e.metaKey || e.shiftKey;   // операция ВЫБОРА
+  // Shift — диапазон ВЫБОРА от якоря до текущего по видимому порядку строк
+  if (e.shiftKey && anchorIid && anchorIid !== iid) {
     const leaves = [...$('treeBody').querySelectorAll('.row.leaf')].map((r) => r.dataset.iid);
-    const a = leaves.indexOf(lastClickedIid), b = leaves.indexOf(iid);
+    const a = leaves.indexOf(anchorIid), b = leaves.indexOf(iid);
     if (a >= 0 && b >= 0) {
-      if (!(e.ctrlKey || e.metaKey)) selected.clear();
       const [lo, hi] = a < b ? [a, b] : [b, a];
       for (let i = lo; i <= hi; i++) selected.add(leaves[i]);
-      renderTree();
+      setActiveRow(iid); renderTree();
       return;                            // якорь НЕ двигаем — можно тянуть диапазон дальше
     }
   }
-  const toggle = opt.toggle || e.ctrlKey || e.metaKey;
-  if (toggle) {
+  if (wantSelect) {                       // ВЫБОР: переключить галочку строки
     selected.has(iid) ? selected.delete(iid) : selected.add(iid);
-  } else {
-    const only = selected.size === 1 && selected.has(iid);
-    selected.clear();
-    if (!only) selected.add(iid);
   }
-  lastClickedIid = iid;                   // новый якорь для будущего Shift-диапазона
+  anchorIid = iid;                        // якорь для будущего Shift-диапазона (любой клик)
+  // ВЫДЕЛЕНИЕ: активной становится строка в любом случае (и при выборе тоже)
+  setActiveRow(iid);
   renderTree();
-  // выбор одного мода → показать его связи во втором списке
-  const cn = NODE[iid] || allNodes().find((x) => x.iid === iid);
-  if (cn && cn.mid) renderRelList(cn.mid);
 }
 // индекс записи профиля из iid: 'p3' (обычная) или 'p3#Кат/Мод' (мод развёрнутого сборки)
 function pidxOf(iid) { const m = /^p(\d+)(#|$)/.exec(iid || ''); return m ? parseInt(m[1]) : null; }
@@ -773,7 +799,7 @@ function _confArr(i) {
 async function renderRelList(mid) {
   relMid = mid || null;
   const sub = $('relSub'), body = $('relBody');
-  if (!mid) { relInfo = null; sub.textContent = '— выберите мод в списке'; body.innerHTML = ''; return; }
+  if (!mid) { relInfo = null; sub.textContent = '— выделите мод в списке'; body.innerHTML = ''; return; }
   // панель НЕ разворачиваем автоматически — состояние сворачивания за пользователем (#1);
   // содержимое обновляем всегда, чтобы при разворачивании показать текущий выбор
   sub.textContent = '— загрузка…';
@@ -785,7 +811,7 @@ async function renderRelList(mid) {
 // перерисовать строки из кэша relInfo + СВЕЖИХ узлов дерева (после refresh/переключений)
 function paintRelList() {
   const sub = $('relSub'), body = $('relBody');
-  if (!relMid || !relInfo) { if (!relMid) sub.textContent = '— выберите мод в списке'; return; }
+  if (!relMid || !relInfo) { if (!relMid) sub.textContent = '— выделите мод в списке'; return; }
   const i = relInfo;
   const groups = [
     ['Требует', i.requires, 'Моды, которые нужны этому'],
@@ -840,9 +866,10 @@ function wireRelBody(body) {
 // выбрать связанный мод: подсветить в основном списке (если есть) + показать ЕГО связи
 function selectRelMid(mid) {
   if (!mid) return;
-  const el = [...$('treeBody').querySelectorAll('.row.leaf')].find((r) => r.dataset.mid === mid);
   const node = allNodes().find((n) => n.mid === mid);
-  if (node) { selected.clear(); selected.add(node.iid); lastClickedIid = node.iid; renderTree(); }
+  // клик по связи ВЫДЕЛЯЕТ мод (активная строка), галочки-выбор не трогаем
+  if (node) { activeIid = node.iid; anchorIid = node.iid; renderTree(); }
+  const el = [...$('treeBody').querySelectorAll('.row.leaf')].find((r) => r.dataset.mid === mid);
   if (el) el.scrollIntoView({ block: 'nearest' });
   renderRelList(mid);
 }
@@ -1188,7 +1215,7 @@ async function browseGame() {
 }
 
 // ───────── профили/настройки ─────────
-async function switchProfile(name) { STATE = await api().switch_profile(name); applyState(); selected.clear(); refreshTree(); }
+async function switchProfile(name) { STATE = await api().switch_profile(name); applyState(); selected.clear(); activeIid = null; relMid = null; renderRelList(null); refreshTree(); }
 const PRESET_CAMPS = ['universe', 'redux', 'original'];   // вшитые пресеты «всё одной метки»
 function openProfiles() {
   $('newProfName').value = '';
@@ -1300,7 +1327,7 @@ function renderProfList() {
 }
 async function pickProfile(name) {
   STATE = await api().switch_profile(name);
-  applyState(); selected.clear(); refreshTree();
+  applyState(); selected.clear(); activeIid = null; relMid = null; renderRelList(null); refreshTree();
   renderProfList();                                     // окно остаётся открытым
   toast(`Профиль: ${name}`, 'ok');
 }
@@ -1308,7 +1335,7 @@ async function createProfile() {
   const name = $('newProfName').value.trim(); if (!name) return;
   const r = await api().new_profile(name);
   if (!r.ok) { toast(r.error, 'err'); return; }
-  STATE = r.state; applyState(); selected.clear(); refreshTree();
+  STATE = r.state; applyState(); selected.clear(); activeIid = null; relMid = null; renderRelList(null); refreshTree();
   $('newProfName').value = '';
   renderProfList();                                     // НЕ закрываем — остаёмся в списке
   toast('Профиль создан', 'ok');
@@ -1320,7 +1347,7 @@ function deleteProfileByName(name) {
     async () => {
       const r = await api().delete_profile(name);
       if (!r.ok) { toast(r.error, 'err'); return; }
-      STATE = r.state; applyState(); selected.clear(); refreshTree();
+      STATE = r.state; applyState(); selected.clear(); activeIid = null; relMid = null; renderRelList(null); refreshTree();
       renderProfList(); toast('Профиль удалена', 'ok');
     });
 }
@@ -1941,7 +1968,7 @@ const TOUR_STEPS = [
   { sel: '#addBtn', title: 'Добавить мод',
     text: 'Окно добавления: поиск по названию, выбор по цепочке Сборка → Пак → Мод или по ссылке. Можно добавить и целую сборку сразу.' },
   { sel: '#treeBody', title: 'Список модов',
-    text: 'Все моды профиля. Галочка «В профиле» включает/выключает мод, «В игре» — подключён ли он сейчас в самой игре. Слева — чекбоксы выделения (Shift — диапазон). Правый клик по строке: скрыть мод с глаз, свои теги, личная заметка (📝 справа в строке). Кнопка ⓘ открывает карточку мода — её можно двигать, менять размер и держать несколько сразу. Под списком — сворачиваемый список «🔗 Связи»: выберите мод, и там появятся моды, которые он требует, для которых нужен и с которыми конфликтует (теми же строками).' },
+    text: 'Все моды профиля. Клик по строке — ВЫДЕЛИТЬ её (активная строка, подсветка). Слева чекбоксы — ВЫБРАТЬ моды галочкой для массовых действий (Shift — диапазон, Ctrl — по одной). Галочка «В профиле» включает/выключает мод, «В игре» — подключён ли он в самой игре. Правый клик: скрыть мод, свои теги, заметка (📝 справа). Кнопка ⓘ — карточка мода (подвижная). Под списком — сворачиваемый список «🔗 Связи»: выделите мод, и там теми же строками появятся моды, которые он требует, для которых нужен и с которыми конфликтует.' },
   { sel: '#installBtn', title: 'Установить и обновить',
     text: 'Кнопки над списком: «Установить все» качает моды профиля; «Обновить все» (после «Проверить обновления») ставит новые версии, сохраняя ваши правки. Редкие действия спрятаны в «⋯ Ещё».' },
   { sel: '.side-tabs', title: 'Игра и Журнал',
