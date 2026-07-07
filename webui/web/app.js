@@ -663,7 +663,7 @@ function leafRow(n, lvl) {
   // полное описание в списке (настройка) — иначе краткое; ничего, если пусто
   const descText = (STATE.desc_in_list && n.full_desc) ? n.full_desc : n.desc;
   const desc = descText ? `<div class="mdesc${STATE.desc_in_list && n.full_desc ? ' full' : ''}">${esc(descText)}</div>` : '';
-  const date = n.date ? `<span class="mdate" title="дата файлов мода на диске">${esc(n.date)}</span>` : '';
+  const date = n.date ? `<span class="mdate" title="дата последнего изменения мода разработчиком (если неизвестна — дата файлов на диске); можно выделить и скопировать">${esc(n.date)}</span>` : '';
   const disp = (STATE.name_mode === 'module' && n.name) ? n.name : n.label;
   // во втором режиме рядом показываем папку мелким, чтобы не терять ориентир
   const alt = (STATE.name_mode === 'module' && n.name && n.name !== n.label)
@@ -671,22 +671,33 @@ function leafRow(n, lvl) {
   const hidMark = n.hidden ? '<span class="hid-mark" title="Скрыт из списка (виден, т.к. включён показ скрытых)">🙈</span>' : '';
   return `<div class="row leaf lvl${lvl}${sel}${hid}" data-iid="${esc(n.iid)}" data-mid="${esc(n.mid || '')}" role="treeitem" aria-level="${lvl}" aria-selected="${isSel ? 'true' : 'false'}" aria-label="${esc(disp)}, ${esc(n.status)}${n.in_profile ? ', в профиле' : ''}${n.hidden ? ', скрыт' : ''}">
     <div class="name">${check}<span class="tw">·</span>
-      <span class="label-wrap"><span class="name-line">${hidMark}<span class="label">${esc(disp)}</span>${labelBadges(n.labels)}${userTags(n.tags)}${alt}${date}</span>${variantSwitch(n)}${desc}</span>${info}</div>
+      <span class="label-wrap"><span class="name-line">${hidMark}<span class="label">${esc(disp)}</span>${labelBadges(n.labels)}${userTags(n.tags)}${alt}${date}</span>${variantSwitch(n)}${desc}</span>${noteIc}${info}</div>
     <div class="cell">${esc(colValue(n) || '')}</div>
     <div class="cell">${inGame}</div>
     <div class="cell">${inProf}</div>
-    <div class="cell">${noteIc}<span class="badge b-${n.status_class}">${esc(n.status)}</span></div></div>`;
+    <div class="cell"><span class="badge b-${n.status_class}">${esc(n.status)}</span></div></div>`;
 }
 
-// переключатель варианта мода (Pol/Shu) в одной папке: смена = пометка «обновление»
+// метка кнопки варианта: предпочитаем НАЗВАНИЕ БАЗОВОЙ СБОРКИ (а не имя пака). В узком
+// переключателе строки — короткий бейдж сборки (REDUX/UNI/ORIG), в карточке (full) —
+// полное имя. Если у двух вариантов метка сборки совпала бы (Pol/Shu в одной сборке) —
+// оставляем имя мода, чтобы их различать.
+function variantLabel(v, all, full) {
+  const camp = (v.camps && v.camps.length === 1) ? v.camps[0] : null;
+  const dup = camp && all.filter((x) => x.camps && x.camps.length === 1 && x.camps[0] === camp).length > 1;
+  if (!camp || dup) return v.name;
+  return full ? campLabel(camp) : (CAMP_BADGE[camp] || camp.toUpperCase());
+}
+// переключатель варианта мода в одной папке: смена = пометка «обновление»
 function variantSwitch(n) {
   if (!n.variants || n.variants.length < 2) return '';
   const opts = n.variants.map((v) => {
     const on = v.key === n.chosen ? ' on' : '';
     const col = (v.camps && v.camps.length) ? ' lbl-' + v.camps[0] : '';
     const tag = (v.camps || []).map((c) => CAMP_BADGE[c] || c).join(',');
+    const txt = variantLabel(v, n.variants);
     return `<button class="var-opt${on}${col}" data-mid="${esc(n.mid)}" data-key="${esc(v.key)}"
-      title="Вариант «${esc(v.name)}» [${esc(tag)}]${on ? ' — выбран' : ' — выбрать (потребует перекачки)'}">${esc(v.name)}</button>`;
+      title="Сборка «${esc(txt)}» [${esc(tag)}]${on ? ' — выбрана' : ' — выбрать (потребует перекачки)'}">${esc(txt)}</button>`;
   }).join('');
   return `<span class="var-switch" title="Вариант мода в этой папке: можно только один. Смена = перекачать при обновлении.">${opts}</span>`;
 }
@@ -1919,8 +1930,9 @@ function cardInfoRows(i, mid) {
     const tabs = i.variants.map((v) => {
       const on = v.key === i.variant_key ? ' on' : '';
       const tag = (v.camps || []).filter((c) => c !== 'shared').map((c) => CAMP_BADGE[c] || c).join(',');
+      const txt = variantLabel(v, i.variants, true);
       return `<button class="var-opt info-var${on}" data-key="${esc(v.key)}"
-        title="Показать описание варианта «${esc(v.name)}»${tag ? ' [' + esc(tag) + ']' : ''}">${esc(v.name)}${tag ? ' <span class="sub">' + esc(tag) + '</span>' : ''}</button>`;
+        title="Показать описание варианта «${esc(txt)}»${tag ? ' [' + esc(tag) + ']' : ''}">${esc(txt)}${tag ? ' <span class="sub">' + esc(tag) + '</span>' : ''}</button>`;
     }).join('');
     rows.push(`<div class="i-row"><div class="i-k">Вариант</div><div class="i-v"><span class="var-switch">${tabs}</span></div></div>`);
   }

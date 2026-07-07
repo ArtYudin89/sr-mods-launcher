@@ -97,7 +97,7 @@ IS_RWT = bool(EMBEDDED_TOKEN)
 # из репозитория ({version, url?, notes?}). url можно оставить пустым — тогда показ без
 # ссылки на скачивание (просто «доступна новая версия»).
 # ВНИМАНИЕ: при релизе выставить реальный следующий номер (текущий публичный > 0.13.1).
-LAUNCHER_VERSION = '0.18.6'
+LAUNCHER_VERSION = '0.19.0'
 RELEASE_REF = 'state/launcher_release.json'
 # Ссылка на полную справку в репозитории (ИНСТРУКЦИЯ-ПРОСТАЯ.md, имя в percent-encoding —
 # кириллица в пути; так браузер откроет её без ручного кодирования).
@@ -1151,17 +1151,41 @@ class Api:
                 return {**e, **v, 'source': src}     # мета берём с базы, уточняем вариантом
         return e
 
+    def _camp_repr_key(self, mid, camp, sv=None):
+        """Канонический ключ-источник versions_differ-мода для сборки camp: переключатель
+        показывает ОДНУ кнопку на сборку (а не отдельные installer/fixes-паки), а ставить
+        надо один конкретный источник. Приоритет: default_source этой сборки → фикс-пак
+        (перекрывает установщик) → первый по алфавиту. None, если у сборки нет источников."""
+        sv = sv if sv is not None else self._source_variants(mid)
+        inc = [(k, s) for k, s, _v in sv if '/' in s and s.split('/')[0] == camp]
+        if not inc:
+            return None
+        e = (self._catalog_cache or {}).get(mid.split('@', 1)[0]) or {}
+        ds = e.get('default_source')
+        for k, s in inc:
+            if s == ds:
+                return k
+        for k, s in inc:
+            if s.split('/')[-1].endswith('_fixes'):
+                return k
+        return sorted(inc, key=lambda x: x[1])[0][0]
+
     def _variants_of(self, mid):
         """Список вариантов папки mid для переключателя: [{key,name,camps}]. Пусто, если
         вариант один. Покрывает и Pol/Shu (@-ключи), и versions_differ (по источникам)."""
         cat = self._catalog_cache or {}
         sv = self._source_variants(mid)
-        if sv:                                        # versions_differ: варианты по источнику
-            out = []
-            for k, src, v in sv:
-                unit = src.split('/')[-1]             # различаем источники по имени пака
-                out.append({'key': k, 'name': unit,
-                            'camps': [src.split('/')[0]] if '/' in src else []})
+        if sv:                                        # versions_differ: ОДИН вариант на сборку
+            # схлопываем несколько паков одной сборки (installer+fixes) в одну кнопку —
+            # переключатель именуется базовой сборкой, а не паком (см. _camp_repr_key)
+            out, seen_camps = [], set()
+            for _k, src, _v in sv:
+                camp = src.split('/')[0] if '/' in src else ''
+                if camp in seen_camps:
+                    continue
+                seen_camps.add(camp)
+                out.append({'key': self._camp_repr_key(mid, camp, sv) or _k,
+                            'name': camp, 'camps': [camp] if camp else [], 'by_camp': True})
             out.sort(key=lambda x: x['name'])
             return out
         keys = self._variant_keys(mid)
@@ -1175,6 +1199,33 @@ class Api:
         out.sort(key=lambda v: v['name'])
         return out
 
+    def _dev_date(self, mid):
+        """Дата последнего изменения файлов мода РАЗРАБОТЧИКОМ (из каталога/манифеста), а не
+        дата установки на диск. Для versions_differ — mtime ВЫБРАННОГО варианта (у фикс-пака
+        с более новым файлом дата свежее); иначе — mtime записи каталога. None, если данных
+        нет (старые манифесты без mtime → лаунчер откатывается на дату файлов на диске)."""
+        if not mid:
+            return None
+        cat = self._catalog_cache or {}
+        if self._source_variants(mid):
+            sub = self._variant_sub(self._chosen_variant(mid)) or {}
+            mt = sub.get('mtime')
+        else:
+            key = self._chosen_variant(mid) or mid.split('@', 1)[0]
+            mt = (cat.get(key) or cat.get(mid.split('@', 1)[0]) or {}).get('mtime')
+        try:
+            return int(mt) if mt else None
+        except (TypeError, ValueError):
+            return None
+
+    def _display_date(self, mid, disk_iso):
+        """Дата мода для списка: предпочитаем дату РАЗРАБОТЧИКА (из каталога), иначе —
+        дату файлов на диске (дата установки). Форматируем единообразно (fmt_date)."""
+        dev = self._dev_date(mid)
+        if dev:
+            return fmt_date(datetime.fromtimestamp(dev).isoformat())
+        return fmt_date(disk_iso)
+
     def _chosen_variant(self, mid):
         """Выбранный игроком вариант папки mid (profile['variants']) или, если не
         выбирал, — установленный на диске / дефолтный. '' если не определить."""
@@ -1184,18 +1235,21 @@ class Api:
         if ch and ch in cat:
             return ch
         sv = self._source_variants(mid)
-        if sv:                                        # versions_differ: по источнику
+        if sv:                                        # versions_differ: одна кнопка на сборку
             keys = {k for k, _s, _v in sv}
-            if ch in keys:
-                return ch                             # синтетический выбор игрока
-            inst = self._installed_variant_key(mid)
-            if inst in keys:
-                return inst
-            e = cat.get(base) or {}
-            for k, s, _v in sv:                       # дефолт — по default_source
-                if s == e.get('default_source'):
-                    return k
-            return sv[0][0]
+            camp_of = {k: (s.split('/')[0] if '/' in s else None) for k, s, _v in sv}
+            # активная сборка: явный выбор игрока → установленный источник → default_source.
+            # Показываем канонический ключ этой сборки (а не конкретный installer/fixes-пак),
+            # чтобы выбранная кнопка совпадала с одной из показанных в переключателе.
+            active_camp = camp_of.get(ch) if ch in keys else None
+            if not active_camp:
+                inst = self._installed_variant_key(mid)
+                active_camp = camp_of.get(inst) if inst in keys else None
+            if not active_camp:
+                ds = (cat.get(base) or {}).get('default_source') or ''
+                active_camp = ds.split('/')[0] if '/' in ds else (
+                    sv[0][1].split('/')[0] if '/' in sv[0][1] else None)
+            return self._camp_repr_key(mid, active_camp, sv) or sv[0][0]
         return self._installed_variant_key(mid) or ''
 
     def set_variant(self, mid, key):
@@ -1213,7 +1267,15 @@ class Api:
         # не отличить); source отсутствует → считаем «другим», т.е. предлагаем перекачку
         _, want_src = self._variant_ref(key)
         inst_src = self._variant_ref(installed)[1] if installed else None
-        if key != installed and want_src != inst_src:
+        if self._source_variants(mid):
+            # переключатель именуется сборкой → перекачка нужна лишь при СМЕНЕ сборки, а не
+            # при выборе другого пака внутри уже установленной сборки (installer↔fixes)
+            want_camp = want_src.split('/')[0] if want_src and '/' in want_src else None
+            inst_camp = inst_src.split('/')[0] if inst_src and '/' in inst_src else None
+            differ = (want_camp != inst_camp)
+        else:
+            differ = (key != installed and want_src != inst_src)
+        if differ:
             self._updates[base] = {'n': 1, 'variant': key,
                                    'camp': (want_src.split('/')[0] if want_src else None)}
         else:
@@ -1604,7 +1666,7 @@ class Api:
                 'status_class': sc, 'status': st,
                 'in_game': bool(mid and mid in modcfg),
                 'in_profile': bool(mid and mid in enabled),
-                'date': fmt_date(date), 'mid': mid,
+                'date': self._display_date(mid, date), 'mid': mid,
                 'selectable': bool(iid),
                 'folder': (mid.split('/')[0] if mid and '/' in mid else ''),
                 'section': (self._section_of(mid) if mid else ''),

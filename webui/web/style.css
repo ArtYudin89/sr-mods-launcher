@@ -390,7 +390,9 @@ input:focus-visible,select:focus-visible,textarea:focus-visible,
   padding:0 5px;font-size:10px;font-weight:700;box-shadow:0 0 0 2px var(--panel);}
 .fcount:empty{display:none;}
 /* во время операции интерактив тулбара/таблицы заблокирован (прокрутка остаётся) */
-body.busy .seg button,body.busy .icon-btn{opacity:.5;pointer-events:none;}
+/* .seg-b — кнопки выбора в окне «Решения по обновлению»; оно ПОКАЗЫВАЕТСЯ во время
+   операции (busy) и ждёт решения игрока → блокировать их нельзя, иначе выбор недоступен */
+body.busy .seg button:not(.seg-b),body.busy .icon-btn{opacity:.5;pointer-events:none;}
 body.busy .base-pick{opacity:.5;pointer-events:none;}
 body.busy .toggle.click{pointer-events:none;opacity:.5;}
 .popover{
@@ -544,9 +546,10 @@ body.busy .toggle.click{pointer-events:none;opacity:.5;}
 /* пользовательские теги мода (отличны от меток сборок — нейтральный цвет) */
 .row .name .utag{display:inline-block;margin-left:6px;padding:0 6px;border-radius:5px;font-size:10px;
   font-weight:600;background:var(--chip);color:var(--muted);border:1px solid var(--line);vertical-align:middle;}
-.row .name .note-ic{margin-left:6px;font-size:11px;cursor:help;opacity:.85;}
+.row .name .note-ic{flex:none;margin-left:6px;font-size:11px;cursor:help;opacity:.85;}
 .row .name .hid-mark{margin-right:5px;font-size:11px;opacity:.8;}
-.row .name .mdate{margin-left:8px;font-size:10.5px;color:var(--muted);opacity:.7;font-weight:400;white-space:nowrap;}
+.row .name .mdate{margin-left:8px;font-size:10.5px;color:var(--muted);opacity:.7;font-weight:400;white-space:nowrap;
+  -webkit-user-select:text;user-select:text;cursor:text;}
 /* скрытые моды (видны только при включённом «показывать скрытые») — приглушены */
 .row.leaf.hidden-mod{opacity:.58;}
 .row.leaf.hidden-mod:hover{opacity:.85;}
