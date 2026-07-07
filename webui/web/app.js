@@ -28,7 +28,7 @@ const STATES = [
   { k: 'unknown', label: 'не в каталоге', badge: 'b-unknown', tip: 'установлен, но в каталоге его нет' },
   { k: 'load', label: 'каталог грузится', badge: 'b-load', tip: 'каталог ещё загружается' },
 ];
-const filter = { states: new Set(STATES.map((s) => s.k)), inGame: false, inProfile: false, camps: new Set(), tags: new Set() };
+const filter = { states: new Set(STATES.map((s) => s.k)), inGame: false, inProfile: false, camps: new Set(), tags: new Set(), onlyHidden: false, noTags: false };
 let anchorIid = null;                // якорь для диапазона ВЫБОРА по Shift
 
 // отображаемые названия сборок (внутренние ключи остаются как есть — это только показ)
@@ -212,6 +212,12 @@ function wireUI() {
   $('fInGame').onchange = (e) => { filter.inGame = e.target.checked; applyFilter(); };
   $('fInProfile').onchange = (e) => { filter.inProfile = e.target.checked; applyFilter(); };
   $('fShowHidden').onchange = (e) => toggleShowHidden(e.target.checked);
+  $('fOnlyHidden').onchange = (e) => {
+    filter.onlyHidden = e.target.checked;
+    // скрытые моды не приходят в дерево без «показывать скрытые» → включаем автоматически
+    if (filter.onlyHidden && !STATE.show_hidden) { $('fShowHidden').checked = true; toggleShowHidden(true); }
+    else applyFilter();
+  };
   $('legendBtn').onclick = () => $('legendBar').classList.toggle('hidden');
 
   // действия
@@ -219,6 +225,7 @@ function wireUI() {
   $('installBtn').onclick = onInstallClick;
   $('mergeBtn').onclick = startMerge;
   $('compatBtn').onclick = checkCompat;
+  $('clearSelBtn').onclick = () => { selected.clear(); anchorIid = null; renderTree(); };
   $('removeBtn').onclick = removeSelected;
 
   $('modcfgReadBtn').onclick = () => api().modcfg_to_profile().then((r) => {
@@ -303,24 +310,36 @@ function wireUI() {
   $('ctxOpenMod').onclick = () => { if (ctxMid) api().open_mod_folder(ctxMid); hideCtxMenu(); };
   $('ctxOpenMods').onclick = () => { api().open_mods_folder(); hideCtxMenu(); };
   $('ctxHide').onclick = () => {
-    const mid = ctxMid, wasHidden = ctxNode && ctxNode.hidden; hideCtxMenu();
-    if (mid) api().set_mod_hidden(mid, !wasHidden).then(() => { selected.delete('d:' + mid); refreshTree(); });
-  };
-  $('ctxTags').onclick = () => {
-    const mid = ctxMid, cur = (ctxNode && ctxNode.tags || []).join(', '); hideCtxMenu();
-    if (!mid) return;
-    promptModal('Теги мода', 'Через запятую. Пустое поле уберёт все теги.', cur, false).then((v) => {
-      if (v === null) return;
-      const tags = v.split(',').map((s) => s.trim()).filter(Boolean);
-      api().set_mod_tags(mid, tags).then(() => refreshTree());
+    const mids = ctxTargetMids(); hideCtxMenu();
+    if (!mids.length) return;
+    // хоть один показан → скрываем все выбранные; иначе показываем все
+    const anyShown = mids.some((m) => { const n = nodeByMid(m); return n && !n.hidden; });
+    api().set_mods_hidden(mids, anyShown).then(() => {
+      mids.forEach((m) => selected.delete('d:' + m)); refreshTree();
     });
   };
+  $('ctxTags').onclick = () => {
+    const mids = ctxTargetMids(); hideCtxMenu();
+    if (!mids.length) return;
+    if (mids.length > 1) {                       // массово: ДОБАВить теги ко всем выбранным
+      tagEditor(`Теги: ${mids.length} мод(ов)`,
+        'Эти теги будут ДОБАВЛЕНЫ ко всем выбранным модам (существующие теги останутся).', '')
+        .then((tags) => { if (tags && tags.length) api().add_mods_tags(mids, tags).then(() => refreshTree()); });
+    } else {
+      editTagsFor(mids[0]);                       // один мод: задать точный набор тегов
+    }
+  };
   $('ctxNote').onclick = () => {
-    const mid = ctxMid, cur = (ctxNode && ctxNode.note) || ''; hideCtxMenu();
-    if (!mid) return;
-    promptModal('Личная заметка', 'Видна как 📝 в строке мода (при наведении).', cur, true).then((v) => {
+    const mids = ctxTargetMids(); hideCtxMenu();
+    if (!mids.length) return;
+    const bulk = mids.length > 1;
+    const cur = bulk ? '' : ((nodeByMid(mids[0]) || {}).note || '');
+    const title = bulk ? `Заметка: ${mids.length} мод(ов)` : 'Личная заметка';
+    const hint = bulk ? 'Одна заметка будет записана ВСЕМ выбранным модам.'
+                      : 'Видна как 📝 в строке мода (при наведении).';
+    promptModal(title, hint, cur, true).then((v) => {
       if (v === null) return;
-      api().set_mod_note(mid, v).then(() => refreshTree());
+      api().set_mods_note(mids, v).then(() => refreshTree());
     });
   };
   $('ctxRemoveOne').onclick = () => { const p = ctxPidx; hideCtxMenu(); if (p !== null) cancelAdd(p); };
@@ -352,6 +371,7 @@ function wireUI() {
     }
     if (!$('confirmOverlay').classList.contains('hidden')) { $('confirmCancel').click(); return; }
     if (!$('mergeOverlay').classList.contains('hidden')) { $('mergeSkipBtn').click(); return; }
+    if (selected.size) { selected.clear(); anchorIid = null; renderTree(); return; }  // снять выбор (12)
   });
   // закрыть фильтр-поповер по клику вне
   document.addEventListener('click', (e) => {
@@ -377,7 +397,8 @@ function syncStateChecks() {
 }
 function applyFilter() {
   const n = (filter.states.size < STATES.length ? 1 : 0) + (filter.inGame ? 1 : 0)
-    + (filter.inProfile ? 1 : 0) + (filter.camps.size ? 1 : 0);
+    + (filter.inProfile ? 1 : 0) + (filter.camps.size ? 1 : 0) + (filter.tags.size ? 1 : 0)
+    + (filter.onlyHidden ? 1 : 0) + (filter.noTags ? 1 : 0);
   $('filterCount').textContent = n ? String(n) : '';
   renderTree();
 }
@@ -385,6 +406,8 @@ function passFilter(node) {
   if (!filter.states.has(node.status_class)) return false;
   if (filter.inGame && !node.in_game) return false;
   if (filter.inProfile && !node.in_profile) return false;
+  if (filter.onlyHidden && !node.hidden) return false;            // «только скрытые» (14)
+  if (filter.noTags && (node.tags || []).length) return false;    // «без тега» (16)
   if (filter.camps.size) {                        // быстрый фильтр по метке сборки
     const labs = node.labels || [];
     if (!labs.some((c) => filter.camps.has(c))) return false;
@@ -406,12 +429,18 @@ function toggleShowHidden(val) {
 function buildTagChips() {
   const tags = (TREE && TREE.all_tags) || [];
   const sec = $('tagSec');
-  if (!tags.length) { sec.style.display = 'none'; filter.tags.clear(); return; }
+  if (!tags.length) { sec.style.display = 'none'; filter.tags.clear(); filter.noTags = false; return; }
   sec.style.display = '';
   for (const t of [...filter.tags]) if (!tags.includes(t)) filter.tags.delete(t);
-  $('tagChips').innerHTML = tags.map((t) =>
+  const noTagChip = `<button class="chip-f notag-f${filter.noTags ? ' on' : ''}" data-notag="1" title="Показать только моды БЕЗ ваших тегов">∅ без тега</button>`;
+  $('tagChips').innerHTML = noTagChip + tags.map((t) =>
     `<button class="chip-f utag-f${filter.tags.has(t) ? ' on' : ''}" data-tag="${esc(t)}" title="Показать только с тегом «${esc(t)}»">${esc(t)}</button>`).join('');
-  $('tagChips').querySelectorAll('.chip-f').forEach((b) => b.onclick = () => {
+  $('tagChips').querySelectorAll('.notag-f').forEach((b) => b.onclick = () => {
+    filter.noTags = !filter.noTags;
+    b.classList.toggle('on', filter.noTags);
+    applyFilter();
+  });
+  $('tagChips').querySelectorAll('.utag-f').forEach((b) => b.onclick = () => {
     const t = b.dataset.tag;
     filter.tags.has(t) ? filter.tags.delete(t) : filter.tags.add(t);
     b.classList.toggle('on', filter.tags.has(t));
@@ -510,14 +539,18 @@ function renderTree() {
   body.innerHTML = rows.length ? rows.join('')
     : `<div class="tree-empty">Ничего не подходит под фильтр.<br>Снимите фильтр или измените поиск.</div>`;
 
-  body.querySelectorAll('.row.group').forEach((el) => el.onclick = () => { treeCursor = el.dataset.key; toggleCollapse(el.dataset.key); });
-  body.querySelectorAll('.row.leaf').forEach((el) => el.onclick = (e) => { treeCursor = el.dataset.iid; onLeafClick(e, el.dataset.iid); });
+  // _treeRefocus: после перерисовки вернуть фокус на строку курсора → стрелки ↑/↓ сразу
+  // переключают строки (а не прокручивают список), пока фокус не увели в другое место.
+  body.querySelectorAll('.row.group').forEach((el) => el.onclick = () => { treeCursor = el.dataset.key; _treeRefocus = true; toggleCollapse(el.dataset.key); });
+  body.querySelectorAll('.row.leaf').forEach((el) => el.onclick = (e) => { treeCursor = el.dataset.iid; _treeRefocus = true; onLeafClick(e, el.dataset.iid); });
   body.querySelectorAll('.row-check').forEach((el) => el.onclick = (e) => {
-    e.stopPropagation(); treeCursor = el.dataset.iid; onLeafClick(e, el.dataset.iid, { check: true }); });
+    e.stopPropagation(); treeCursor = el.dataset.iid; _treeRefocus = true; onLeafClick(e, el.dataset.iid, { check: true }); });
   body.querySelectorAll('.toggle.click').forEach((el) =>
     el.onclick = (e) => { e.stopPropagation(); onToggleClick(el); });
   body.querySelectorAll('.info-btn').forEach((el) =>
     el.onclick = (e) => { e.stopPropagation(); openModInfo(el.dataset.mid); });
+  body.querySelectorAll('.utag').forEach((el) =>            // клик по вашему тегу — редактор тегов мода
+    el.onclick = (e) => { e.stopPropagation(); if (el.dataset.mid) editTagsFor(el.dataset.mid); });
   body.querySelectorAll('.var-opt').forEach((el) =>
     el.onclick = (e) => { e.stopPropagation(); onVariantClick(el); });
   body.querySelectorAll('.row.leaf').forEach((el) =>
@@ -641,8 +674,9 @@ function statusCountHtml(counts) {
 }
 
 // пользовательские теги мода (отличны по стилю от меток сборок)
-function userTags(tags) {
-  return (tags || []).map((t) => `<span class="utag" title="ваш тег">${esc(t)}</span>`).join('');
+function userTags(tags, mid) {
+  return (tags || []).map((t) =>
+    `<span class="utag" data-mid="${esc(mid || '')}" data-tag="${esc(t)}" title="Ваш тег «${esc(t)}» — клик: редактировать теги мода">${esc(t)}</span>`).join('');
 }
 function leafRow(n, lvl) {
   const isSel = selected.has(n.iid);            // ВЫБРАНА (галочка, для действий)
@@ -671,7 +705,7 @@ function leafRow(n, lvl) {
   const hidMark = n.hidden ? '<span class="hid-mark" title="Скрыт из списка (виден, т.к. включён показ скрытых)">🙈</span>' : '';
   return `<div class="row leaf lvl${lvl}${sel}${hid}" data-iid="${esc(n.iid)}" data-mid="${esc(n.mid || '')}" role="treeitem" aria-level="${lvl}" aria-selected="${isSel ? 'true' : 'false'}" aria-label="${esc(disp)}, ${esc(n.status)}${n.in_profile ? ', в профиле' : ''}${n.hidden ? ', скрыт' : ''}">
     <div class="name">${check}<span class="tw">·</span>
-      <span class="label-wrap"><span class="name-line">${hidMark}<span class="label">${esc(disp)}</span>${labelBadges(n.labels)}${userTags(n.tags)}${alt}${date}</span>${variantSwitch(n)}${desc}</span>${noteIc}${info}</div>
+      <span class="label-wrap"><span class="name-line">${hidMark}<span class="label">${esc(disp)}</span>${labelBadges(n.labels)}${userTags(n.tags, n.mid)}${alt}${date}</span>${variantSwitch(n)}${desc}</span>${noteIc}${info}</div>
     <div class="cell">${esc(colValue(n) || '')}</div>
     <div class="cell">${inGame}</div>
     <div class="cell">${inProf}</div>
@@ -787,6 +821,45 @@ function selectedPidx() {
   const out = new Set();
   [...selected].forEach((i) => { const n = pidxOf(i); if (n !== null) out.add(n); });
   return [...out];
+}
+// узел мода по mid (сначала видимые в NODE, затем полный обход дерева)
+function nodeByMid(mid) {
+  if (!mid) return null;
+  for (const k in NODE) if (NODE[k] && NODE[k].mid === mid) return NODE[k];
+  return allNodes().find((x) => x.mid === mid) || null;
+}
+// уникальные mid ВЫБРАННЫХ (галочкой) строк
+function selectedMids() {
+  const out = [], seen = new Set();
+  selected.forEach((iid) => {
+    const n = NODE[iid] || allNodes().find((x) => x.iid === iid);
+    if (n && n.mid && !seen.has(n.mid)) { seen.add(n.mid); out.push(n.mid); }
+  });
+  return out;
+}
+// цели ПКМ-действия: правый клик по ВЫБРАННОЙ строке при наличии выбора → весь выбор;
+// иначе — только строка под курсором (конвенция проводника). Убирает баг «тег/скрытие
+// применялись лишь к одной строке из нескольких выделенных».
+function ctxTargetMids() {
+  const selM = selectedMids();
+  if (ctxNode && selected.has(ctxNode.iid) && selM.length > 1) return selM;
+  return ctxMid ? [ctxMid] : [];
+}
+// редактор тегов ОДНОГО мода (точный набор: пустое поле убирает все теги)
+function editTagsFor(mid) {
+  const n = nodeByMid(mid);
+  if (!n) return;
+  tagEditor('Теги мода', 'Через запятую. Пустое поле уберёт все теги.', (n.tags || []).join(', '))
+    .then((tags) => { if (tags !== null) api().set_mod_tags(mid, tags).then(() => refreshTree()); });
+}
+// модалка ввода тегов с чипами уже существующих тегов (клик по чипу — добавить в поле,
+// чтобы переиспользовать написанное имя тега, а не набирать заново — отзыв 13).
+function tagEditor(title, hint, initial) {
+  const existing = (TREE && TREE.all_tags) || [];
+  return promptModal(title, hint, initial, false, { chips: existing }).then((v) => {
+    if (v === null) return null;                 // отмена
+    return v.split(',').map((s) => s.trim()).filter(Boolean);
+  });
 }
 // все узлы-моды дерева (включая свёрнутые группы, которых нет в NODE)
 function allNodes() {
@@ -914,6 +987,14 @@ function updateActionButtons() {
     mb.disabled = busy || !hasUpdates;
   }
   $('compatBtn').disabled = busy;
+  // «Снять выбор (N)» — видна только когда есть выбранные галочкой строки (отзыв 12)
+  const csb = $('clearSelBtn');
+  if (csb) {
+    const cnt = selected.size;
+    csb.style.display = cnt ? '' : 'none';
+    csb.textContent = `✖ Снять выбор (${cnt})`;
+    csb.disabled = busy;
+  }
   // дубли в меню «Ещё» (для узкого окна) синхронизируем с оригиналами
   const ma = $('moreAdd'); if (ma) { ma.disabled = $('addBtn').disabled; }
   const mi = $('moreInstall'); if (mi) { mi.textContent = ib.textContent; mi.disabled = ib.disabled; }
@@ -1813,7 +1894,15 @@ function openCtxMenu(e, iid) {
   $('ctxHide').style.display = hasMid ? '' : 'none';
   $('ctxTags').style.display = hasMid ? '' : 'none';
   $('ctxNote').style.display = hasMid ? '' : 'none';
-  if (hasMid) $('ctxHide').textContent = n.hidden ? '🙈 Показать в списке' : '🙈 Скрыть из списка';
+  if (hasMid) {
+    // если правый клик по выбранной строке и выбрано несколько — действия массовые
+    const nSel = (n && selected.has(n.iid)) ? selectedMids().length : 1;
+    const suf = nSel > 1 ? ` (${nSel})` : '';
+    const anyShown = nSel > 1 ? selectedMids().some((m) => { const x = nodeByMid(m); return x && !x.hidden; }) : !n.hidden;
+    $('ctxHide').textContent = (anyShown ? '🙈 Скрыть из списка' : '🙈 Показать в списке') + suf;
+    $('ctxTags').textContent = '🏷 Теги…' + suf;
+    $('ctxNote').textContent = '📝 Заметка…' + suf;
+  }
   $('ctxRemoveOne').style.display = (ctxPidx !== null) ? '' : 'none';   // убрать эту строку
   $('ctxCancelAdd').style.display = (ctxPidx !== null) ? '' : 'none';   // отменить все добавления
   const menu = $('ctxMenu');
@@ -2120,7 +2209,8 @@ function confirmBox(title, html, onOk, onCancel, opts) {
 }
 // модальный ввод строки/текста (замена window.prompt, которого нет в pywebview).
 // Возвращает Promise<string> (значение) или Promise<null> при отмене.
-function promptModal(title, hint, initial, multiline) {
+function promptModal(title, hint, initial, multiline, opts) {
+  opts = opts || {};
   return new Promise((resolve) => {
     $('promptTitle').textContent = title;
     $('promptHint').textContent = hint || '';
@@ -2131,6 +2221,23 @@ function promptModal(title, hint, initial, multiline) {
     other.style.display = 'none';
     field.style.display = '';
     field.value = initial || '';
+    // чипы существующих значений (теги): клик добавляет значение в поле через запятую
+    const chipsBox = $('promptChips');
+    if (chipsBox) {
+      const chips = opts.chips || [];
+      if (chips.length) {
+        chipsBox.style.display = '';
+        chipsBox.innerHTML = '<span class="sub">Существующие теги (клик — добавить):</span><br>' +
+          chips.map((t) => `<button type="button" class="chip-pick" data-tag="${esc(t)}">${esc(t)}</button>`).join('');
+        chipsBox.querySelectorAll('.chip-pick').forEach((b) => b.onclick = () => {
+          const parts = field.value.split(',').map((s) => s.trim()).filter(Boolean);
+          const t = b.dataset.tag;
+          if (!parts.some((p) => p.toLowerCase() === t.toLowerCase())) parts.push(t);
+          field.value = parts.join(', ');
+          try { field.focus(); } catch (e) {}
+        });
+      } else { chipsBox.style.display = 'none'; chipsBox.innerHTML = ''; }
+    }
     show('promptOverlay');
     setTimeout(() => { try { field.focus(); field.select && field.select(); } catch (e) {} }, 40);
     const done = (val) => { hide('promptOverlay'); $('promptOverlay').onkeydown = null; resolve(val); };

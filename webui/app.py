@@ -97,7 +97,7 @@ IS_RWT = bool(EMBEDDED_TOKEN)
 # из репозитория ({version, url?, notes?}). url можно оставить пустым — тогда показ без
 # ссылки на скачивание (просто «доступна новая версия»).
 # ВНИМАНИЕ: при релизе выставить реальный следующий номер (текущий публичный > 0.13.1).
-LAUNCHER_VERSION = '0.19.0'
+LAUNCHER_VERSION = '0.20.0'
 RELEASE_REF = 'state/launcher_release.json'
 # Ссылка на полную справку в репозитории (ИНСТРУКЦИЯ-ПРОСТАЯ.md, имя в percent-encoding —
 # кириллица в пути; так браузер откроет её без ручного кодирования).
@@ -242,6 +242,8 @@ class Api:
         self._fork_man_cache = {}          # (repo,camp,unit,which) -> манифест форка
         self._pub_cache = {}               # camp -> {install_rel: sha} (опубликованные файлы)
         self._pub_cache_all = None         # [(source, {install_rel: sha})] по ВСЕМ сборкам
+        self._warming_labels = False       # идёт фоновый прогрев карт файлов для меток
+        self._warm_labels_tries = 0        # попыток прогрева меток при запуске (ограничено)
         self._updates = {}                 # mid -> {changed, added} (найденные обновления)
         self._fixparent = {}
         self._sections = {}
@@ -526,6 +528,38 @@ class Api:
                 out.append((f'{c}/{u}', fmap))
         self._pub_cache_all = out
         return out
+
+    def _warm_variant_labels(self):
+        """Фоновая тёплая загрузка карт файлов сборок (_pub_cache_all), чтобы метки
+        versions_differ-модов (Mod_Interface и т.п.) определялись по РЕАЛЬНО установленным
+        байтам сразу при запуске, а не только после «Проверить обновления» (отзыв 18).
+        Best-effort и молча: сетевые ошибки не показываем, попыток при запуске — не больше 2
+        (чтобы не долбить сеть на каждый рендер при офлайне)."""
+        if self._pub_cache_all is not None:
+            return
+        if not hasattr(self, '_warming_labels'):   # частично собранный Api (тесты) — не греем
+            return
+        if self._warming_labels:
+            return
+        if self.busy or self._game_root() is None:
+            return
+        if not (self._disk_index or {}).get('mods'):
+            return                              # нечего сверять — на диске нет модов
+        if self._warm_labels_tries >= 2:
+            return
+        self._warming_labels = True
+        self._warm_labels_tries += 1
+
+        def bg():
+            try:
+                self._all_unit_maps()           # заполняет self._pub_cache_all
+            except Exception:
+                pass
+            finally:
+                self._warming_labels = False
+            if self._pub_cache_all is not None:
+                self._emit('tree_dirty')        # метки готовы → фронт перезапросит дерево
+        threading.Thread(target=bg, daemon=True).start()
 
     def _detect_base_camp(self, unit_maps, disk_all):
         """Определить сборка установленной базы по sha: у какого base-пака (tier='base')
@@ -1343,8 +1377,9 @@ class Api:
                 'tags': list(m.get('tags') or []),
                 'note': str(m.get('note') or '')}
 
-    def _set_meta(self, mid, **kw):
-        """Обновить и сохранить метаданные мода; пустую запись удаляем, чтобы не пухла."""
+    def _set_meta(self, mid, _save=True, **kw):
+        """Обновить (и по умолчанию сохранить) метаданные мода; пустую запись удаляем,
+        чтобы не пухла. _save=False — для массовых операций: пишем config один раз в конце."""
         if not mid:
             return
         store = self.config.setdefault('mod_meta', {})
@@ -1359,7 +1394,19 @@ class Api:
             store[mid] = rec
         else:
             store.pop(mid, None)
-        self._save_config()
+        if _save:
+            self._save_config()
+
+    @staticmethod
+    def _clean_tags(tags):
+        """Нормализовать список тегов: обрезка, дедуп без учёта регистра, порядок сохранён."""
+        clean, seen = [], set()
+        for t in (tags or []):
+            t = str(t).strip()
+            k = t.lower()
+            if t and k not in seen:
+                seen.add(k); clean.append(t)
+        return clean
 
     def set_mod_hidden(self, mid, val):
         """Скрыть/показать мод в списке (глобально)."""
@@ -1369,12 +1416,7 @@ class Api:
 
     def set_mod_tags(self, mid, tags):
         """Задать список пользовательских тегов мода (список строк)."""
-        clean, seen = [], set()
-        for t in (tags or []):
-            t = str(t).strip()
-            k = t.lower()
-            if t and k not in seen:
-                seen.add(k); clean.append(t)
+        clean = self._clean_tags(tags)
         self._set_meta(mid, tags=clean)
         self._emit('tree_dirty')
         return {'ok': True, 'tags': clean}
@@ -1382,6 +1424,35 @@ class Api:
     def set_mod_note(self, mid, note):
         """Задать личную заметку мода."""
         self._set_meta(mid, note=str(note or '').strip())
+        self._emit('tree_dirty')
+        return {'ok': True}
+
+    # ───────── массовые действия над выбранными модами (отзыв 11) ─────────
+    def set_mods_hidden(self, mids, val):
+        """Скрыть/показать сразу несколько модов (config пишется один раз)."""
+        for mid in (mids or []):
+            self._set_meta(mid, _save=False, hidden=bool(val))
+        self._save_config()
+        self._emit('tree_dirty')
+        return {'ok': True}
+
+    def add_mods_tags(self, mids, tags):
+        """ДОБАВить теги ко всем указанным модам (существующие теги сохраняются)."""
+        add = self._clean_tags(tags)
+        if add:
+            for mid in (mids or []):
+                cur = self._meta_of(mid)['tags']
+                self._set_meta(mid, _save=False, tags=self._clean_tags(cur + add))
+            self._save_config()
+            self._emit('tree_dirty')
+        return {'ok': True, 'tags': add}
+
+    def set_mods_note(self, mids, note):
+        """Записать одну и ту же заметку всем указанным модам."""
+        note = str(note or '').strip()
+        for mid in (mids or []):
+            self._set_meta(mid, _save=False, note=note)
+        self._save_config()
         self._emit('tree_dirty')
         return {'ok': True}
 
@@ -1696,6 +1767,7 @@ class Api:
                         'mods': co['mods'], 'packs': packs})
 
         self._lazy_load_catalog()
+        self._warm_variant_labels()          # прогрев карт файлов → корректные метки при старте
         return {
             'camps': out,
             'base': ({'camp': inst_base['camp'], 'name': inst_base.get('name', '')}
@@ -1817,6 +1889,7 @@ class Api:
         self._fork_man_cache = {}
         self._pub_cache = {}
         self._pub_cache_all = None
+        self._warm_labels_tries = 0          # каталог/кэш сброшены → разрешить новый прогрев меток
         self._updates = {}
         self._cat_loading = False
 

@@ -545,7 +545,9 @@ body.busy .toggle.click{pointer-events:none;opacity:.5;}
 .row .name .row-check.ghost{visibility:hidden;cursor:default;}
 /* пользовательские теги мода (отличны от меток сборок — нейтральный цвет) */
 .row .name .utag{display:inline-block;margin-left:6px;padding:0 6px;border-radius:5px;font-size:10px;
-  font-weight:600;background:var(--chip);color:var(--muted);border:1px solid var(--line);vertical-align:middle;}
+  font-weight:600;background:var(--chip);color:var(--muted);border:1px solid var(--line);vertical-align:middle;
+  cursor:pointer;transition:.12s;}
+.row .name .utag:hover{color:var(--fg);border-color:var(--accent);box-shadow:0 0 0 1px var(--accent);}
 .row .name .note-ic{flex:none;margin-left:6px;font-size:11px;cursor:help;opacity:.85;}
 .row .name .hid-mark{margin-right:5px;font-size:11px;opacity:.8;}
 .row .name .mdate{margin-left:8px;font-size:10.5px;color:var(--muted);opacity:.7;font-weight:400;white-space:nowrap;
@@ -565,6 +567,15 @@ body.busy .toggle.click{pointer-events:none;opacity:.5;}
 #promptOverlay input,#promptOverlay textarea{background:var(--panel-2);border:1px solid var(--line);
   border-radius:7px;padding:8px 10px;color:var(--fg);font-family:inherit;font-size:13px;box-sizing:border-box;}
 #promptOverlay textarea{resize:vertical;}
+/* чипы существующих тегов в модалке ввода (клик — добавить в поле) */
+#promptChips .sub{font-size:11px;}
+#promptChips .chip-pick{display:inline-block;margin:5px 5px 0 0;padding:2px 9px;border-radius:6px;
+  font-size:11px;font-weight:600;background:var(--chip);color:var(--muted);border:1px solid var(--line);
+  cursor:pointer;font-family:inherit;transition:.12s;}
+#promptChips .chip-pick:hover{color:var(--fg);border-color:var(--accent);box-shadow:0 0 0 1px var(--accent);}
+/* чип-фильтр «без тега» */
+.camp-chips .chip-f.notag-f{font-size:10px;font-weight:700;letter-spacing:0;background:var(--chip);
+  color:var(--muted);border:1px dashed var(--line);}
 /* ───────── второй список: связи выбранного мода ───────── */
 .rel-wrap{flex:none;margin-top:8px;background:var(--panel);border:1px solid var(--line);
   border-radius:var(--radius);overflow:hidden;display:flex;flex-direction:column;max-height:42vh;}

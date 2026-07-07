@@ -82,6 +82,7 @@
             <div class="pop-sec">
               <div class="pop-head">Скрытые</div>
               <label class="pop-chk"><input type="checkbox" id="fShowHidden"> показывать скрытые моды <span class="sub" id="hiddenCnt"></span></label>
+              <label class="pop-chk"><input type="checkbox" id="fOnlyHidden"> только скрытые</label>
             </div>
           </div>
         </div>
@@ -116,6 +117,7 @@
         <button class="btn" id="installBtn" title="Скачать и установить. Ничего не выбрано галочками — весь профиль целиком; есть выбранные (отмеченные галочкой) — только они.">🧩 Установить все</button>
         <button class="btn collapsible-action" id="mergeBtn" title="Скачать и применить новые версии (после «Проверить обновления»), сохранив ваши ручные правки файлов. Ничего не выбрано — все моды с обновлением; есть выбранные галочкой — только они.">🔀 Обновить все</button>
         <button class="btn collapsible-action" id="compatBtn" title="Проверить, всё ли совместимо: есть ли база, фиксы, конфликты">🛡 Совместимость</button>
+        <button class="btn ghost" id="clearSelBtn" title="Снять все галочки выбора" style="display:none">✖ Снять выбор</button>
         <div class="more-wrap">
           <button class="btn ghost" id="moreBtn" title="Ещё действия">⋯ Ещё ▾</button>
           <div class="more-menu hidden" id="moreMenu">
@@ -330,6 +332,7 @@
         <div class="sub" id="promptHint" style="margin-bottom:6px"></div>
         <input id="promptInput" style="width:100%;display:none">
         <textarea id="promptArea" rows="4" style="width:100%;display:none"></textarea>
+        <div id="promptChips" class="prompt-chips" style="display:none;margin-top:8px"></div>
       </div>
       <div class="m-foot">
         <button class="btn ghost" id="promptCancel">Отмена</button>
