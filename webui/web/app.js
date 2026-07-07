@@ -856,9 +856,27 @@ function ctxTargetMids() {
 // редактор тегов ОДНОГО мода (точный набор: пустое поле убирает все теги)
 function editTagsFor(mid) {
   const n = nodeByMid(mid);
-  if (!n) return;
-  tagEditor('Теги мода', 'Через запятую. Пустое поле уберёт все теги.', (n.tags || []).join(', '))
-    .then((tags) => { if (tags !== null) api().set_mod_tags(mid, tags).then(() => refreshTree()); });
+  if (!n) return Promise.resolve();
+  return tagEditor('Теги мода', 'Через запятую. Пустое поле уберёт все теги.', (n.tags || []).join(', '))
+    .then((tags) => {
+      if (tags === null) return;
+      return api().set_mod_tags(mid, tags).then(() => { refreshTree(); refreshCardMeta(mid); });
+    });
+}
+// редактор заметки ОДНОГО мода (для карточки)
+function editNoteFor(mid) {
+  const n = nodeByMid(mid);
+  if (!n) return Promise.resolve();
+  return promptModal('Личная заметка', 'Видна как 📝 в строке мода. Ctrl+Enter — сохранить.',
+    n.note || '', true).then((v) => {
+    if (v === null) return;
+    return api().set_mod_note(mid, v).then(() => { refreshTree(); refreshCardMeta(mid); });
+  });
+}
+// перерисовать тело открытой карточки мода (после правки тегов/заметки — данные из свежих узлов)
+function refreshCardMeta(mid) {
+  const card = modCards.get(mid);
+  if (card && card._info) renderModCard(card, mid, card._info);
 }
 // модалка ввода тегов с чипами уже существующих тегов (клик по чипу — добавить в поле,
 // чтобы переиспользовать написанное имя тега, а не набирать заново — отзыв 13).
@@ -2037,6 +2055,19 @@ function cardInfoRows(i, mid) {
   if (i.small) rows.push(`<div class="i-row"><div class="i-k">Кратко</div><div class="i-v">${para(i.small)}</div></div>`);
   if (i.full) rows.push(`<div class="i-row"><div class="i-k">Описание</div><div class="i-v">${i.full_html || para(i.full)}</div></div>`);
   if (i.section) rows.push(`<div class="i-row"><div class="i-k">Раздел</div><div class="i-v">${esc(i.section)}</div></div>`);
+  // ваши теги + заметка (редактируются прямо из карточки)
+  const node = nodeByMid(mid);
+  if (node) {
+    const tags = node.tags || [];
+    const tagHtml = tags.length
+      ? tags.map((t) => `<span class="utag" data-mid="${esc(mid)}" data-tag="${esc(t)}" title="Клик — редактировать теги">${esc(t)}</span>`).join(' ')
+      : '<span class="sub">нет</span>';
+    rows.push(`<div class="i-row"><div class="i-k">Ваши теги</div><div class="i-v">${tagHtml}
+      <button class="mini card-tags" data-mid="${esc(mid)}" title="Изменить теги мода">✎ теги</button></div></div>`);
+    const noteHtml = node.note ? para(node.note) : '<span class="sub">нет</span>';
+    rows.push(`<div class="i-row"><div class="i-k">Заметка</div><div class="i-v">${noteHtml}
+      <button class="mini card-note" data-mid="${esc(mid)}" title="Изменить заметку">✎ заметка</button></div></div>`);
+  }
   rows.push(`<div class="i-row"><div class="i-k">Расположение</div><div class="i-v"><code>${esc(i.location || '')}</code></div></div>`);
   const multi = i.variants && i.variants.length > 1;
   if (!i.installed) rows.push(`<div class="note" style="margin-top:8px">${multi
@@ -2045,10 +2076,16 @@ function cardInfoRows(i, mid) {
   return rows.join('');
 }
 function renderModCard(card, mid, i) {
+  card._info = i;                                   // для перерисовки после правки тегов/заметки
   card.querySelector('.mc-title-txt').textContent = i.name || mid.split('/').pop();
-  card.querySelector('.mc-body').innerHTML = cardInfoRows(i, mid);
-  card.querySelector('.mc-body').querySelectorAll('.info-var').forEach((el) =>
+  const body = card.querySelector('.mc-body');
+  body.innerHTML = cardInfoRows(i, mid);
+  body.querySelectorAll('.info-var').forEach((el) =>
     el.onclick = () => { if (!el.classList.contains('on')) openModInfo(mid, el.dataset.key); });
+  body.querySelectorAll('.card-tags, .utag').forEach((el) =>
+    el.onclick = (e) => { e.stopPropagation(); editTagsFor(el.dataset.mid || mid); });
+  body.querySelector('.card-note') && (body.querySelector('.card-note').onclick =
+    (e) => { e.stopPropagation(); editNoteFor(mid); });
 }
 
 // ───────── утилиты ─────────

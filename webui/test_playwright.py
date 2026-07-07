@@ -1021,6 +1021,17 @@ def scenario_feedback_batch(page, base_url):
           f'val={val!r} hidden={clear_hidden} leaves={leaves()}')
     shot(page, '10e_search_fulldesc')
 
+    # (доп.) карточка мода (ⓘ) показывает ВАШИ теги — отзыв «не вижу где теги в popup»
+    ib = page.locator("#treeBody .row.leaf[data-mid='FairansVision/FairansBalance'] .info-btn")
+    ib.dispatch_event('click')
+    time.sleep(0.3)
+    card_txt = page.evaluate("(() => { const c = document.querySelector('.mod-card'); return c ? c.querySelector('.mc-body').innerText : ''; })()")
+    low = card_txt.lower()   # .i-k метки в uppercase через CSS text-transform → сравниваем без регистра
+    print(f"  └─ карточка: 'ваши теги'={'ваши теги' in low}, 'Любимое'={'Любимое' in card_txt}")
+    check('карточка мода показывает ваши теги',
+          'ваши теги' in low and 'Любимое' in card_txt, card_txt[:140])
+    shot(page, '10f_card_tags')
+
 
 # ───────── Главный запуск ─────────
 

@@ -342,6 +342,11 @@ input:focus-visible,select:focus-visible,textarea:focus-visible,
 .info-modal .chip{display:inline-block;background:var(--chip);color:var(--fg);border-radius:6px;padding:2px 8px;font-size:12px;margin:1px 0;}
 /* цветовая разметка <clr> игрового описания (подсветка, как в самой игре) */
 .info-modal .i-v .sr-clr{color:var(--accent);}
+/* ваши теги в карточке мода: чипы + кнопки правки тегов/заметки */
+.info-modal .i-v .utag{display:inline-block;padding:1px 8px;border-radius:5px;font-size:11px;font-weight:600;
+  background:var(--chip);color:var(--muted);border:1px solid var(--line);cursor:pointer;transition:.12s;}
+.info-modal .i-v .utag:hover{color:var(--fg);border-color:var(--accent);box-shadow:0 0 0 1px var(--accent);}
+.info-modal .i-v .mini{margin-left:6px;vertical-align:middle;}
 /* список сборок (профилей) в окне управления */
 .prof-row{display:flex;align-items:center;gap:9px;padding:8px 10px;border:1px solid var(--line);
   border-radius:8px;margin:5px 0;cursor:pointer;background:var(--panel-2);transition:.12s;}
@@ -644,6 +649,11 @@ body.busy .toggle.click{pointer-events:none;opacity:.5;}
 .mod-card .chip{display:inline-block;background:var(--chip);color:var(--fg);border-radius:6px;padding:2px 8px;font-size:12px;margin:1px 0;}
 .mod-card .chip.dep-link{cursor:pointer;border:1px solid var(--line);background:var(--panel-2);font-family:inherit;}
 .mod-card .chip.dep-link:hover{border-color:var(--accent);color:var(--accent);}
+/* ваши теги в карточке мода: чипы + мелкие кнопки правки */
+.mod-card .i-v .utag{display:inline-block;padding:1px 8px;border-radius:5px;font-size:11px;font-weight:600;
+  background:var(--chip);color:var(--muted);border:1px solid var(--line);cursor:pointer;transition:.12s;}
+.mod-card .i-v .utag:hover{color:var(--fg);border-color:var(--accent);box-shadow:0 0 0 1px var(--accent);}
+.mod-card .i-v .mini{margin-left:6px;vertical-align:middle;}
 .mc-foot{display:flex;align-items:center;gap:10px;margin-top:10px;padding-top:9px;border-top:1px dashed var(--line);}
 .mc-rel-toggle{border:1px solid var(--line);background:var(--panel-2);color:var(--fg);border-radius:7px;
   padding:5px 11px;cursor:pointer;font-family:inherit;font-size:12.5px;}
