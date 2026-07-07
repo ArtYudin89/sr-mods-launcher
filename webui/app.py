@@ -97,7 +97,7 @@ IS_RWT = bool(EMBEDDED_TOKEN)
 # из репозитория ({version, url?, notes?}). url можно оставить пустым — тогда показ без
 # ссылки на скачивание (просто «доступна новая версия»).
 # ВНИМАНИЕ: при релизе выставить реальный следующий номер (текущий публичный > 0.13.1).
-LAUNCHER_VERSION = '0.20.0'
+LAUNCHER_VERSION = '0.20.1'
 RELEASE_REF = 'state/launcher_release.json'
 # Ссылка на полную справку в репозитории (ИНСТРУКЦИЯ-ПРОСТАЯ.md, имя в percent-encoding —
 # кириллица в пути; так браузер откроет её без ручного кодирования).
@@ -1185,42 +1185,83 @@ class Api:
                 return {**e, **v, 'source': src}     # мета берём с базы, уточняем вариантом
         return e
 
-    def _camp_repr_key(self, mid, camp, sv=None):
-        """Канонический ключ-источник versions_differ-мода для сборки camp: переключатель
-        показывает ОДНУ кнопку на сборку (а не отдельные installer/fixes-паки), а ставить
-        надо один конкретный источник. Приоритет: default_source этой сборки → фикс-пак
-        (перекрывает установщик) → первый по алфавиту. None, если у сборки нет источников."""
+    def _pack_by_name(self, unit):
+        """Пак по короткому имени (без camp/) из кэша packs. None, если нет."""
+        for p in (getattr(self, '_packs_cache', None) or {}).values():
+            if p.get('name') == unit:
+                return p
+        return None
+
+    def _pack_family(self, unit):
+        """Корень «семейства» пака: фикс-пак сворачивается к своему base (fix_parent),
+        независимый пак — сам себе семья. Так installer+его fixes = ОДНА кнопка, а разные
+        паки разных авторов в одной сборке (huk_mods/solyanka_main) — РАЗНЫЕ кнопки."""
+        fp = getattr(self, '_fixparent', None) or {}
+        seen = set()
+        while unit in fp and unit not in seen:
+            seen.add(unit)
+            unit = fp[unit]
+        return unit
+
+    def _pack_short(self, unit):
+        """Короткая метка пака для кнопки-варианта (первое слово display_name: «Huk»,
+        «Солянка», «Original»). Фолбэк — имя пака."""
+        p = self._pack_by_name(unit)
+        dn = ((p or {}).get('display_name') or '').strip()
+        return dn.split()[0] if dn else unit
+
+    def _variant_groups(self, mid, sv=None):
+        """Группы источников versions_differ-мода: одна кнопка на (сборка, семейство-паков).
+        [{'camp','family','key','sources':[src...]}], key = канонический источник группы
+        (default_source → фикс-пак → алфавит). installer+fixes одной дистрибуции схлопнуты,
+        РАЗНЫЕ паки одной сборки (Huk/Солянка) — отдельными группами. [] если не versions_differ."""
         sv = sv if sv is not None else self._source_variants(mid)
-        inc = [(k, s) for k, s, _v in sv if '/' in s and s.split('/')[0] == camp]
-        if not inc:
+        if not sv:
+            return []
+        groups, order = {}, []
+        for k, s, _v in sv:
+            if '/' not in s:
+                continue
+            camp, unit = s.split('/', 1)
+            gk = (camp, self._pack_family(unit))
+            if gk not in groups:
+                groups[gk] = []; order.append(gk)
+            groups[gk].append((k, s))
+        ds = ((self._catalog_cache or {}).get(mid.split('@', 1)[0]) or {}).get('default_source')
+        out = []
+        for (camp, fam) in order:
+            inc = groups[(camp, fam)]
+            key = next((k for k, s in inc if s == ds), None)
+            if key is None:
+                key = next((k for k, s in inc if s.split('/')[-1].endswith('_fixes')), None)
+            if key is None:
+                key = sorted(inc, key=lambda x: x[1])[0][0]
+            out.append({'camp': camp, 'family': fam, 'key': key,
+                        'sources': [s for _k, s in inc]})
+        return out
+
+    @staticmethod
+    def _group_of_source(groups, src):
+        """Группа, которой принадлежит источник src (или её синтетический key). None."""
+        if not src:
             return None
-        e = (self._catalog_cache or {}).get(mid.split('@', 1)[0]) or {}
-        ds = e.get('default_source')
-        for k, s in inc:
-            if s == ds:
-                return k
-        for k, s in inc:
-            if s.split('/')[-1].endswith('_fixes'):
-                return k
-        return sorted(inc, key=lambda x: x[1])[0][0]
+        for g in groups:
+            if src in g['sources'] or g['key'] == src:
+                return g
+        return None
 
     def _variants_of(self, mid):
         """Список вариантов папки mid для переключателя: [{key,name,camps}]. Пусто, если
         вариант один. Покрывает и Pol/Shu (@-ключи), и versions_differ (по источникам)."""
         cat = self._catalog_cache or {}
         sv = self._source_variants(mid)
-        if sv:                                        # versions_differ: ОДИН вариант на сборку
-            # схлопываем несколько паков одной сборки (installer+fixes) в одну кнопку —
-            # переключатель именуется базовой сборкой, а не паком (см. _camp_repr_key)
-            out, seen_camps = [], set()
-            for _k, src, _v in sv:
-                camp = src.split('/')[0] if '/' in src else ''
-                if camp in seen_camps:
-                    continue
-                seen_camps.add(camp)
-                out.append({'key': self._camp_repr_key(mid, camp, sv) or _k,
-                            'name': camp, 'camps': [camp] if camp else [], 'by_camp': True})
-            out.sort(key=lambda x: x['name'])
+        if sv:                                        # versions_differ: одна кнопка на ГРУППУ
+            groups = self._variant_groups(mid, sv)
+            out = [{'key': g['key'], 'name': self._pack_short(g['family']),
+                    'camps': [g['camp']], 'by_camp': True} for g in groups]
+            # при неоднозначности сборки (две redux-кнопки huk/solyanka) фронт покажет
+            # name; при одной группе на сборку — бейдж сборки (variantLabel сам решает)
+            out.sort(key=lambda x: (x['camps'][0], x['name']))
             return out
         keys = self._variant_keys(mid)
         if len(keys) < 2:
@@ -1269,21 +1310,19 @@ class Api:
         if ch and ch in cat:
             return ch
         sv = self._source_variants(mid)
-        if sv:                                        # versions_differ: одна кнопка на сборку
-            keys = {k for k, _s, _v in sv}
-            camp_of = {k: (s.split('/')[0] if '/' in s else None) for k, s, _v in sv}
-            # активная сборка: явный выбор игрока → установленный источник → default_source.
-            # Показываем канонический ключ этой сборки (а не конкретный installer/fixes-пак),
-            # чтобы выбранная кнопка совпадала с одной из показанных в переключателе.
-            active_camp = camp_of.get(ch) if ch in keys else None
-            if not active_camp:
+        if sv:                                        # versions_differ: одна кнопка на ГРУППУ
+            groups = self._variant_groups(mid, sv)
+            if not groups:
+                return sv[0][0]
+            # активная группа: явный выбор игрока → установленный источник → default_source.
+            # Возвращаем канонический key группы, чтобы совпал с одной из кнопок переключателя.
+            g = self._group_of_source(groups, (self._variant_ref(ch)[1] if ch else None) or ch)
+            if g is None:
                 inst = self._installed_variant_key(mid)
-                active_camp = camp_of.get(inst) if inst in keys else None
-            if not active_camp:
-                ds = (cat.get(base) or {}).get('default_source') or ''
-                active_camp = ds.split('/')[0] if '/' in ds else (
-                    sv[0][1].split('/')[0] if '/' in sv[0][1] else None)
-            return self._camp_repr_key(mid, active_camp, sv) or sv[0][0]
+                g = self._group_of_source(groups, self._variant_ref(inst)[1] if inst else None) if inst else None
+            if g is None:
+                g = self._group_of_source(groups, (cat.get(base) or {}).get('default_source'))
+            return (g or groups[0])['key']
         return self._installed_variant_key(mid) or ''
 
     def set_variant(self, mid, key):
@@ -1302,11 +1341,13 @@ class Api:
         _, want_src = self._variant_ref(key)
         inst_src = self._variant_ref(installed)[1] if installed else None
         if self._source_variants(mid):
-            # переключатель именуется сборкой → перекачка нужна лишь при СМЕНЕ сборки, а не
-            # при выборе другого пака внутри уже установленной сборки (installer↔fixes)
-            want_camp = want_src.split('/')[0] if want_src and '/' in want_src else None
-            inst_camp = inst_src.split('/')[0] if inst_src and '/' in inst_src else None
-            differ = (want_camp != inst_camp)
+            # кнопка = группа (сборка+семейство паков) → перекачка нужна при СМЕНЕ ГРУППЫ:
+            # смена сборки ИЛИ смена независимого пака внутри сборки (Huk↔Солянка), но НЕ
+            # смена installer↔fixes одной дистрибуции (они в одной группе)
+            groups = self._variant_groups(mid)
+            gw = self._group_of_source(groups, want_src)
+            gi = self._group_of_source(groups, inst_src)
+            differ = (gw is not None and gw is not gi)
         else:
             differ = (key != installed and want_src != inst_src)
         if differ:
@@ -1531,7 +1572,37 @@ class Api:
         # зависимости в кликабельном виде: имя → mid (если такой мод есть в каталоге),
         # плюс обратные связи «кто зависит от этого мода» (dependents).
         info['requires'] = [self._dep_ref(x) for x in (info.get('requires') or [])]
+        # убрать самоконфликт: мод не конфликтует сам с собой / со своим же вариантом
+        # (Pol/Shu одной папки) — иначе PolText показывает «конфликтует с PolText».
+        # Чистим и сырой список (фронт откатывается на него, если conflicts_ref пуст).
+        if mid:
+            self_base = mid.split('@', 1)[0]
+            self_names = {(info.get('name') or '').strip().lower(),
+                          mid.split('/')[-1].strip().lower(),
+                          self_base.split('/')[-1].strip().lower()}
+            self_names.discard('')
+            kept = []
+            for c in (info.get('conflicts') or []):
+                ref_base = (self._resolve_dep_name(c) or '').split('@', 1)[0]
+                if ref_base and ref_base == self_base:
+                    continue
+                if str(c).strip().lower() in self_names:
+                    continue
+                kept.append(c)
+            info['conflicts'] = kept
         info['conflicts_ref'] = [self._dep_ref(x) for x in (info.get('conflicts') or [])]
+        # добавить ОБРАТНЫЕ конфликты (кто объявил конфликт с этим модом, а он про них — нет),
+        # без дублей с прямыми и без самоссылки
+        if mid:
+            self_base = mid.split('@', 1)[0]
+            have = {(r.get('mid') or r.get('name') or '') for r in info['conflicts_ref']}
+            for rc in self._conflicted_by(mid):
+                if (rc['mid'] or '').split('@', 1)[0] == self_base:
+                    continue
+                if rc['mid'] in have or rc['name'] in have:
+                    continue
+                info['conflicts_ref'].append(rc)
+                have.add(rc['mid'])
         info['dependents'] = self._dependents_of(mid) if mid else []
         return {'ok': True, 'info': info}
 
@@ -1575,6 +1646,30 @@ class Api:
         """Кто зависит от мода: [{'name','mid'}] — моды каталога, требующие этот."""
         dep = self._dep_index().get(mid, [])
         return [{'name': m.split('/')[-1], 'mid': m} for m in dep]
+
+    def _conf_index(self):
+        """Обратный индекс конфликтов {mid_цели: [mid_конфликтующих]} по каталогу.
+        Конфликт часто прописан в ОДНУ сторону (мод A знает про конфликт с B, B про A — нет)
+        → чтобы у B в связях был виден A. Кэш до перезагрузки каталога."""
+        cat = self._catalog_cache or {}
+        if getattr(self, '_conf_idx_for', None) is not id(cat):
+            idx = {}
+            for k, ce in cat.items():
+                confs = set()
+                for v in (ce.get('variants') or []):
+                    for c in (v.get('conflicts') or []):
+                        confs.add(c)
+                for c in confs:
+                    tgt = self._resolve_dep_name(c)
+                    if tgt and tgt != k:
+                        idx.setdefault(tgt, []).append(k)
+            self._conf_idx = {t: sorted(set(v)) for t, v in idx.items()}
+            self._conf_idx_for = id(cat)
+        return self._conf_idx
+
+    def _conflicted_by(self, mid):
+        """Кто объявил конфликт С ЭТИМ модом (обратные конфликты): [{'name','mid'}]."""
+        return [{'name': m.split('/')[-1], 'mid': m} for m in self._conf_index().get(mid, [])]
 
     def _mod_group(self, mid):
         folder = mid.split('/')[0] if '/' in mid else None

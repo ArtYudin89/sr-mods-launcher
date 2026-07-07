@@ -997,6 +997,29 @@ def scenario_feedback_batch(page, base_url):
     check('16: моды с тегом отфильтрованы', after == base_leaves - 1 and utags_left == 0,
           f'{base_leaves}->{after}, utags={utags_left}')
     shot(page, '10d_no_tag')
+    notag.dispatch_event('click')                   # сбросить фильтр «без тега»
+    time.sleep(0.15)
+
+    # (доп.) поиск матчит ПОЛНОЕ описание, когда оно показано в таблице (desc_in_list).
+    # У FairansBalance full_desc содержит «показа в списке» — по обычному desc такого нет.
+    si = page.locator('#searchInp')
+    si.fill('показа в списке')
+    time.sleep(0.2)
+    hits = leaves()
+    hit_mid = page.evaluate("(() => { const r = document.querySelector('#treeBody .row.leaf'); return r ? r.dataset.mid : ''; })()")
+    print(f'  └─ поиск по full_desc: листьев={hits}, первый={hit_mid!r}')
+    check('поиск матчит полное описание в таблице',
+          hits == 1 and hit_mid == 'FairansVision/FairansBalance', f'hits={hits} mid={hit_mid}')
+    # крестик очистки: виден при вводе, чистит и прячется по клику
+    clear_shown = page.evaluate("!document.getElementById('searchClear').classList.contains('hidden')")
+    check('крестик очистки виден при вводе', clear_shown)
+    page.locator('#searchClear').dispatch_event('click')
+    time.sleep(0.15)
+    val = page.evaluate("document.getElementById('searchInp').value")
+    clear_hidden = page.evaluate("document.getElementById('searchClear').classList.contains('hidden')")
+    check('крестик очистил поиск и спрятался', val == '' and clear_hidden and leaves() == 6,
+          f'val={val!r} hidden={clear_hidden} leaves={leaves()}')
+    shot(page, '10e_search_fulldesc')
 
 
 # ───────── Главный запуск ─────────

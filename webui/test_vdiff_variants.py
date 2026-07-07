@@ -1,7 +1,8 @@
-"""versions_differ → переключатель вариантов ПО БАЗОВОЙ СБОРКЕ (не по паку).
-Мод с одним каталожным ключом, versions_differ:true и несколькими источниками получает
-переключатель с ОДНОЙ кнопкой на сборку: несколько паков одной сборки (installer+fixes)
-схлопываются, кнопка именуется сборкой. Выбор/резолв/карточка/детект-апдейта работают.
+"""versions_differ → переключатель вариантов по (СБОРКА × СЕМЕЙСТВО ПАКОВ).
+Мод с одним каталожным ключом, versions_differ:true и несколькими источниками:
+- installer+fixes ОДНОЙ дистрибуции (fix_parent) схлопываются в одну кнопку;
+- РАЗНЫЕ паки одной сборки от разных авторов (Huk / Солянка) — РАЗНЫЕ кнопки (отзыв 19).
+Плюс проверки связей: самоконфликт убран, обратные конфликты показаны.
 Запуск: python webui/test_vdiff_variants.py"""
 import sys, threading
 sys.path.insert(0, r'C:\claude_sandbox\sr-mods-launcher\webui')
@@ -12,113 +13,154 @@ def check(name, cond, extra=''):
     (PASS if cond else FAIL).append(name)
     print(('[OK ] ' if cond else '[FAIL] ') + name + (f'  -> {extra}' if extra and not cond else ''))
 
-def fresh():
-    a = app.Api.__new__(app.Api)
-    a.busy = False; a._cancel = threading.Event(); a._updates = {}
-    a.profile = {'name': 't', 'game_path': '', 'mods': [], 'enabled': [], 'variants': {}}
-    a._save_profile = lambda: None; a._emit = lambda *x, **k: None; a.log = lambda *x: None
-    a._camps_idx = None
-    a._descs = {}
-    # versions_differ мод: один ключ, 3 источника. ДВА из них — redux (huk+solyanka),
-    # один — universe. Переключатель должен показать 2 кнопки: redux и universe.
-    mid = "Huk'sShit/Mod_Interface"
-    a._catalog_cache = {
-        mid: {
+MID = "Huk'sShit/Mod_Interface"
+
+def base_catalog():
+    return {
+        MID: {
             'name': 'Mod_Interface', 'author': 'Huk', 'section': 'Твики',
             'description': 'краткое', 'full_description': 'полное',
             'default_source': 'redux/huk_mods', 'versions_differ': True,
             'variants': [
                 {'source': 'redux/huk_mods', 'version': 'h', 'name': 'Mod_Interface',
                  'depends': [], 'conflicts': ['DenUIRecolor_Mod_Interface']},
+                {'source': 'redux/huk_fixes', 'version': 'hf', 'name': 'Mod_Interface',
+                 'depends': [], 'conflicts': ['DenUIRecolor_Mod_Interface']},   # фикс-слой huk
                 {'source': 'redux/solyanka_main', 'version': 's', 'name': 'Mod_Interface',
                  'depends': [], 'conflicts': []},
                 {'source': 'universe/universe_prochee', 'version': 'u', 'name': 'Mod_Interface',
                  'depends': [], 'conflicts': []},
             ],
         },
-        # обычный мод для контроля (один источник → нет переключателя)
         'Cat/Solo': {'name': 'Solo', 'default_source': 'redux/x',
                      'variants': [{'source': 'redux/x'}]},
+        # для проверки связей-конфликтов (односторонний конфликт + самоконфликт)
+        'Free/FreePlayFromMenu': {'name': 'FreePlayFromMenu', 'default_source': 'redux/x',
+            'variants': [{'source': 'redux/x', 'depends': [],
+                          'conflicts': ['RefBPNoPtiority']}]},
+        'Ref/RefBPNoPtiority': {'name': 'RefBPNoPtiority', 'default_source': 'redux/x',
+            'variants': [{'source': 'redux/x', 'depends': [], 'conflicts': []}]},
+        'Self/SelfConf': {'name': 'SelfConf', 'default_source': 'redux/x',
+            'variants': [{'source': 'redux/x', 'depends': [],
+                          'conflicts': ['SelfConf']}]},   # конфликт сам с собой
     }
-    a._installed_variant_key = lambda m: None      # на диске не определяем (нет файлов)
+
+def fresh():
+    a = app.Api.__new__(app.Api)
+    a.busy = False; a._cancel = threading.Event(); a._updates = {}
+    a.profile = {'name': 't', 'game_path': '', 'mods': [], 'enabled': [], 'variants': {}}
+    a._save_profile = lambda: None; a._emit = lambda *x, **k: None; a.log = lambda *x: None
+    a._camps_idx = None; a._descs = {}; a._names = {}
+    a._catalog_cache = base_catalog()
+    # паки: huk_fixes — фикс-слой huk_mods (fix_parent) → схлоп; huk/solyanka — независимы
+    a._fixparent = {'huk_fixes': 'huk_mods'}
+    a._packs_cache = {
+        'redux/huk_mods': {'name': 'huk_mods', 'display_name': 'Huk Mods', 'tier': 'mod'},
+        'redux/huk_fixes': {'name': 'huk_fixes', 'display_name': 'Huk Fixes', 'tier': 'fix',
+                            'fix_parent': 'huk_mods'},
+        'redux/solyanka_main': {'name': 'solyanka_main', 'display_name': 'Солянка сборка',
+                                'tier': 'mod'},
+        'universe/universe_prochee': {'name': 'universe_prochee',
+                                      'display_name': 'Universe прочее', 'tier': 'mod'},
+    }
+    a._installed_variant_key = lambda m: None
     a._mi_path = lambda m: type('P', (), {'exists': lambda s=None: False})()
     a._catalog_entry = lambda m: a._catalog_cache.get(m)
-    return a, mid
+    return a
 
-a, mid = fresh()
+a = fresh(); mid = MID
 
-# 1) переключатель: ОДНА кнопка на сборку (2 redux-пака схлопнуты), имена = сборки
+# 1) переключатель: 3 кнопки — huk+huk_fixes схлопнуты, solyanka и universe отдельно
 vs = a._variants_of(mid)
-check('2 варианта (по сборкам, паки схлопнуты)', len(vs) == 2, str(vs))
+check('3 варианта (huk|solyanka|universe; фикс-слой схлопнут)', len(vs) == 3, str(vs))
 names = sorted(v['name'] for v in vs)
-check('варианты названы по СБОРКЕ', names == ['redux', 'universe'], str(names))
+check('имена по паку/сборке', names == sorted(['Huk', 'Солянка', 'Universe']), str(names))
 check('ключи синтетические <base>#<source>', all('#' in v['key'] for v in vs), str([v['key'] for v in vs]))
-check('вариант помечен by_camp', all(v.get('by_camp') for v in vs), str(vs))
-by_camp = {v['camps'][0]: v['key'] for v in vs}
-# redux-кнопка ведёт на канонический источник (default_source huk_mods), НЕ solyanka
-check('redux → default_source (huk_mods)', by_camp['redux'] == f"{mid}#redux/huk_mods", str(by_camp))
-check('universe → его источник', by_camp['universe'] == f"{mid}#universe/universe_prochee", str(by_camp))
+check('все by_camp', all(v.get('by_camp') for v in vs), str(vs))
+by_key = {v['key']: v for v in vs}
+check('huk-группа → канон huk_mods (default_source, фикс схлопнут)',
+      f"{mid}#redux/huk_mods" in by_key, str(list(by_key)))
+check('solyanka — ОТДЕЛЬНАЯ кнопка (не схлопнута с huk)',
+      f"{mid}#redux/solyanka_main" in by_key, str(list(by_key)))
+check('universe — отдельная кнопка', f"{mid}#universe/universe_prochee" in by_key, str(list(by_key)))
+redux_btns = [v for v in vs if v['camps'] == ['redux']]
+check('в сборке redux ДВЕ кнопки (huk и solyanka)', len(redux_btns) == 2, str(redux_btns))
 
 # 2) обычный мод — переключателя нет
 check('у обычного мода вариантов нет', a._variants_of('Cat/Solo') == [])
 
-# 3) резолв ключа → источник
+# 3) резолв синтетического ключа
 k_sol = f"{mid}#redux/solyanka_main"
-check('_variant_ref синтетического → источник', a._variant_ref(k_sol) == (mid, 'redux/solyanka_main'), str(a._variant_ref(k_sol)))
+check('_variant_ref → источник', a._variant_ref(k_sol) == (mid, 'redux/solyanka_main'), str(a._variant_ref(k_sol)))
 
-# 4) дефолтный выбранный вариант = канонический ключ сборки default_source (huk)
-ch = a._chosen_variant(mid)
-check('дефолтный выбор = redux-канон (huk)', ch == f"{mid}#redux/huk_mods", ch)
+# 4) дефолтный выбор = группа default_source (huk)
+check('дефолт = huk-группа', a._chosen_variant(mid) == f"{mid}#redux/huk_mods", a._chosen_variant(mid))
 
-# 5) выбор ДРУГОЙ сборки (universe) — принимается и помечает перекачку
+# 5) выбор solyanka (та же сборка redux, ДРУГОЙ пак) → перекачка нужна (разные группы)
+r = a.set_variant(mid, k_sol)
+check('set_variant solyanka ok', r.get('ok') is True, str(r))
+check('huk→solyanka (один redux, разные паки) → ПЕРЕКАЧКА',
+      mid in a._updates and a._updates[mid].get('camp') == 'redux', str(a._updates.get(mid)))
+check('чосен следует за выбором (solyanka)', a._chosen_variant(mid) == k_sol, a._chosen_variant(mid))
+check('метка сборки = redux', a._camps_of(mid) == ['redux'], str(a._camps_of(mid)))
+
+# 6) выбор universe → перекачка, камп universe
+a2 = fresh()
 k_uni = f"{mid}#universe/universe_prochee"
-r = a.set_variant(mid, k_uni)
-check('set_variant universe ok', r.get('ok') is True, str(r))
-check('выбор сохранён в профиле', a.profile['variants'][mid] == k_uni)
-check('смена сборки → перекачка (universe)', mid in a._updates and a._updates[mid].get('camp') == 'universe', str(a._updates.get(mid)))
-check('метка сборки следует за выбором (universe)', a._camps_of(mid) == ['universe'], str(a._camps_of(mid)))
-check('чосен = выбранная сборка (universe)', a._chosen_variant(mid) == k_uni, a._chosen_variant(mid))
+a2.set_variant(mid, k_uni)
+check('смена сборки → перекачка (universe)',
+      mid in a2._updates and a2._updates[mid].get('camp') == 'universe', str(a2._updates.get(mid)))
+check('чосен = universe', a2._chosen_variant(mid) == k_uni, a2._chosen_variant(mid))
 
-# 6) карточка конкретного источника: свои конфликты (huk конфликтует, solyanka — нет).
-#    Явно запрошенный источник карточки по-прежнему поддержан (внутренний доступ).
+# 7) карточка конкретного источника: свои конфликты
 info_h = a.get_mod_info(mid, f"{mid}#redux/huk_mods")['info']
 info_s = a.get_mod_info(mid, k_sol)['info']
-check('карточка huk: есть конфликт', [x['name'] for x in info_h['conflicts_ref']] == ['DenUIRecolor_Mod_Interface'], str(info_h.get('conflicts_ref')))
+check('карточка huk: конфликт есть',
+      [x['name'] for x in info_h['conflicts_ref']] == ['DenUIRecolor_Mod_Interface'],
+      str(info_h.get('conflicts_ref')))
 check('карточка solyanka: конфликтов нет', info_s['conflicts_ref'] == [], str(info_s.get('conflicts_ref')))
-check('в карточке — 2 варианта-сборки', len(info_s['variants']) == 2, str(info_s['variants']))
+check('в карточке — 3 варианта', len(info_s['variants']) == 3, str(info_s['variants']))
 
-# 7) file-match детект установленного источника, но чосен-кнопка = КАНОН сборки
-b = app.Api.__new__(app.Api)
-b.busy = False; b._cancel = threading.Event(); b._updates = {}
-b.profile = {'name': 't', 'game_path': '', 'mods': [], 'enabled': [], 'variants': {}}
-b._save_profile = lambda: None; b._emit = lambda *x, **k: None; b.log = lambda *x: None
-b._camps_idx = None; b._descs = {}; b._names = {}
-b._catalog_cache = a._catalog_cache
-b._catalog_entry = lambda m: b._catalog_cache.get(m)
+# 8) file-match детект установленного источника → чосен = ЕГО группа (solyanka!), не huk
+b = fresh()
 huk = {f"{mid}/ModuleInfo.txt": 'mi_h', f"{mid}/CFG/Data.dat": 'd_h'}
 sol = {f"{mid}/ModuleInfo.txt": 'mi_s', f"{mid}/CFG/Data.dat": 'd_s',
-       f"{mid}/CFG/Rus/Lang.dat": 'lang'}      # solyanka несёт Lang.dat, huk — нет
+       f"{mid}/CFG/Rus/Lang.dat": 'lang'}
 uni = {f"{mid}/ModuleInfo.txt": 'mi_u'}
-b._pub_cache_all = [('redux/huk_mods', huk), ('redux/solyanka_main', sol),
-                    ('universe/universe_prochee', uni)]
+del b._installed_variant_key                      # используем НАСТОЯЩИЙ детект
+b._pub_cache_all = [('redux/huk_mods', huk), ('redux/huk_fixes', huk),
+                    ('redux/solyanka_main', sol), ('universe/universe_prochee', uni)]
 b._disk_index = {'mods': {mid: {'files': {r: {'sha': s} for r, s in sol.items()}}}}
-check('детект установленного источника = solyanka (внутр.)',
+check('детект установленного источника = solyanka',
       b._installed_variant_key(mid) == f"{mid}#redux/solyanka_main", b._installed_variant_key(mid))
-# оба redux-пака схлопнуты в кнопку redux → чосен показывает КАНОН redux (huk), не solyanka
-check('_chosen_variant = redux-канон при установленной solyanka',
-      b._chosen_variant(mid) == f"{mid}#redux/huk_mods", b._chosen_variant(mid))
-check('метка сборки установленного = redux', b._camps_of(mid) == ['redux'], str(b._camps_of(mid)))
-# выбор кнопки redux, когда на диске уже redux (пусть и другой пак) — БЕЗ перекачки
-r = b.set_variant(mid, f"{mid}#redux/huk_mods")
-check('выбор той же сборки redux → НЕ помечает перекачку', mid not in b._updates, str(b._updates.get(mid)))
-b._disk_index = {'mods': {mid: {'files': {r: {'sha': s} for r, s in huk.items()}}}}
-check('детект переключается на huk при смене файлов на диске',
-      b._installed_variant_key(mid) == f"{mid}#redux/huk_mods", b._installed_variant_key(mid))
+check('_chosen_variant = solyanka (его группа, НЕ huk-канон)',
+      b._chosen_variant(mid) == f"{mid}#redux/solyanka_main", b._chosen_variant(mid))
+check('метка установленного = redux', b._camps_of(mid) == ['redux'], str(b._camps_of(mid)))
+# выбор solyanka, когда solyanka на диске → без перекачки (та же группа)
+b.set_variant(mid, f"{mid}#redux/solyanka_main")
+check('выбор solyanka при установленной solyanka → без перекачки', mid not in b._updates, str(b._updates.get(mid)))
+# выбор huk, когда на диске solyanka → перекачка (разные группы в одной сборке)
 b._updates = {}
-b._pub_cache_all = None                          # холодный кэш → без форс-загрузки
-check('холодный кэш → детект None', b._installed_source_key(mid) is None)
-check('_chosen_variant при холодном кэше = redux-канон',
-      b._chosen_variant(mid) == f"{mid}#redux/huk_mods", b._chosen_variant(mid))
+b.set_variant(mid, f"{mid}#redux/huk_mods")
+check('solyanka→huk (один redux, разные паки) → ПЕРЕКАЧКА', mid in b._updates, str(b._updates.get(mid)))
+
+# 9) связи: самоконфликт убран, обратный конфликт показан (отзывы «PolText сам с собой»,
+#    «FreePlayFromMenu ← RefBPNoPtiority»)
+c = fresh()
+inf_self = c.get_mod_info('Self/SelfConf')['info']
+check('самоконфликт убран (мод не конфликтует с собой)',
+      inf_self['conflicts_ref'] == [], str(inf_self.get('conflicts_ref')))
+inf_free = c.get_mod_info('Free/FreePlayFromMenu')['info']
+check('прямой конфликт виден у FreePlayFromMenu',
+      [x['name'] for x in inf_free['conflicts_ref']] == ['RefBPNoPtiority'],
+      str(inf_free.get('conflicts_ref')))
+inf_ref = c.get_mod_info('Ref/RefBPNoPtiority')['info']
+check('ОБРАТНЫЙ конфликт виден у RefBPNoPtiority (← FreePlayFromMenu)',
+      [x['name'] for x in inf_ref['conflicts_ref']] == ['FreePlayFromMenu'],
+      str(inf_ref.get('conflicts_ref')))
+check('обратный конфликт указывает на верный mid',
+      [x['mid'] for x in inf_ref['conflicts_ref']] == ['Free/FreePlayFromMenu'],
+      str(inf_ref.get('conflicts_ref')))
 
 print(f'\n===== ИТОГ: PASS={len(PASS)} FAIL={len(FAIL)} =====')
 sys.exit(1 if FAIL else 0)

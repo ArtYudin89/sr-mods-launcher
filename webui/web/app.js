@@ -174,7 +174,8 @@ function wireUI() {
 
   $('viewSeg').querySelectorAll('input').forEach((r) => r.onchange = () => setViewMode(r.value));
   $('nameSeg').querySelectorAll('input').forEach((r) => r.onchange = () => setNameMode(r.value));
-  $('searchInp').oninput = renderTree;
+  $('searchInp').oninput = onSearchInput;
+  $('searchClear').onclick = () => { $('searchInp').value = ''; onSearchInput(); $('searchInp').focus(); };
   $('expandBtn').onclick = () => { collapsed.clear(); renderTree(); };
   $('relHead').onclick = toggleRelPanel;
   $('collapseBtn').onclick = collapseAll;
@@ -335,8 +336,8 @@ function wireUI() {
     const bulk = mids.length > 1;
     const cur = bulk ? '' : ((nodeByMid(mids[0]) || {}).note || '');
     const title = bulk ? `Заметка: ${mids.length} мод(ов)` : 'Личная заметка';
-    const hint = bulk ? 'Одна заметка будет записана ВСЕМ выбранным модам.'
-                      : 'Видна как 📝 в строке мода (при наведении).';
+    const hint = (bulk ? 'Одна заметка будет записана ВСЕМ выбранным модам.'
+                       : 'Видна как 📝 в строке мода (при наведении).') + ' Ctrl+Enter — сохранить.';
     promptModal(title, hint, cur, true).then((v) => {
       if (v === null) return;
       api().set_mods_note(mids, v).then(() => refreshTree());
@@ -495,6 +496,13 @@ async function refreshTree() {
 
 function colValue(n) { return STATE.tree_mode === 'section' ? n.folder : n.section; }
 
+// ввод в поле поиска: показать/скрыть крестик очистки + перерисовать дерево
+function onSearchInput() {
+  const has = !!($('searchInp').value || '').length;
+  $('searchClear').classList.toggle('hidden', !has);
+  renderTree();
+}
+
 function renderTree() {
   for (const k in NODE) delete NODE[k];
   const body = $('treeBody');
@@ -508,7 +516,7 @@ function renderTree() {
   const q = ($('searchInp').value || '').trim().toLowerCase();
   const visible = (n) => passFilter(n) &&
     (!q || n.label.toLowerCase().includes(q) || (n.name || '').toLowerCase().includes(q)
-      || (n.desc || '').toLowerCase().includes(q));
+      || (n.desc || '').toLowerCase().includes(q) || (n.full_desc || '').toLowerCase().includes(q));
 
   // Сборка БОЛЬШЕ НЕ уровень дерева: объединяем все сборки, группируем только по
   // пакам/разделам; сборка виден в бейдже мода и через быстрые фильтры по метке.
@@ -2244,7 +2252,9 @@ function promptModal(title, hint, initial, multiline, opts) {
     $('promptOk').onclick = () => done(field.value);
     $('promptCancel').onclick = () => done(null);
     $('promptOverlay').onkeydown = (e) => {
-      if (e.key === 'Enter' && !multiline) { e.preventDefault(); done(field.value); }
+      // однострочное — Enter сохраняет; многострочное (заметка) — Ctrl/Cmd+Enter (обычный
+      // Enter переносит строку); Esc отменяет
+      if (e.key === 'Enter' && (!multiline || e.ctrlKey || e.metaKey)) { e.preventDefault(); done(field.value); }
       else if (e.key === 'Escape') { e.preventDefault(); done(null); }
     };
   });
