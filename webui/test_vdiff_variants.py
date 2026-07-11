@@ -229,5 +229,33 @@ check('4 метки redux-кнопок РАЗЛИЧАЮТСЯ (полное им
       len({v['name'] for v in redux_leo}) == 2, str([v['name'] for v in redux_leo]))
 check('4 обе метки не пустые', all(v['name'] for v in redux_leo), str(redux_leo))
 
+# 7) конфликт от варианта ЧУЖОЙ сборки не «протекает» на сиблинг-вариант той же папки
+#    (EndlessGame/PolKlissan: конфликт объявил ShuKlissan в original/universe, а у redux-игрока
+#    в папке PolKlissan — конфликта быть не должно). Обратный индекс фильтруется по сборке.
+def kli_api(camp):
+    a = fresh()
+    a._catalog_cache = {
+        'Tw/EndlessX': {'name': 'EndlessX', 'default_source': 'redux/base',
+                        'variants': [{'source': 'redux/base', 'conflicts': [], 'depends': []}]},
+        # база папки = вариант ShuKli (только original/universe), объявляет конфликт с EndlessX
+        'Shu/Kli': {'name': 'ShuKli', 'default_source': 'universe/comm',
+                    'variants': [{'source': 'universe/comm', 'conflicts': ['EndlessX'], 'depends': []},
+                                 {'source': 'original/orig', 'conflicts': ['EndlessX'], 'depends': []}]},
+        # @-вариант той же папки = PolKli (redux), БЕЗ конфликта с EndlessX
+        'Shu/Kli@PolKli': {'name': 'PolKli', 'default_source': 'redux/base',
+                           'variants': [{'source': 'redux/base', 'conflicts': [], 'depends': []}]},
+    }
+    a._catalog_entry = lambda m: a._catalog_cache.get(m)
+    a._inst_base_camp = camp
+    return a
+
+mids = lambda camp: [x['mid'] for x in kli_api(camp).get_mod_info('Tw/EndlessX')['info']['conflicts_ref']]
+check('7 redux-игрок: конфликт ShuKli (original/universe) НЕ виснет на EndlessX',
+      'Shu/Kli' not in mids('redux'), str(mids('redux')))
+check('7 universe-игрок: конфликт ShuKli показан (там он реально есть)',
+      'Shu/Kli' in mids('universe'), str(mids('universe')))
+check('7 сборка неизвестна (None): поведение как раньше — конфликт виден',
+      'Shu/Kli' in mids(None), str(mids(None)))
+
 print(f'\n===== ИТОГ: PASS={len(PASS)} FAIL={len(FAIL)} =====')
 sys.exit(1 if FAIL else 0)

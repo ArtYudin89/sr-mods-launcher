@@ -97,7 +97,7 @@ IS_RWT = bool(EMBEDDED_TOKEN)
 # из репозитория ({version, url?, notes?}). url можно оставить пустым — тогда показ без
 # ссылки на скачивание (просто «доступна новая версия»).
 # ВНИМАНИЕ: при релизе выставить реальный следующий номер (текущий публичный > 0.13.1).
-LAUNCHER_VERSION = '0.20.3'
+LAUNCHER_VERSION = '0.20.4'
 RELEASE_REF = 'state/launcher_release.json'
 # Ссылка на полную справку в репозитории (ИНСТРУКЦИЯ-ПРОСТАЯ.md, имя в percent-encoding —
 # кириллица в пути; так браузер откроет её без ручного кодирования).
@@ -1658,15 +1658,27 @@ class Api:
         hits = [k for k in cat if k.split('/')[-1] == leaf]
         return hits[0] if len(hits) == 1 else ''
 
+    def _camp_variants(self, ce, camp):
+        """Варианты записи каталога, относящиеся к СБОРКЕ игрока camp (по префиксу source).
+        Если camp не задан (сборка не определена) — все варианты (обратная совместимость).
+        Так связи (зависимости/конфликты) берутся из того билда мода, что реально у игрока,
+        а не «протекают» с вариантов чужой сборки (напр. конфликт ShuKlissan из original/
+        universe не виснет на PolKlissan в redux — это варианты одной папки)."""
+        vs = ce.get('variants') or []
+        if not camp:
+            return vs
+        return [v for v in vs if (v.get('source') or '').split('/')[0] == camp]
+
     def _dep_index(self):
-        """Обратный индекс зависимостей {mid_цели: [mid_зависящих]} по каталогу.
-        Кэшируется до перезагрузки каталога (по id объекта каталога)."""
+        """Обратный индекс зависимостей {mid_цели: [mid_зависящих]} по каталогу — только
+        по вариантам сборки игрока. Кэш по (id каталога, сборка)."""
         cat = self._catalog_cache or {}
-        if getattr(self, '_dep_idx_for', None) is not id(cat):
+        camp = getattr(self, '_inst_base_camp', None)
+        if getattr(self, '_dep_idx_for', None) != (id(cat), camp):
             idx = {}
             for k, ce in cat.items():
                 deps = set()
-                for v in (ce.get('variants') or []):
+                for v in self._camp_variants(ce, camp):
                     for d in (v.get('depends') or []):
                         deps.add(d)
                 for d in deps:
@@ -1674,7 +1686,7 @@ class Api:
                     if tgt:
                         idx.setdefault(tgt, []).append(k)
             self._dep_idx = {t: sorted(set(v)) for t, v in idx.items()}
-            self._dep_idx_for = id(cat)
+            self._dep_idx_for = (id(cat), camp)
         return self._dep_idx
 
     def _dependents_of(self, mid):
@@ -1683,15 +1695,17 @@ class Api:
         return [{'name': m.split('/')[-1], 'mid': m} for m in dep]
 
     def _conf_index(self):
-        """Обратный индекс конфликтов {mid_цели: [mid_конфликтующих]} по каталогу.
-        Конфликт часто прописан в ОДНУ сторону (мод A знает про конфликт с B, B про A — нет)
-        → чтобы у B в связях был виден A. Кэш до перезагрузки каталога."""
+        """Обратный индекс конфликтов {mid_цели: [mid_конфликтующих]} по каталогу — только
+        по вариантам сборки игрока (конфликт варианта чужой сборки не показывается). Конфликт
+        часто прописан в ОДНУ сторону (мод A знает про конфликт с B, B про A — нет) → чтобы
+        у B в связях был виден A. Кэш по (id каталога, сборка)."""
         cat = self._catalog_cache or {}
-        if getattr(self, '_conf_idx_for', None) is not id(cat):
+        camp = getattr(self, '_inst_base_camp', None)
+        if getattr(self, '_conf_idx_for', None) != (id(cat), camp):
             idx = {}
             for k, ce in cat.items():
                 confs = set()
-                for v in (ce.get('variants') or []):
+                for v in self._camp_variants(ce, camp):
                     for c in (v.get('conflicts') or []):
                         confs.add(c)
                 for c in confs:
@@ -1699,7 +1713,7 @@ class Api:
                     if tgt and tgt != k:
                         idx.setdefault(tgt, []).append(k)
             self._conf_idx = {t: sorted(set(v)) for t, v in idx.items()}
-            self._conf_idx_for = id(cat)
+            self._conf_idx_for = (id(cat), camp)
         return self._conf_idx
 
     def _conflicted_by(self, mid):
