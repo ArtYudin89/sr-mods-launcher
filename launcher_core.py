@@ -1569,6 +1569,25 @@ def write_modcfg(mods_dir, mod_ids):
     return p
 
 
+def mod_priority(mods_dir, mid):
+    """Числовой Priority мода из ModuleInfo.txt (первое целое в значении). Мод без поля
+    Priority или не найденный на диске → 0 (в игре это база по умолчанию — такие моды
+    идут первой группой). Отрицательные значения допускаются."""
+    mi = read_module_info(Path(mods_dir) / mid.replace('/', os.sep) / 'ModuleInfo.txt')
+    m = re.match(r'-?\d+', (mi.get('Priority') or '').strip())
+    return int(m.group()) if m else 0
+
+
+def order_modcfg(mods_dir, mod_ids):
+    """Упорядочить подключаемые моды так, как это делает сама игра, чтобы не всплывало
+    предупреждение «моды подключены с нарушением порядка приоритета». Игра сортирует по
+    полю Priority (ModuleInfo.txt) по возрастанию; при равном приоритете — по пути
+    «Категория\\Мод» порядковым сравнением (заглавные раньше строчных, как в игре: напр.
+    ExpBK раньше ExpBasesAutoUpgrade). Мод без Priority → 0 (первая группа по алфавиту).
+    Сортировка стабильная. Возвращает НОВЫЙ список тех же id в игровом порядке."""
+    return sorted(mod_ids, key=lambda m: (mod_priority(mods_dir, m), m.replace('/', '\\')))
+
+
 def check_pack_compatibility(selected_units, packs, installed_base=None):
     """Структурная совместимость НАБОРА на уровне паков (Фаза 2). Только показывает.
     selected_units: список ключей 'camp/unit'. packs: из load_packs.

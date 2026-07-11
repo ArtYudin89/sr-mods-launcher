@@ -97,7 +97,7 @@ IS_RWT = bool(EMBEDDED_TOKEN)
 # из репозитория ({version, url?, notes?}). url можно оставить пустым — тогда показ без
 # ссылки на скачивание (просто «доступна новая версия»).
 # ВНИМАНИЕ: при релизе выставить реальный следующий номер (текущий публичный > 0.13.1).
-LAUNCHER_VERSION = '0.20.2'
+LAUNCHER_VERSION = '0.20.3'
 RELEASE_REF = 'state/launcher_release.json'
 # Ссылка на полную справку в репозитории (ИНСТРУКЦИЯ-ПРОСТАЯ.md, имя в percent-encoding —
 # кириллица в пути; так браузер откроет её без ручного кодирования).
@@ -1228,7 +1228,8 @@ class Api:
                 groups[gk] = []; order.append(gk)
             groups[gk].append((k, s))
         ds = ((self._catalog_cache or {}).get(mid.split('@', 1)[0]) or {}).get('default_source')
-        out = []
+        ver_of = {s: (v or {}).get('version') for _k, s, v in sv}   # источник → хэш-версия
+        out, seen_cv = [], {}
         for (camp, fam) in order:
             inc = groups[(camp, fam)]
             key = next((k for k, s in inc if s == ds), None)
@@ -1236,8 +1237,23 @@ class Api:
                 key = next((k for k, s in inc if s.split('/')[-1].endswith('_fixes')), None)
             if key is None:
                 key = sorted(inc, key=lambda x: x[1])[0][0]
-            out.append({'camp': camp, 'family': fam, 'key': key,
-                        'sources': [s for _k, s in inc]})
+            rep_src = key.rsplit('#', 1)[1] if '#' in key else key
+            ver = ver_of.get(rep_src)
+            # схлопнуть в рамках ОДНОЙ сборки группы с ИДЕНТИЧНЫМ содержимым (совпал хэш-
+            # версии): один и тот же билд мода, лежащий в двух паках сборки (напр.
+            # PBFairanGraphics одинаков в fairans_vision_redux и redux_base_installer) —
+            # это ОДНА кнопка, а не две (отзыв 4.1).
+            prev = seen_cv.get((camp, ver)) if ver is not None else None
+            if prev is not None:
+                if any(s == ds for _k, s in inc) and not any(s == ds for s in prev['sources']):
+                    prev['key'], prev['family'] = key, fam        # каноничная копия — с default_source
+                prev['sources'] = prev['sources'] + [s for _k, s in inc]
+                continue
+            g = {'camp': camp, 'family': fam, 'key': key,
+                 'sources': [s for _k, s in inc], 'version': ver}
+            if ver is not None:
+                seen_cv[(camp, ver)] = g
+            out.append(g)
         return out
 
     @staticmethod
@@ -1259,6 +1275,16 @@ class Api:
             groups = self._variant_groups(mid, sv)
             out = [{'key': g['key'], 'name': self._pack_short(g['family']),
                     'camps': [g['camp']], 'by_camp': True} for g in groups]
+            # развести совпавшие короткие метки в одной сборке (напр. два разных пака
+            # «Солянка» с РАЗНЫМИ билдами LEOGraphicsMod → обе кнопки «Солянка») — берём
+            # полное имя пака, чтобы игрок различал варианты (отзыв 4).
+            from collections import Counter
+            dup = Counter((o['camps'][0], o['name']) for o in out)
+            for o, g in zip(out, groups):
+                if dup[(o['camps'][0], o['name'])] > 1:
+                    full = ((self._pack_by_name(g['family']) or {}).get('display_name') or '').strip()
+                    if full:
+                        o['name'] = full
             # при неоднозначности сборки (две redux-кнопки huk/solyanka) фронт покажет
             # name; при одной группе на сборку — бейдж сборки (variantLabel сам решает)
             out.sort(key=lambda x: (x['camps'][0], x['name']))
@@ -1320,6 +1346,10 @@ class Api:
             if g is None:
                 inst = self._installed_variant_key(mid)
                 g = self._group_of_source(groups, self._variant_ref(inst)[1] if inst else None) if inst else None
+            # холодный фолбэк: пока установленный источник не определён (кэш не прогрет),
+            # предпочитаем вариант СБОРКИ игрока, а не глобальный default_source
+            if g is None and getattr(self, '_inst_base_camp', None):
+                g = next((x for x in groups if x['camp'] == self._inst_base_camp), None)
             if g is None:
                 g = self._group_of_source(groups, (cat.get(base) or {}).get('default_source'))
             return (g or groups[0])['key']
@@ -1706,6 +1736,10 @@ class Api:
             inst_base = core.detect_installed_base(self._mods_dir())
         except Exception:
             inst_base = None
+        # сборка игрока (redux/universe/original) — для холодного фолбэка выбора варианта:
+        # у versions_differ-мода дата/метка должны браться из ЕГО сборки, а не из глобального
+        # default_source (напр. AMod_Merchant: default=universe, а игрок на redux) — отзыв 3
+        self._inst_base_camp = inst_base['camp'] if inst_base else None
         disk = self._disk_mods()
         try:
             modcfg = set(core.read_modcfg(self._mods_dir()))
@@ -2125,8 +2159,14 @@ class Api:
         en = list(self.profile.get('enabled', []))
         disk = set(self._disk_mods())
         missing = [m for m in en if m not in disk]
+        # порядок как в игре (по Priority) — иначе игра ругается «нарушение порядка
+        # приоритета» и просит поправить при каждом запуске (отзыв 2)
         try:
-            core.write_modcfg(self._mods_dir(), en)
+            ordered = core.order_modcfg(self._mods_dir(), en)
+        except Exception:
+            ordered = en
+        try:
+            core.write_modcfg(self._mods_dir(), ordered)
         except Exception as e:
             return {'ok': False, 'error': str(e)}
         self.log(f'Записано в игру: подключено модов — {len(en)}.'

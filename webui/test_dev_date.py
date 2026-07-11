@@ -48,5 +48,29 @@ ck('vd: дефолт (redux-канон) берёт дату фикс-пака', 
 a3.profile['variants'][mid] = f'{mid}#universe/community'
 ck('vd: выбор universe → его дата', a3._dev_date(mid) == DEV + 100, str(a3._dev_date(mid)))
 
+# 4) отзыв 3: холодный кэш (установленный источник не определён) → дата берётся из
+#    варианта СБОРКИ игрока, а не из глобального default_source (у AMod_Merchant
+#    default_source=universe, но redux-игрок должен видеть дату redux-билда).
+mid4 = 'An/AMod'; RED = DEV + 500000; UNI = DEV + 200000
+def mk_amod(camp):
+    a = mk()
+    a._catalog_cache = {mid4: {
+        'name': 'AMod', 'default_source': 'universe/uni_pack', 'versions_differ': True, 'mtime': UNI,
+        'variants': [
+            {'source': 'redux/red_pack', 'version': 'r', 'mtime': RED, 'name': 'AMod'},
+            {'source': 'universe/uni_pack', 'version': 'u', 'mtime': UNI, 'name': 'AMod'}]}}
+    a._installed_variant_key = lambda m: None       # кэш file-match не прогрет
+    a._packs_cache = {'redux/red_pack': {'name': 'red_pack', 'display_name': 'Red'},
+                      'universe/uni_pack': {'name': 'uni_pack', 'display_name': 'Uni'}}
+    a._fixparent = {}
+    a._inst_base_camp = camp
+    return a
+ck('vd холодный: redux-игрок → дата redux-билда (не universe-дефолт)',
+   mk_amod('redux')._dev_date(mid4) == RED, str(mk_amod('redux')._dev_date(mid4)))
+ck('vd холодный: universe-игрок → дата universe-билда',
+   mk_amod('universe')._dev_date(mid4) == UNI, str(mk_amod('universe')._dev_date(mid4)))
+ck('vd холодный: база неизвестна → global default_source (universe)',
+   mk_amod(None)._dev_date(mid4) == UNI, str(mk_amod(None)._dev_date(mid4)))
+
 print(f'\n===== ИТОГ: FAIL={len(FAIL)} =====')
 sys.exit(1 if FAIL else 0)

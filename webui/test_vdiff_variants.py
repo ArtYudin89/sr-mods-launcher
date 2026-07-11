@@ -162,5 +162,72 @@ check('обратный конфликт указывает на верный mi
       [x['mid'] for x in inf_ref['conflicts_ref']] == ['Free/FreePlayFromMenu'],
       str(inf_ref.get('conflicts_ref')))
 
+# 5) отзыв 4.1 — ИДЕНТИЧНОЕ содержимое в двух паках ОДНОЙ сборки (совпал хэш-версии)
+#    схлопывается в ОДНУ кнопку (напр. PBFairanGraphics одинаков в fairans_vision_redux
+#    и redux_base_installer). Каноничным остаётся default_source.
+def dedup_api():
+    a = fresh()
+    a._catalog_cache = {
+        'PB/FairanGraphics': {
+            'name': 'FairanGraphics', 'default_source': 'redux/fairans_redux',
+            'versions_differ': True,
+            'variants': [
+                {'source': 'redux/fairans_redux', 'version': 'X', 'name': 'FairanGraphics'},
+                {'source': 'universe/fairans_uni', 'version': 'Y', 'name': 'FairanGraphics'},
+                {'source': 'redux/redux_base', 'version': 'X', 'name': 'FairanGraphics'},  # == fairans_redux
+            ],
+        },
+    }
+    a._fixparent = {}
+    a._packs_cache = {
+        'redux/fairans_redux': {'name': 'fairans_redux', 'display_name': "Fairan's Vision", 'tier': 'mod'},
+        'universe/fairans_uni': {'name': 'fairans_uni', 'display_name': "Fairan's Universe", 'tier': 'mod'},
+        'redux/redux_base': {'name': 'redux_base', 'display_name': 'Universe Redux', 'tier': 'base'},
+    }
+    a._catalog_entry = lambda m: a._catalog_cache.get(m)
+    return a
+
+ad = dedup_api()
+vd = ad._variants_of('PB/FairanGraphics')
+check('4.1 идентичный билд в двух redux-паках → ОДНА redux-кнопка',
+      len([v for v in vd if v['camps'] == ['redux']]) == 1, str(vd))
+check('4.1 всего 2 кнопки (redux+universe)', len(vd) == 2, str(vd))
+check('4.1 каноничным остался default_source (fairans_redux)',
+      any(v['key'].endswith('redux/fairans_redux') for v in vd), str([v['key'] for v in vd]))
+gsrc = ad._group_of_source(ad._variant_groups('PB/FairanGraphics'), 'redux/redux_base')
+check('4.1 источник схлопнутого redux_base мапится на объединённую группу',
+      bool(gsrc) and gsrc['key'].endswith('redux/fairans_redux'), str(gsrc))
+
+# 6) отзыв 4 — РАЗНЫЕ билды (разный хэш) в двух паках-однофамильцах одной сборки
+#    («Солянка» / «Солянка») НЕ схлопываются, но метки разводятся полным именем пака.
+def leo_api():
+    a = fresh()
+    a._catalog_cache = {
+        'Sol/LEO': {
+            'name': 'LEO', 'default_source': 'redux/sol_graphpak', 'versions_differ': True,
+            'variants': [
+                {'source': 'redux/sol_graphpak', 'version': 'A', 'name': 'LEO'},
+                {'source': 'redux/sol_main', 'version': 'B', 'name': 'LEO'},   # ДРУГОЙ билд
+                {'source': 'universe/sol_uni', 'version': 'A', 'name': 'LEO'},
+            ],
+        },
+    }
+    a._fixparent = {}
+    a._packs_cache = {
+        'redux/sol_graphpak': {'name': 'sol_graphpak', 'display_name': 'Солянка графпак', 'tier': 'assets'},
+        'redux/sol_main': {'name': 'sol_main', 'display_name': 'Солянка основная', 'tier': 'mod'},
+        'universe/sol_uni': {'name': 'sol_uni', 'display_name': 'Солянка Universe', 'tier': 'mod'},
+    }
+    a._catalog_entry = lambda m: a._catalog_cache.get(m)
+    return a
+
+al = leo_api()
+vl = al._variants_of('Sol/LEO')
+redux_leo = [v for v in vl if v['camps'] == ['redux']]
+check('4 разные билды «Солянка» → ДВЕ redux-кнопки (не схлопнуты)', len(redux_leo) == 2, str(vl))
+check('4 метки redux-кнопок РАЗЛИЧАЮТСЯ (полное имя пака)',
+      len({v['name'] for v in redux_leo}) == 2, str([v['name'] for v in redux_leo]))
+check('4 обе метки не пустые', all(v['name'] for v in redux_leo), str(redux_leo))
+
 print(f'\n===== ИТОГ: PASS={len(PASS)} FAIL={len(FAIL)} =====')
 sys.exit(1 if FAIL else 0)
