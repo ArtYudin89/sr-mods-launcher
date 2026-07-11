@@ -673,8 +673,12 @@ class Api:
                 avail |= set(cidx.get('blobs', {}))
             except Exception as e:
                 self.vlog(f'⚠ индекс частей не загружен ({e})')
+            # блобы форк-хотфиксов: файл с таким целевым sha — намеренный фикс, а не
+            # дрейф перепаковки → авторитетен даже без снимка (пробивает косметику Lang.dat)
+            fork_blobs = set()
             for fidx in self._idx_by_repo.values():
-                avail |= set((fidx or {}).get('blobs', {}))
+                fork_blobs |= set((fidx or {}).get('blobs', {}))
+            avail |= fork_blobs
             ups = {}
             unavail = 0
             for mid, m in idx.get('mods', {}).items():
@@ -719,7 +723,8 @@ class Api:
                 if snap:
                     base = {core.install_relpath(rp): sha
                             for rp, sha in (snap.get('files') or {}).items()}
-                n = core.plan_actionable_sha(theirs, base, disk)
+                force = {r for r, s in theirs.items() if s in fork_blobs}
+                n = core.plan_actionable_sha(theirs, base, disk, force_rels=force)
                 if n:
                     ups[mid] = {'n': n, 'camp': tcamp}
             self._updates = ups

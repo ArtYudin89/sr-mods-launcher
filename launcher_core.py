@@ -895,14 +895,19 @@ def is_cosmetic_rel(rel, fileset=None):
     return False
 
 
-def plan_actionable_sha(theirs, base, disk):
+def plan_actionable_sha(theirs, base, disk, force_rels=None):
     """Сколько файлов реально требуют обновления — та же классификация, что в
     plan_update_merge, но ТОЛЬКО по sha (без скачивания), для детекта обновлений.
     theirs/base/disk: {install_rel: sha}. Считаются add/update/конфликт; player_only
     (мод не менял, правил игрок) и unchanged — НЕ считаются. Без снимка (base пуст)
     любое отличие = обновление (как конфликт), КРОМЕ косметических файлов (is_cosmetic_rel):
-    их расхождение без базы — почти всегда перепаковка агрегатора, не апдейт."""
+    их расхождение без базы — почти всегда перепаковка агрегатора, не апдейт.
+    force_rels — install-rel, которые СЧИТАЕМ авторитетными даже без снимка и для
+    косметики (напр. файл, переопределённый форк-хотфиксом: его отличие — намеренный
+    фикс, а не дрейф перепаковки; иначе Lang.dat-only хотфикс модам без снимка не
+    доставить, т.к. lang.dat жёстко помечен косметикой)."""
     n = 0
+    force_rels = force_rels or set()
     for rel, tsha in theirs.items():
         bsha = base.get(rel)
         msha = disk.get(rel)
@@ -911,7 +916,7 @@ def plan_actionable_sha(theirs, base, disk):
         elif msha == tsha:
             pass                         # unchanged
         elif bsha is None:
-            if not is_cosmetic_rel(rel, theirs):
+            if rel in force_rels or not is_cosmetic_rel(rel, theirs):
                 n += 1                   # нет базы → отличие = обновление (кроме косметики)
         elif msha == bsha:
             n += 1                       # update: мод изменил, игрок не трогал

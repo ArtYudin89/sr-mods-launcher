@@ -1369,6 +1369,19 @@ try:
     )
     check('T54b: .dat без соседнего .txt → 1 обновление', 1, n)
 
+    print('\n--- T54c: форк-хотфикс Lang.dat без снимка → force_rels пробивает косметику ---')
+    # Lang.dat-only хотфикс модам БЕЗ снимка (bulk-установка): без force игнорируется
+    # как косметика, с force (целевой sha = форк-блоб) — засчитывается как обновление.
+    lang = 'OtherMods/WH40kGuns/CFG/Rus/Lang.dat'
+    check('T54c: без force — косметика, 0',
+          0, core.plan_actionable_sha({lang: SHA_V2}, {}, {lang: SHA_V1}))
+    check('T54c: с force — авторитетно, 1',
+          1, core.plan_actionable_sha({lang: SHA_V2}, {}, {lang: SHA_V1},
+                                      force_rels={lang}))
+    check('T54c: force, но диск уже = фикс → 0',
+          0, core.plan_actionable_sha({lang: SHA_V2}, {}, {lang: SHA_V2},
+                                      force_rels={lang}))
+
 finally:
     g.cleanup()
 
