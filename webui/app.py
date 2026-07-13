@@ -97,7 +97,7 @@ IS_RWT = bool(EMBEDDED_TOKEN)
 # из репозитория ({version, url?, notes?}). url можно оставить пустым — тогда показ без
 # ссылки на скачивание (просто «доступна новая версия»).
 # ВНИМАНИЕ: при релизе выставить реальный следующий номер (текущий публичный > 0.13.1).
-LAUNCHER_VERSION = '0.20.4'
+LAUNCHER_VERSION = '0.20.5'
 RELEASE_REF = 'state/launcher_release.json'
 # Ссылка на полную справку в репозитории (ИНСТРУКЦИЯ-ПРОСТАЯ.md, имя в percent-encoding —
 # кириллица в пути; так браузер откроет её без ручного кодирования).
@@ -582,29 +582,30 @@ class Api:
                 best, best_camp = score, camp
         return best_camp
 
-    @staticmethod
-    def _best_unit_files(mid, unit_maps, disk, allowed_sources=None, prefer_camp=None):
-        """Файлы мода mid из источника, лучше всего совпадающего с диском. Критерий
-        ИДЕНТИЧЕН pick_disk_variant (путь обновления): (cover, match, same_camp) — иначе
-        детект и обновление выберут РАЗНЫЕ варианты и цикл «обновление» не сойдётся (Pol/
-        Shu). same_camp — лишь тайбрейкер (при равных cover+match предпочесть базу).
-        allowed_sources (множество 'camp/unit' = логические варианты мода) ограничивает
-        выбор: иначе Pol*-контент под путём Shu*/ в redux_base посчитался бы тем же модом.
-        {rel:sha}|None."""
-        best, best_score = None, (-1, -1, -1)
-        for label, fmap in unit_maps:
-            if allowed_sources is not None and label not in allowed_sources:
+    def _merged_camp_files(self, mid, umap, sources):
+        """Файлы мода mid, СЛИТЫЕ по всем источникам одной сборки (base-installer +
+        *_fixes), приоритет — load_order пака (выше = позже = перекрывает base). Это тот
+        же набор «theirs», что строит _full_variant_descriptor на пути обновления.
+        Раньше детект брал ОДИН лучший по совпадению юнит (_best_unit_files) — обычно
+        base-installer (больше файлов → выше cover) с ДО-фикс версией тех файлов, что
+        *_fixes переопределяет. На диске эти файлы уже пропатчены → детект вечно видел
+        ложное «⬆ обновление» (хотел откатить фиксы к базе), а обновление, целясь в слитый
+        набор, находило «обновлять нечего» — бейдж возвращался на каждой проверке.
+        Слияние здесь = слияние там → детект и апдейт целятся в ОДИН набор.
+        sources — множество 'camp/unit' (логические источники одной сборки для mid).
+        umap — {source: {install_rel: sha}}. -> {rel:sha}; {} если мода нет ни в одном."""
+        packs = self._get_packs(self._token())
+        ordered = sorted(sources,
+                         key=lambda s: (packs.get(s) or {}).get('load_order', 999))
+        merged = {}
+        for s in ordered:                       # возрастание load_order → поздние перекрывают
+            fmap = umap.get(s)
+            if not fmap:
                 continue
-            sub = {r: s for r, s in fmap.items() if r == mid or r.startswith(mid + '/')}
-            if not sub:
-                continue
-            cover = sum(1 for r in sub if r in disk)
-            match = sum(1 for r, s in sub.items() if disk.get(r) == s)
-            same_camp = bool(prefer_camp and label.split('/')[0] == prefer_camp)
-            score = (cover, match, same_camp)
-            if score > best_score:
-                best_score, best = score, sub
-        return best
+            for r, sha in fmap.items():
+                if r == mid or r.startswith(mid + '/'):
+                    merged[r] = sha
+        return merged
 
     def check_updates(self, extra=None):
         """Проверить обновления ПОФАЙЛОВОЙ сверкой: хеши файлов на диске (из индекса)
@@ -681,6 +682,7 @@ class Api:
             avail |= fork_blobs
             ups = {}
             unavail = 0
+            umap = dict(unit_maps)                  # source -> {rel:sha}, для слияния стека
             for mid, m in idx.get('mods', {}).items():
                 if self.should_cancel():
                     raise core.OperationCancelled()
@@ -700,17 +702,19 @@ class Api:
                 if choice:
                     _, csrc = self._variant_ref(choice)   # реальный или '<base>#<source>'
                     if csrc:
-                        theirs = self._variant_files(mid, unit_maps, csrc)
                         tcamp = csrc.split('/')[0] or None
-                if not theirs:
-                    # целевая сборка = первый в порядке, где этот мод есть; проверяем ТОЛЬКО
-                    # его вариант (внутри сборки — лучший по совпадению файлов)
+                if not tcamp:
+                    # целевая сборка = первый в порядке, где этот мод есть
                     tcamp = self._target_camp(order, allowed)
                     if not tcamp:
                         continue                   # мод не входит ни в одну сборку списка
-                    camp_srcs = {s for s in allowed if (s or '').split('/')[0] == tcamp}
-                    theirs = self._best_unit_files(mid, unit_maps, disk, camp_srcs,
-                                                   prefer_camp=tcamp)
+                # целевой набор = слитый стек сборки tcamp (base+fixes), как на пути
+                # обновления (_full_variant_descriptor) — иначе детект целится в до-фикс
+                # версию из base-installer и вечно видит ложное «⬆ обновление».
+                camp_srcs = {s for s in allowed if (s or '').split('/')[0] == tcamp}
+                if choice and csrc:
+                    camp_srcs.add(csrc)            # выбранный источник обязан участвовать
+                theirs = self._merged_camp_files(mid, umap, camp_srcs)
                 if not theirs:
                     continue                       # ни один логический вариант не лёг на диск
                 unavail += sum(1 for s in theirs.values() if s not in avail)
@@ -2258,7 +2262,11 @@ class Api:
                 raise ValueError('файл не похож на профиль')
         except Exception as e:
             return {'ok': False, 'error': f'Не удалось прочитать профиль: {e}'}
-        base = (str(data.get('name') or Path(path).stem).strip() or 'imported')
+        # имя берём из ИМЕНИ ФАЙЛА (игрок его и переименовывает под смысл), а НЕ из
+        # внутреннего data['name']: у присланных профилей оно почти всегда 'default'
+        # (осталось от активного профиля отправителя) → любой файл, как ни назови,
+        # импортировался как «default». Фолбэк на внутреннее имя — если стем пуст.
+        base = (Path(path).stem.strip() or str(data.get('name') or '').strip() or 'imported')
         name, i = base, 2
         while (PROFILES_DIR / f'{name}.json').exists():
             name = f'{base} ({i})'; i += 1

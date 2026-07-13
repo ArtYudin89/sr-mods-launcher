@@ -424,6 +424,33 @@ try:
 finally:
     g.cleanup()
 
+print('\n--- T14b: import_profile берёт имя из ФАЙЛА, а не из внутреннего name=default ---')
+# Регресс: у присланных профилей внутреннее name почти всегда 'default' (осталось от
+# активного профиля отправителя) → любой файл, как игрок его ни переименуй, импортировался
+# как «default». Имя должно идти от ИМЕНИ ФАЙЛА (его игрок и правит под смысл).
+g = TempGame()
+try:
+    a = g.fresh_api(base='redux')
+    src = g.root / 'МояСборка.json'
+    src.write_text(json.dumps({'name': 'default', 'base': 'redux',
+                               'enabled': ['ShusRangers/ShuNukes']},
+                              ensure_ascii=False), encoding='utf-8')
+    win = MagicMock()
+    win.create_file_dialog.return_value = [str(src)]
+    if not hasattr(app.webview, 'OPEN_DIALOG'):
+        app.webview.OPEN_DIALOG = 1
+    with patch.object(app, 'PROFILES_DIR', g.profiles), \
+         patch.object(app, '_WINDOW', win):
+        r = a.import_profile()
+    check('T14b: import ok', True, r.get('ok'))
+    check('T14b: имя профиля = имя файла (не default)', 'МояСборка', r.get('name'))
+    check_true('T14b: файл профиля создан под именем файла',
+               (g.profiles / 'МояСборка.json').exists())
+    saved = json.loads((g.profiles / 'МояСборка.json').read_text(encoding='utf-8'))
+    check('T14b: name внутри синхронизирован', 'МояСборка', saved.get('name'))
+finally:
+    g.cleanup()
+
 # ═══════════════════════════════════════════════
 #  ГРУППА 4: Детект обновлений (мокаем манифесты)
 # ═══════════════════════════════════════════════
@@ -511,6 +538,65 @@ try:
     finally:
         p16a.stop(); p16b.stop(); p16c.stop()
     check_false('ShuNukes НЕ в _updates (нет изменений)',
+                'ShusRangers/ShuNukes' in a._updates)
+finally:
+    g.cleanup()
+
+print('\n--- T16b: файл переопределён *_fixes, на диске уже пропатчено → НЕ обновление ---')
+# Регресс: 11 модов вечно предлагались к «обновлению». Детект брал ОДИН лучший юнит
+# (base-installer, у него больше файлов → выше cover) с ДО-фикс версией файла, который
+# *_fixes переопределяет. На диске файл уже пропатчен → детект видел расхождение и
+# бесконечно предлагал «обновить» (откатить фикс), а само обновление, целясь в слитый
+# набор base+fixes, находило «обновлять нечего». Теперь детект тоже целится в слитый набор.
+_EXTRA = b'binary-asset-payload'
+_SHA_E = hashlib.sha256(_EXTRA).hexdigest()
+g = TempGame()
+try:
+    a = g.fresh_api(base='redux', catalog={
+        'ShusRangers/ShuNukes': {
+            'name': 'Ядерное оружие', 'default_source': 'redux/redux_base_installer',
+            'variants': [
+                {'source': 'redux/redux_base_installer', 'path': 'a.json',
+                 'depends': [], 'conflicts': []},
+                {'source': 'redux/redux_fixes', 'path': 'b.json',
+                 'depends': [], 'conflicts': []},
+            ],
+        },
+    })
+    # base несёт ДО-фикс ModuleInfo (V1) + доп.файл; redux_fixes переопределяет ModuleInfo на V2
+    a._pub_cache_all = [
+        ('redux/redux_base_installer', {
+            'ShusRangers/ShuNukes/ModuleInfo.txt': SHA_V1,
+            'ShusRangers/ShuNukes/extra.dat': _SHA_E,
+        }),
+        ('redux/redux_fixes', {
+            'ShusRangers/ShuNukes/ModuleInfo.txt': SHA_V2,
+        }),
+    ]
+
+    def fake_index_disk_patched(mods_dir, catalog, **kw):
+        return {'mods': {'ShusRangers/ShuNukes': {'files': {
+            'ShusRangers/ShuNukes/ModuleInfo.txt': {'sha': SHA_V2},   # уже пропатчено
+            'ShusRangers/ShuNukes/extra.dat': {'sha': _SHA_E},
+        }, 'status': 'known'}}, 'count': 1, 'known': 1, 'unknown': 0}
+
+    fake_packs = {
+        'redux/redux_base_installer': {'camp': 'redux', 'name': 'redux_base_installer',
+                                       'tier': 'base', 'load_order': 0},
+        'redux/redux_fixes': {'camp': 'redux', 'name': 'redux_fixes', 'tier': 'fixes',
+                              'load_order': 10, 'fix_parent': 'redux_base_installer'},
+    }
+    p16d = patch.object(core, 'index_disk_mods', side_effect=fake_index_disk_patched)
+    p16e = patch.object(core, 'save_disk_index', return_value=None)
+    p16f = patch.object(core, 'load_chunk_index',
+                        return_value={'blobs': {SHA_V1: {}, SHA_V2: {}, _SHA_E: {}}})
+    p16g = patch.object(core, 'load_packs', return_value=fake_packs)
+    p16d.start(); p16e.start(); p16f.start(); p16g.start()
+    try:
+        a.check_updates(); wait_idle(a, timeout=8)
+    finally:
+        p16d.stop(); p16e.stop(); p16f.stop(); p16g.stop()
+    check_false('T16b: ShuNukes НЕ в _updates (fix уже на диске)',
                 'ShusRangers/ShuNukes' in a._updates)
 finally:
     g.cleanup()
