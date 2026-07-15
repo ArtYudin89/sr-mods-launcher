@@ -97,7 +97,7 @@ IS_RWT = bool(EMBEDDED_TOKEN)
 # из репозитория ({version, url?, notes?}). url можно оставить пустым — тогда показ без
 # ссылки на скачивание (просто «доступна новая версия»).
 # ВНИМАНИЕ: при релизе выставить реальный следующий номер (текущий публичный > 0.13.1).
-LAUNCHER_VERSION = '0.20.5'
+LAUNCHER_VERSION = '0.21.0'
 RELEASE_REF = 'state/launcher_release.json'
 # Ссылка на полную справку в репозитории (ИНСТРУКЦИЯ-ПРОСТАЯ.md, имя в percent-encoding —
 # кириллица в пути; так браузер откроет её без ручного кодирования).
@@ -982,7 +982,86 @@ class Api:
         upd = bool(latest) and _ver_tuple(latest) > _ver_tuple(LAUNCHER_VERSION)
         return {'ok': True, 'update': upd, 'version': latest,
                 'current': LAUNCHER_VERSION, 'url': info.get('url', ''),
-                'notes': info.get('notes', '')}
+                'notes': info.get('notes', ''),
+                'can_auto': bool(FROZEN)}    # авто-обновление доступно только в .exe-сборке
+
+    @staticmethod
+    def _launcher_repo(info):
+        """owner/repo лаунчера: из поля repo релиз-json или из его github-url; иначе дефолт."""
+        slug = (info or {}).get('repo')
+        if slug:
+            return slug
+        url = (info or {}).get('url', '')
+        if 'github.com/' in url:
+            parts = url.split('github.com/', 1)[1].split('/')
+            if len(parts) >= 2:
+                return f'{parts[0]}/{parts[1]}'
+        return 'ArtYudin89/sr-mods-launcher'
+
+    def download_self_update(self):
+        """Скачать новую версию лаунчера и применить её (заменить .exe и перезапуститься).
+        Только для frozen (.exe); в dev-режиме вернуть {'ok':False,'error':'dev'} — фронт
+        откатится на открытие страницы релиза."""
+        if not FROZEN:
+            return {'ok': False, 'error': 'dev'}
+        if self.busy:
+            return {'ok': False, 'error': 'Уже идёт операция.'}
+        self.busy = True
+        self._cancel.clear()
+        self._emit('op_begin', {'name': 'Обновление лаунчера'})
+        threading.Thread(target=self._self_update_worker, daemon=True).start()
+        return {'ok': True}
+
+    def _self_update_worker(self):
+        import time
+        info = {}
+        try:
+            info = core._fetch_json(RELEASE_REF, self._repo(), self._token())
+            ver = str(info.get('version', '')).strip()
+            tag = ver if ver.startswith('v') else 'v' + ver
+            repo = self._launcher_repo(info)
+            want = 'SRModsLauncher-RWT.exe' if IS_RWT else 'SRModsLauncher.exe'
+            self.log(f'Загружаю сведения о релизе {tag} ({repo}) …')
+            rel = core.release_by_tag(repo, tag, self._token())
+            assets = rel.get('assets', [])
+            asset = next((a for a in assets if a['name'].lower() == want.lower()), None) \
+                or next((a for a in assets if a['name'].lower().endswith('.exe')), None)
+            if not asset:
+                raise RuntimeError('в релизе нет .exe-файла для скачивания')
+            cur = Path(sys.executable).resolve()
+            newexe = cur.with_name(cur.stem + '.new.exe')
+            if newexe.exists():
+                newexe.unlink()
+            mb = (asset.get('size') or 0) / (1 << 20)
+            self.log(f'Скачиваю {asset["name"]} ({mb:.0f} МБ) …')
+
+            def pcb(done, tot):
+                self._emit('progress', {'pct': round(done / tot * 100) if tot else 0,
+                                        'mode': 'pct'})
+            core.download_asset(asset, self._token(), str(newexe),
+                                progress_cb=pcb, should_cancel=self.should_cancel)
+            if not newexe.exists() or newexe.stat().st_size < (1 << 20):
+                raise RuntimeError('скачанный файл слишком мал или повреждён')
+            core.spawn_self_replace(cur, newexe, self.log)
+            self._emit('op_end', {'status': 'Перезапуск…'})
+            self._emit('self_update_applying', {'version': ver})
+            self.log(f'Обновление до v{ver} готово. Лаунчер перезапускается…')
+            time.sleep(1.3)                       # дать фронту показать сообщение
+            try:
+                if _WINDOW:
+                    _WINDOW.destroy()
+            except Exception:
+                pass
+            os._exit(0)                            # жёсткий выход → освобождаем .exe для замены
+        except core.OperationCancelled:
+            self.log('Обновление отменено.')
+            self._emit('op_end', {'status': 'Отменено'})
+            self.busy = False
+        except Exception as e:
+            self.log(f'Не удалось обновить автоматически: {e}. Откройте страницу релиза вручную.')
+            self._emit('op_end', {'status': 'Ошибка'})
+            self._emit('self_update_failed', {'url': info.get('url', '')})
+            self.busy = False
 
     # ───────── сборка дерева ─────────
     def _tree_mode(self):

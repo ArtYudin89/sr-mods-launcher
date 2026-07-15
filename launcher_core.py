@@ -171,6 +171,44 @@ def download_url(url, token, dest, progress_cb=None, should_cancel=None, byte_cb
     return _stream_download(url, _headers(token, '*/*'), dest, progress_cb, should_cancel, byte_cb)
 
 
+def spawn_self_replace(current_exe, new_exe, log=print):
+    """Windows-самообновление: запустить фоновый .bat, который дождётся выхода текущего
+    процесса лаунчера (по PID), заменит exe скачанным и перезапустит его. После вызова
+    лаунчер ДОЛЖЕН закрыться, чтобы освободить файл. Работает только для frozen (.exe)."""
+    import os, subprocess
+    current_exe, new_exe = Path(current_exe), Path(new_exe)
+    bak = current_exe.with_name(current_exe.stem + '.old.exe')
+    bat = current_exe.with_name('_sr_selfupdate.bat')
+    pid = os.getpid()
+    # ждём, пока PID лаунчера исчезнет (файл разблокируется), затем меняем и стартуем.
+    # exe заменяем через .old.exe (переименование запущенного/старого) — надёжнее move поверх.
+    script = (
+        '@echo off\r\n'
+        'chcp 65001 >nul\r\n'
+        f'title Обновление SR Mods Launcher\r\n'
+        ':wait\r\n'
+        f'tasklist /FI "PID eq {pid}" 2>nul | find "{pid}" >nul\r\n'
+        'if not errorlevel 1 (\r\n'
+        '  timeout /t 1 /nobreak >nul\r\n'
+        '  goto wait\r\n'
+        ')\r\n'
+        f'if exist "{bak}" del /F /Q "{bak}" >nul 2>&1\r\n'
+        f'move /Y "{current_exe}" "{bak}" >nul 2>&1\r\n'
+        f'move /Y "{new_exe}" "{current_exe}" >nul 2>&1\r\n'
+        f'if exist "{bak}" del /F /Q "{bak}" >nul 2>&1\r\n'
+        f'start "" "{current_exe}"\r\n'
+        'del "%~f0"\r\n'
+    )
+    bat.write_text(script, encoding='utf-8')
+    DETACHED_PROCESS = 0x00000008
+    CREATE_NEW_PROCESS_GROUP = 0x00000200
+    CREATE_NO_WINDOW = 0x08000000
+    subprocess.Popen(['cmd', '/c', str(bat)],
+                     creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
+                     close_fds=True, cwd=str(current_exe.parent))
+    log('Помощник обновления запущен — лаунчер закроется и перезапустится.')
+
+
 def _parallel_fetch_extract(need, mods_dir, tmp, resolver, log,
                             should_cancel=None, part_cb=None,
                             workers=None, byte_cb=None, sha_sink=None):
@@ -872,40 +910,20 @@ def published_files(code_man, asset_man, fork_files=None):
     return out
 
 
-# Локализационно-кэшевые файлы игры: перепаковка агрегатора (декомпиляция→сборка) даёт
-# байты, не совпадающие 1:1 с оригиналом раздачи (Lang.dat отличался на 4 байта, см.
-# фидбэк по RevDiggers) → у скачанных руками модов БЕЗ снимка это вечный «фантомный
-# апдейт». CacheData.dat — вообще кэш. Такое расхождение без базы обновлением не считаем.
-COSMETIC_BASENAMES = {'lang.dat', 'cachedata.dat'}
-
-
-def is_cosmetic_rel(rel, fileset=None):
-    """Файл, чьи байты не стоит сверять при детекте апдейта без снимка (локализация/кэш).
-    Помимо известных имён (Lang.dat/CacheData.dat) — ЛЮБОЙ .dat, скомпилированный из
-    соседнего .txt того же имени в наборе мода (Main.dat←Main.txt и т.п.): игра
-    пересобирает .dat из .txt, поэтому его байтовый дрейф у скачавших вручную — не
-    обновление. fileset (install-rel набора мода, напр. `theirs`) включает эвристику;
-    агрегатор помечает те же файлы авторитетно в desc['cosmetic'] (см. _cosmetic_installs)."""
-    low = (rel or '').replace('\\', '/').lower()
-    if low.rsplit('/', 1)[-1] in COSMETIC_BASENAMES:
-        return True
-    if fileset and low.endswith('.dat'):
-        stem = low[:-4]
-        return any((k or '').replace('\\', '/').lower() == stem + '.txt' for k in fileset)
-    return False
-
-
 def plan_actionable_sha(theirs, base, disk, force_rels=None):
     """Сколько файлов реально требуют обновления — та же классификация, что в
     plan_update_merge, но ТОЛЬКО по sha (без скачивания), для детекта обновлений.
     theirs/base/disk: {install_rel: sha}. Считаются add/update/конфликт; player_only
     (мод не менял, правил игрок) и unchanged — НЕ считаются. Без снимка (base пуст)
-    любое отличие = обновление (как конфликт), КРОМЕ косметических файлов (is_cosmetic_rel):
-    их расхождение без базы — почти всегда перепаковка агрегатора, не апдейт.
-    force_rels — install-rel, которые СЧИТАЕМ авторитетными даже без снимка и для
-    косметики (напр. файл, переопределённый форк-хотфиксом: его отличие — намеренный
-    фикс, а не дрейф перепаковки; иначе Lang.dat-only хотфикс модам без снимка не
-    доставить, т.к. lang.dat жёстко помечен косметикой)."""
+    ЛЮБОЕ отличие = обновление.
+
+    Раньше тут была «косметика» (Lang.dat/CacheData.dat/Main.dat←.txt подавлялись без
+    снимка) на посылке, будто игра пересобирает .dat из .txt и байтовый дрейф не в счёт.
+    Посылка ложная: игра файлы модов НЕ меняет, поэтому любое расхождение файла — это
+    реальная разница версий, которую надо доставить (иначе фиксы, меняющие только .dat,
+    напр. EvoTranc/NotSoMinimap, молча не доходили). Подавление убрано.
+    force_rels — оставлен для совместимости сигнатуры (вызовы передают его); больше не
+    влияет, т.к. отличие засчитывается всегда."""
     n = 0
     force_rels = force_rels or set()
     for rel, tsha in theirs.items():
@@ -916,8 +934,7 @@ def plan_actionable_sha(theirs, base, disk, force_rels=None):
         elif msha == tsha:
             pass                         # unchanged
         elif bsha is None:
-            if rel in force_rels or not is_cosmetic_rel(rel, theirs):
-                n += 1                   # нет базы → отличие = обновление (кроме косметики)
+            n += 1                       # нет снимка → любое отличие = обновление
         elif msha == bsha:
             n += 1                       # update: мод изменил, игрок не трогал
         elif tsha == bsha:

@@ -68,8 +68,24 @@ window.__emit = (event, data) => {
     case 'merge_plan': onMergePlan(data); break;
     case 'merge_silent': onMergeSilent(data); break;
     case 'deps_confirm': onDepsConfirm(data); break;
+    case 'self_update_applying': onSelfUpdateApplying(data); break;
+    case 'self_update_failed': onSelfUpdateFailed(data); break;
   }
 };
+
+// лаунчер сейчас закроется и перезапустится — показать блокирующее сообщение
+function onSelfUpdateApplying(data) {
+  const d = document.createElement('div');
+  d.style.cssText = 'position:fixed;inset:0;z-index:99999;display:flex;align-items:center;'
+    + 'justify-content:center;background:rgba(0,0,0,.72);color:#fff;font-size:18px;text-align:center';
+  d.innerHTML = `Обновление до v${esc((data && data.version) || '')} установлено.<br>`
+    + 'Лаунчер закроется и запустится заново…';
+  document.body.appendChild(d);
+}
+function onSelfUpdateFailed(data) {
+  toast('Автообновление не удалось — открываю страницу релиза', 'warn');
+  if (data && data.url) api().open_url(data.url);
+}
 
 // ───────── инициализация ─────────
 window.addEventListener('pywebviewready', init);
@@ -90,11 +106,13 @@ async function checkSelfUpdate() {
   let r;
   try { r = await api().check_self_update(); } catch (e) { return; }
   if (!r || !r.ok || !r.update) return;
-  $('verBadge').textContent = `⬆ доступна v${r.version}`;
+  $('verBadge').textContent = `⬆ обновить до v${r.version}`;
   $('verBadge').classList.add('upd');
-  appendLog(`⬆ Доступна новая версия лаунчера: ${r.version} (у вас ${r.current}).`
-    + (r.url ? ' Скачать: ' + r.url : ' Обновите лаунчер.'), 'acc');
-  toast(`Доступна новая версия лаунчера: ${r.version}`, 'ok');
+  $('verBadge').title = r.can_auto ? 'Нажмите, чтобы обновить лаунчер' : 'Нажмите, чтобы скачать';
+  $('verBadge').onclick = () => startSelfUpdate(r);   // клик по бейджу = сразу обновление
+  appendLog(`⬆ Доступна новая версия лаунчера: ${r.version} (у вас ${r.current}). `
+    + (r.can_auto ? 'Нажмите на бейдж версии внизу, чтобы обновить.' : 'Скачать: ' + (r.url || '')), 'acc');
+  toast(`Доступна новая версия лаунчера: ${r.version} — нажмите бейдж версии, чтобы обновить`, 'ok');
 }
 
 function applyState() {
@@ -1541,6 +1559,20 @@ function renderSetOrder() {
   list.querySelectorAll('[data-up]').forEach((b) => b.onclick = () => { const i = +b.dataset.up; [SET_ORDER[i - 1], SET_ORDER[i]] = [SET_ORDER[i], SET_ORDER[i - 1]]; persist(); });
   list.querySelectorAll('[data-down]').forEach((b) => b.onclick = () => { const i = +b.dataset.down; [SET_ORDER[i + 1], SET_ORDER[i]] = [SET_ORDER[i], SET_ORDER[i + 1]]; persist(); });
 }
+// запустить обновление лаунчера: авто-скачивание+замена (.exe) или откат на страницу релиза
+async function startSelfUpdate(info) {
+  let r;
+  try { r = await api().download_self_update(); } catch (e) { r = null; }
+  if (r && r.ok) {
+    // прогресс идёт через op_begin/progress/op_end; по готовности прилетит self_update_applying
+    appendLog(`Скачиваю новую версию лаунчера v${info.version}…`, 'acc');
+    return;
+  }
+  // не .exe-сборка или занято/ошибка → откат на ручное скачивание страницы релиза
+  if (r && r.error && r.error !== 'dev') { toast(r.error, 'warn'); return; }
+  if (info.url) { api().open_url(info.url); toast('Открыл страницу релиза для ручного скачивания', 'ok'); }
+}
+
 // ручная проверка обновления лаунчера (кнопка в Настройках)
 async function manualCheckUpdate() {
   const st = $('setUpdateStatus');
@@ -1549,12 +1581,14 @@ async function manualCheckUpdate() {
   try { r = await api().check_self_update(); } catch (e) { r = null; }
   if (!r || !r.ok) { st.innerHTML = `<span style="color:var(--warn)">Не удалось проверить${r && r.error ? ': ' + esc(r.error) : ''}</span>`; return; }
   if (r.update) {
+    const label = r.can_auto ? 'Обновить сейчас' : 'Скачать';
     st.innerHTML = `<span style="color:var(--accent)">Доступна v${esc(r.version)}</span> (у вас v${esc(r.current)}). `
-      + (r.url ? `<a href="#" id="setUpdDl">Скачать</a>` : 'Обновите лаунчер вручную.');
+      + `<a href="#" id="setUpdDl">${label}</a>`;
     const dl = $('setUpdDl');
-    if (dl) dl.onclick = (e) => { e.preventDefault(); api().open_url(r.url); };
+    if (dl) dl.onclick = (e) => { e.preventDefault(); startSelfUpdate(r); };
     // подсветим бейдж версии в подвале
     $('verBadge').textContent = `⬆ доступна v${r.version}`; $('verBadge').classList.add('upd');
+    $('verBadge').onclick = () => startSelfUpdate(r);
   } else {
     st.innerHTML = `<span style="color:var(--ok)">У вас последняя версия (v${esc(r.current)}).</span>`;
   }

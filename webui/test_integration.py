@@ -1438,9 +1438,9 @@ try:
     )
     check('T54: update со снимком (msha==bsha) → n=1', 1, n)
 
-    print('\n--- T54b: косметика без снимка не считается обновлением ---')
-    # Lang.dat (известное имя) + Main.dat (производный от соседнего Main.txt) дрейфнули,
-    # снимка нет → не обновление. Обычный отличающийся файл — обновление.
+    print('\n--- T54b: без снимка любое отличие файла = обновление (косметики больше нет) ---')
+    # Lang.dat и Main.dat отличаются (V2 vs V1), Main.txt/data.txt совпадают. Игра файлы
+    # не пересобирает → оба отличающихся .dat = реальные обновления (раньше подавлялись).
     n = core.plan_actionable_sha(
         theirs={'M/CFG/Rus/Lang.dat': SHA_V2, 'M/CFG/Main.dat': SHA_V2,
                 'M/CFG/Main.txt': SHA_V1, 'M/DATA/data.txt': SHA_V1},
@@ -1448,25 +1448,25 @@ try:
         disk={'M/CFG/Rus/Lang.dat': SHA_V1, 'M/CFG/Main.dat': SHA_V1,
               'M/CFG/Main.txt': SHA_V1, 'M/DATA/data.txt': SHA_V1},
     )
-    check('T54b: Lang.dat+производный Main.dat дрейф → 0 обновлений', 0, n)
+    check('T54b: Lang.dat+Main.dat отличаются → 2 обновления', 2, n)
     n = core.plan_actionable_sha(
         theirs={'M/CFG/Binary.dat': SHA_V2},   # .dat без соседнего .txt — реальный апдейт
         base={}, disk={'M/CFG/Binary.dat': SHA_V1},
     )
     check('T54b: .dat без соседнего .txt → 1 обновление', 1, n)
 
-    print('\n--- T54c: форк-хотфикс Lang.dat без снимка → force_rels пробивает косметику ---')
-    # Lang.dat-only хотфикс модам БЕЗ снимка (bulk-установка): без force игнорируется
-    # как косметика, с force (целевой sha = форк-блоб) — засчитывается как обновление.
+    print('\n--- T54c: Lang.dat без снимка → отличие всегда = обновление (косметика убрана) ---')
+    # Игра НЕ пересобирает файлы мода, поэтому расхождение Lang.dat = реальная разница
+    # версий и должно предлагаться к обновлению даже без снимка (раньше подавлялось как
+    # «косметика» и фиксы, меняющие только .dat, не доходили).
     lang = 'OtherMods/WH40kGuns/CFG/Rus/Lang.dat'
-    check('T54c: без force — косметика, 0',
-          0, core.plan_actionable_sha({lang: SHA_V2}, {}, {lang: SHA_V1}))
-    check('T54c: с force — авторитетно, 1',
+    check('T54c: Lang.dat отличается → 1 обновление',
+          1, core.plan_actionable_sha({lang: SHA_V2}, {}, {lang: SHA_V1}))
+    check('T54c: force тоже 1 (совместимость)',
           1, core.plan_actionable_sha({lang: SHA_V2}, {}, {lang: SHA_V1},
                                       force_rels={lang}))
-    check('T54c: force, но диск уже = фикс → 0',
-          0, core.plan_actionable_sha({lang: SHA_V2}, {}, {lang: SHA_V2},
-                                      force_rels={lang}))
+    check('T54c: диск уже = целевой → 0',
+          0, core.plan_actionable_sha({lang: SHA_V2}, {}, {lang: SHA_V2}))
 
 finally:
     g.cleanup()
