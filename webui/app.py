@@ -683,6 +683,18 @@ class Api:
             ups = {}
             unavail = 0
             umap = dict(unit_maps)                  # source -> {rel:sha}, для слияния стека
+            # фикс-дети по источнику-родителю: 'camp/parent' -> {'camp/fix', …}. Агрегатор
+            # сворачивает файлы фикс-юнита (fix_parent) в дескриптор родителя
+            # (overlaid_fixes) и убирает фикс-юнит из variants. Апдейт целится в этот
+            # слитый дескриптор (после-фикс), а детект строит цель из сырых поюнитных
+            # манифестов ТОЛЬКО по variants — без фикс-юнита он целится в ДО-фикс базу и
+            # вечно видит ложное «⬆ обновление» (апдейт при этом отвечает «обновлять
+            # нечего»). Возвращаем фикс-детей в набор источников слияния → детект==апдейт.
+            fix_children = {}
+            for pk, pv in self._get_packs(self._token()).items():
+                fp = pv.get('fix_parent')
+                if fp:
+                    fix_children.setdefault(f"{pv.get('camp')}/{fp}", set()).add(pk)
             for mid, m in idx.get('mods', {}).items():
                 if self.should_cancel():
                     raise core.OperationCancelled()
@@ -714,6 +726,8 @@ class Api:
                 camp_srcs = {s for s in allowed if (s or '').split('/')[0] == tcamp}
                 if choice and csrc:
                     camp_srcs.add(csrc)            # выбранный источник обязан участвовать
+                for s in list(camp_srcs):          # + свёрнутые фикс-юниты (overlaid_fixes)
+                    camp_srcs |= fix_children.get(s, set())
                 theirs = self._merged_camp_files(mid, umap, camp_srcs)
                 if not theirs:
                     continue                       # ни один логический вариант не лёг на диск

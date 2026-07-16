@@ -601,6 +601,63 @@ try:
 finally:
     g.cleanup()
 
+print('\n--- T16c: фикс СВЁРНУТ в дескриптор (overlaid_fixes), фикс-юнита нет в variants → НЕ обновление ---')
+# Регресс (2026-07-16): агрегатор в _fold_fix_overlays свернул файлы фикс-юнита в дескриптор
+# родителя (overlaid_fixes:true) и УБРАЛ фикс-юнит из variants. Апдейт читает слитый
+# дескриптор (после-фикс) → «обновлять нечего». Детект строил цель из сырых поюнитных
+# манифестов ТОЛЬКО по variants — фикс-юнита там нет → целился в ДО-фикс базу и вечно
+# предлагал ложное «⬆ обновление». Отличие от T16b: фикс-юнита НЕТ в variants (свёрнут),
+# детект обязан подтянуть его по packs.fix_parent.
+g = TempGame()
+try:
+    fake_packs = {
+        'redux/redux_base_installer': {'camp': 'redux', 'name': 'redux_base_installer',
+                                       'tier': 'base', 'load_order': 0},
+        'redux/redux_fixes': {'camp': 'redux', 'name': 'redux_fixes', 'tier': 'fixes',
+                              'load_order': 10, 'fix_parent': 'redux_base_installer'},
+    }
+    # packs=fake_packs → _packs_cache проставлен, _get_packs (и fix_children) видят fix_parent
+    a = g.fresh_api(base='redux', packs=fake_packs, catalog={
+        'ShusRangers/ShuNukes': {
+            'name': 'Ядерное оружие', 'default_source': 'redux/redux_base_installer',
+            'variants': [
+                # только base — фикс-юнит свёрнут в дескриптор и убран из variants
+                {'source': 'redux/redux_base_installer', 'path': 'a.json',
+                 'depends': [], 'conflicts': []},
+            ],
+        },
+    })
+    # umap всё ещё содержит оба юнита (packs их перечисляет), но фикс-юнита нет в variants
+    a._pub_cache_all = [
+        ('redux/redux_base_installer', {
+            'ShusRangers/ShuNukes/ModuleInfo.txt': SHA_V1,       # ДО-фикс
+            'ShusRangers/ShuNukes/extra.dat': _SHA_E,
+        }),
+        ('redux/redux_fixes', {
+            'ShusRangers/ShuNukes/ModuleInfo.txt': SHA_V2,       # фикс переопределяет
+        }),
+    ]
+
+    def fake_index_disk_folded(mods_dir, catalog, **kw):
+        return {'mods': {'ShusRangers/ShuNukes': {'files': {
+            'ShusRangers/ShuNukes/ModuleInfo.txt': {'sha': SHA_V2},   # на диске после-фикс
+            'ShusRangers/ShuNukes/extra.dat': {'sha': _SHA_E},
+        }, 'status': 'known'}}, 'count': 1, 'known': 1, 'unknown': 0}
+
+    p16h = patch.object(core, 'index_disk_mods', side_effect=fake_index_disk_folded)
+    p16i = patch.object(core, 'save_disk_index', return_value=None)
+    p16j = patch.object(core, 'load_chunk_index',
+                        return_value={'blobs': {SHA_V1: {}, SHA_V2: {}, _SHA_E: {}}})
+    p16h.start(); p16i.start(); p16j.start()
+    try:
+        a.check_updates(); wait_idle(a, timeout=8)
+    finally:
+        p16h.stop(); p16i.stop(); p16j.stop()
+    check_false('T16c: ShuNukes НЕ в _updates (фикс свёрнут, детект подтянул по fix_parent)',
+                'ShusRangers/ShuNukes' in a._updates)
+finally:
+    g.cleanup()
+
 print('\n--- T17: _needs_order: мод в базе → False; мод только в universe → True ---')
 g = TempGame()
 try:
