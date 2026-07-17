@@ -44,6 +44,8 @@ def _mock_state():
         'busy': False,
         'desc_in_list': True,
         'show_hidden': True,
+        'tutorial_done': True,   # не показывать онбординг (экран читаемости/тур) — иначе
+                                 # авто-оверлей первого запуска перехватывает фокус/Esc в UI-сценариях
     }
 
 
@@ -1035,6 +1037,107 @@ def scenario_feedback_batch(page, base_url):
 
 # ───────── Главный запуск ─────────
 
+_PLAN_FIXTURE = {
+    'id': 'Cat/EvoTranc', 'name': 'EvoTranc',
+    'version_old': '1', 'version_new': '2', 'source_label': 'redux',
+    'summary': {}, 'unchanged': 3, 'has_forks': True, 'reconciled': False,
+    'labels': {}, 'files': [
+        {'path': 'Evolution/EvoTranc/DATA/Items/a.dat', 'status': 'deleted_clean',
+         'source': 'developer', 'source_detail': 'redux/redux_base_installer',
+         'mine': {'date': '03.07.2026', 'size': 100}, 'their': None},
+        {'path': 'Evolution/EvoTranc/DATA/Items/b.dat', 'status': 'deleted_clean',
+         'source': 'developer', 'source_detail': 'redux/redux_base_installer',
+         'mine': {'date': '03.07.2026', 'size': 120}, 'their': None},
+        {'path': 'Evolution/EvoTranc/DATA/Config/x.cfg', 'status': 'update',
+         'source': 'developer', 'source_detail': 'redux/redux_fixes',
+         'mine': {'date': '03.07.2026', 'size': 50}, 'their': {'date': '22.03.2024', 'size': 55}},
+        {'path': 'Eng/Lang.dat', 'status': 'conflict_binary',
+         'source': 'developer', 'source_detail': 'redux/redux_fixes',
+         'mine': {'date': '03.07.2026', 'size': 200}, 'their': {'date': '22.03.2024', 'size': 210}},
+        {'path': 'Rus/Lang.dat', 'status': 'conflict_binary',
+         'source': 'hotfix', 'source_detail': 'ArtYudin89/sr-mods-hotfixes',
+         'mine': {'date': '03.07.2026', 'size': 200}, 'their': {'date': '01.07.2026', 'size': 205}},
+    ],
+}
+
+
+def scenario_first_run_appearance(page, base_url):
+    """Сц.11: Экран читаемости первого запуска ДО обучающего тура (#2).
+    Новичок с нечитаемым текстом должен настроить размер/масштаб/контраст перед туром."""
+    print('\n=== Сц.11: Экран читаемости до тура ===')
+    init_page(page, base_url)
+    # эмулируем первый запуск (mock-state ставит tutorial_done=True): сбрасываем и зовём онбординг
+    page.evaluate("STATE.tutorial_done = false; maybeAutoTour();")
+    page.wait_for_function(
+        "!document.getElementById('firstRunOverlay').classList.contains('hidden')", timeout=3000)
+    check('первый запуск: показан экран читаемости (firstRunOverlay)', True)
+    check('экран читаемости: 3 степпера (текст/масштаб/контраст)',
+          page.eval_on_selector_all('#firstRunOverlay .step-row', 'els => els.length') == 3)
+    # степпер «крупнее» повышает размер текста и синхронизируется со степпером в настройках
+    page.click('#frTextPlus')
+    check('степпер «крупнее» → 110%', page.inner_text('#frTextVal') == '110%')
+    check('синхрон со степпером настроек (setTextVal)',
+          page.eval_on_selector('#setTextVal', 'e => e.textContent') == '110%')
+    page.click('#frTextReset')
+    check('сброс ↺ → 100%', page.inner_text('#frTextVal') == '100%')
+    shot(page, '11_first_run_appearance')
+    # «Продолжить» закрывает экран и открывает обучающий тур
+    page.click('#frContinueBtn')
+    page.wait_for_function(
+        "document.getElementById('firstRunOverlay').classList.contains('hidden')", timeout=2000)
+    check('«Продолжить» → экран закрыт, открыт тур',
+          page.evaluate("!document.getElementById('tourOverlay').classList.contains('hidden')"))
+    page.evaluate("endTour()")
+
+
+def scenario_plan_filter_tree(page, base_url):
+    """Сц.12: План обновления — фильтр-чипы по действию + древовидный вид по папкам (#3)."""
+    print('\n=== Сц.12: Фильтр и дерево в плане обновления ===')
+    init_page(page, base_url)
+    page.evaluate(
+        "(p) => { onPreviewPlan(p); "
+        "if (document.getElementById('planOverlay').classList.contains('hidden')) show('planOverlay'); }",
+        _PLAN_FIXTURE)
+    page.wait_for_selector('#planCtls .plan-chip', timeout=2000)
+    chips = page.eval_on_selector_all('#planCtls .plan-chip', 'els => els.map(e => e.textContent.trim())')
+    check('чипы-счётчики: Все 5 / заменится 1 / конфликт 2 / удалится 2',
+          any('Все' in c and '5' in c for c in chips) and any('заменится' in c and '1' in c for c in chips)
+          and any('конфликт' in c and '2' in c for c in chips) and any('удалится' in c and '2' in c for c in chips),
+          str(chips))
+    check('плоский вид: 5 файловых строк',
+          page.eval_on_selector_all('#planBody tbody tr', 'els => els.length') == 5)
+    # клик по чипу «конфликт» → фильтр до 2 строк, чип подсвечен, показана плашка
+    page.evaluate("() => { for (const b of document.querySelectorAll('#planCtls .plan-chip')) "
+                  "if (b.textContent.includes('конфликт')) { b.click(); break; } }")
+    check('фильтр «конфликт» → 2 строки',
+          page.eval_on_selector_all('#planBody tbody tr', 'els => els.length') == 2)
+    check('активный чип подсвечен (.on)',
+          any('конфликт' in c for c in
+              page.eval_on_selector_all('#planCtls .plan-chip.on', 'els => els.map(e=>e.textContent.trim())')))
+    # снять фильтр
+    page.evaluate("() => { for (const b of document.querySelectorAll('#planCtls .plan-chip')) "
+                  "if (b.textContent.trim().startsWith('Все')) { b.click(); break; } }")
+    check('«Все» → снова 5 строк',
+          page.eval_on_selector_all('#planBody tbody tr', 'els => els.length') == 5)
+    # переключить в дерево: сжатие цепочки одиночных папок + отдельные узлы
+    page.click('#planCtls .plan-viewtog')
+    dirs = page.eval_on_selector_all('#planBody .plan-dir .dir-name', 'els => els.map(e=>e.textContent)')
+    check('дерево: цепочка сжата в узел «Evolution/EvoTranc/DATA»',
+          any(d == 'Evolution/EvoTranc/DATA' for d in dirs), str(dirs))
+    check('дерево: отдельные узлы Items и Config под DATA',
+          any(d == 'Items' for d in dirs) and any(d == 'Config' for d in dirs), str(dirs))
+    shot(page, '12_plan_tree')
+    expanded = page.eval_on_selector_all('#planBody tbody tr', 'els => els.length')
+    page.evaluate("() => { for (const r of document.querySelectorAll('#planBody .plan-dir')) "
+                  "if (r.getAttribute('data-dir').endsWith('/Items')) { r.click(); break; } }")
+    check('сворачивание узла Items скрыло его файлы',
+          page.eval_on_selector_all('#planBody tbody tr', 'els => els.length') < expanded)
+    # тоггл обратно в список
+    page.click('#planCtls .plan-viewtog')
+    check('тоггл вернул плоский список (5 строк)',
+          page.eval_on_selector_all('#planBody tbody tr', 'els => els.length') == 5)
+
+
 def main():
     print('Запуск mock-сервера…')
     srv, base_url = start_server(17777)
@@ -1058,6 +1161,8 @@ def main():
             scenario_filter_popover,
             scenario_clear_mods,
             scenario_feedback_batch,
+            scenario_first_run_appearance,
+            scenario_plan_filter_tree,
         ]
 
         for sc in scenarios:

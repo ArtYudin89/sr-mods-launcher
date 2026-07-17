@@ -67,6 +67,9 @@ window.__emit = (event, data) => {
     case 'progress': onProgress(data); break;
     case 'merge_plan': onMergePlan(data); break;
     case 'merge_silent': onMergeSilent(data); break;
+    case 'preview_begin': onPreviewBegin(data); break;
+    case 'preview_plan': onPreviewPlan(data); break;
+    case 'preview_error': onPreviewError(data); break;
     case 'deps_confirm': onDepsConfirm(data); break;
     case 'self_update_applying': onSelfUpdateApplying(data); break;
     case 'self_update_failed': onSelfUpdateFailed(data); break;
@@ -145,10 +148,93 @@ function applyState() {
   $('tokenDot').classList.toggle('on', !!STATE.has_token);
   $('verboseChk').checked = !!STATE.log_verbose;
   $('logBox').classList.toggle('show-verbose', !!STATE.log_verbose);
-  if ($('setDescInList')) $('setDescInList').checked = !!STATE.desc_in_list;
-  if ($('setShowHidden2')) $('setShowHidden2').checked = !!STATE.show_hidden;
+  if ($('railDescInList')) $('railDescInList').checked = !!STATE.desc_in_list;
   if ($('fShowHidden')) $('fShowHidden').checked = !!STATE.show_hidden;
+  applyView();
   reflowToolbar();
+}
+
+// ───────── вид: масштаб (zoom) · размер текста (шрифты) · контраст (цвета) ─────────
+// пределы регуляторов (проценты); шаг степперов
+const VIEW_LIM = { scale: [80, 160], text: [80, 170], contrast: [100, 150] };
+const VIEW_STEP = 10;
+const clampView = (k, v) => Math.max(VIEW_LIM[k][0], Math.min(VIEW_LIM[k][1], Math.round(v / VIEW_STEP) * VIEW_STEP));
+
+function _lerpHex(a, b, t) {
+  const p = (h) => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
+  const [ar, ag, ab] = p(a), [br, bg, bb] = p(b);
+  const c = (x, y) => Math.round(x + (y - x) * t).toString(16).padStart(2, '0');
+  return `#${c(ar, br)}${c(ag, bg)}${c(ab, bb)}`;
+}
+// целевые цвета при МАКСИМАЛЬНОМ контрасте (t=1) для каждой темы: [обычный, макс].
+const CONTRAST_VARS = {
+  dark:  { '--fg': ['#e8edf7', '#ffffff'], '--muted': ['#9aa7c4', '#d6def2'], '--line': ['#2c3650', '#4a597f'] },
+  light: { '--fg': ['#1a2030', '#000000'], '--muted': ['#5b677e', '#333c4d'], '--line': ['#dde3ee', '#aeb9d0'] },
+};
+
+// размер текста: множим ВСЕ font-size из таблиц стилей (CSSOM), не трогая раскладку zoom'ом.
+// Собираем базовые значения один раз; так избегаем «уползания» интерфейса при масштабе.
+let FONT_RULES = null;
+function collectFontRules() {
+  FONT_RULES = [];
+  for (const sheet of document.styleSheets) {
+    let rules;
+    try { rules = sheet.cssRules; } catch (e) { continue; }   // кросс-доменные — пропускаем
+    for (const r of rules) {
+      if (r.style && r.style.fontSize && r.style.fontSize.endsWith('px')) {
+        FONT_RULES.push({ style: r.style, base: parseFloat(r.style.fontSize) });
+      }
+    }
+  }
+}
+function applyTextScale(mult) {
+  if (FONT_RULES === null) collectFontRules();
+  for (const fr of FONT_RULES) fr.style.fontSize = (fr.base * mult).toFixed(2) + 'px';
+}
+
+function applyView() {
+  const scale = clampView('scale', +(STATE.ui_scale || 100));
+  const text = clampView('text', +(STATE.text_scale || 100));
+  const contrast = clampView('contrast', +(STATE.contrast || 100));
+  // 1) размер только текста — множитель шрифтов (раскладка/кнопки не раздуваются)
+  applyTextScale(text / 100);
+  // 2) масштаб всего интерфейса — zoom с компенсацией: тело держим равным вьюпорту,
+  //    иначе при <100% появляется пустая область, а при >100% часть UI уходит за край.
+  const root = document.documentElement, z = scale / 100;
+  if (scale === 100) {
+    root.style.zoom = '';
+    document.body.style.width = '';
+    document.body.style.height = '';
+  } else {
+    root.style.zoom = String(z);
+    document.body.style.width = `calc(100vw / ${z})`;
+    document.body.style.height = `calc(100vh / ${z})`;
+  }
+  // 3) контраст — интерполяция ключевых переменных читаемости от «как в теме» к максимуму
+  const theme = root.dataset.theme === 'light' ? 'light' : 'dark';
+  const t = (contrast - 100) / 50;
+  const map = CONTRAST_VARS[theme];
+  for (const k in map) {
+    if (t <= 0) root.style.removeProperty(k);
+    else root.style.setProperty(k, _lerpHex(map[k][0], map[k][1], t));
+  }
+  // подписи степперов + блокировка кнопок на краях диапазона
+  const setStep = (valId, minId, plusId, key, val, label) => {
+    if (!$(valId)) return;
+    $(valId).textContent = label;
+    if ($(minId)) $(minId).disabled = val <= VIEW_LIM[key][0];
+    if ($(plusId)) $(plusId).disabled = val >= VIEW_LIM[key][1];
+  };
+  setStep('setScaleVal', 'setScaleMinus', 'setScalePlus', 'scale', scale, scale + '%');
+  setStep('setTextVal', 'setTextMinus', 'setTextPlus', 'text', text, text + '%');
+  setStep('setContrastVal', 'setContrastMinus', 'setContrastPlus', 'contrast', contrast,
+          contrast <= 100 ? 'обычный' : '+' + (contrast - 100) + '%');
+  // те же степперы дублируются на pre-модалке первого запуска (firstRunOverlay) —
+  // держим их подписи/края в синхроне (setStep — no-op, если элементов нет)
+  setStep('frTextVal', 'frTextMinus', 'frTextPlus', 'text', text, text + '%');
+  setStep('frScaleVal', 'frScaleMinus', 'frScalePlus', 'scale', scale, scale + '%');
+  setStep('frContrastVal', 'frContrastMinus', 'frContrastPlus', 'contrast', contrast,
+          contrast <= 100 ? 'обычный' : '+' + (contrast - 100) + '%');
 }
 
 function updateColHeader() {
@@ -264,11 +350,41 @@ function wireUI() {
     STATE.always_show_plan = e.target.checked;
     api().set_always_show_plan(e.target.checked);
   };
-  $('setDescInList').onchange = (e) => {
+  $('railDescInList').onchange = (e) => {
     STATE.desc_in_list = e.target.checked;
     api().set_desc_in_list(e.target.checked).then(() => refreshTree());
   };
-  $('setShowHidden2').onchange = (e) => toggleShowHidden(e.target.checked);
+  // регуляторы вида — степперы (−/＋). Ползунки не годятся: масштаб = zoom, и бегунок
+  // «уползал» бы из-под курсора при перетаскивании. Клик применяет сразу и сохраняет.
+  const bumpView = (key, cfgKey, apiFn, delta) => {
+    const cur = clampView(key, +(STATE[cfgKey] || 100));
+    const next = clampView(key, cur + delta * VIEW_STEP);
+    if (next === cur) return;
+    STATE[cfgKey] = next; applyView(); api()[apiFn](next);
+  };
+  $('setScaleMinus').onclick = () => bumpView('scale', 'ui_scale', 'set_ui_scale', -1);
+  $('setScalePlus').onclick = () => bumpView('scale', 'ui_scale', 'set_ui_scale', +1);
+  $('setTextMinus').onclick = () => bumpView('text', 'text_scale', 'set_text_scale', -1);
+  $('setTextPlus').onclick = () => bumpView('text', 'text_scale', 'set_text_scale', +1);
+  $('setContrastMinus').onclick = () => bumpView('contrast', 'contrast', 'set_contrast', -1);
+  $('setContrastPlus').onclick = () => bumpView('contrast', 'contrast', 'set_contrast', +1);
+  const resetView = (cfgKey, apiFn) => { STATE[cfgKey] = 100; applyView(); api()[apiFn](100); };
+  $('setTextReset').onclick = () => resetView('text_scale', 'set_text_scale');
+  $('setScaleReset').onclick = () => resetView('ui_scale', 'set_ui_scale');
+  $('setContrastReset').onclick = () => resetView('contrast', 'set_contrast');
+  // те же регуляторы на pre-модалке первого запуска (dubli): та же логика bumpView/resetView
+  $('frTextMinus').onclick = () => bumpView('text', 'text_scale', 'set_text_scale', -1);
+  $('frTextPlus').onclick = () => bumpView('text', 'text_scale', 'set_text_scale', +1);
+  $('frTextReset').onclick = () => resetView('text_scale', 'set_text_scale');
+  $('frScaleMinus').onclick = () => bumpView('scale', 'ui_scale', 'set_ui_scale', -1);
+  $('frScalePlus').onclick = () => bumpView('scale', 'ui_scale', 'set_ui_scale', +1);
+  $('frScaleReset').onclick = () => resetView('ui_scale', 'set_ui_scale');
+  $('frContrastMinus').onclick = () => bumpView('contrast', 'contrast', 'set_contrast', -1);
+  $('frContrastPlus').onclick = () => bumpView('contrast', 'contrast', 'set_contrast', +1);
+  $('frContrastReset').onclick = () => resetView('contrast', 'set_contrast');
+  // первый запуск: «Продолжить» → тур; «Пропустить обучение» → закрыть и не показывать снова
+  $('frContinueBtn').onclick = () => { hide('firstRunOverlay'); startTour(); };
+  $('frSkipBtn').onclick = () => { hide('firstRunOverlay'); endTour(); };
   $('cancelBtn').onclick = () => api().cancel();
 
   // контекстное меню журнала (ПКМ)
@@ -354,6 +470,16 @@ function wireUI() {
     const mid = ctxMid; hideCtxMenu();
     if (mid) editNoteFor(mid);
   };
+  $('ctxPlan').onclick = () => { const iid = ctxIid; hideCtxMenu(); if (iid) previewPlan(iid); };
+  $('planCloseBtn').onclick = () => hide('planOverlay');
+  $('planBytes').onchange = () => renderPlanTable();
+  $('planOverlay').onclick = (e) => { if (e.target === $('planOverlay')) hide('planOverlay'); };
+  setupPlanPanel();
+  $('planUpdateBtn').onclick = () => {
+    const iid = PLAN_IID; hide('planOverlay');
+    if (!iid) return;
+    api().start_merge([iid]).then((r) => { if (!r.ok) toast(r.error, 'err'); });
+  };
   $('ctxRemoveOne').onclick = () => { const p = ctxPidx; hideCtxMenu(); if (p !== null) cancelAdd(p); };
   $('ctxCancelAdd').onclick = () => {
     hideCtxMenu();
@@ -364,9 +490,25 @@ function wireUI() {
   };
   document.addEventListener('click', () => { hideCtxMenu(); hideLogCtxMenu(); hideMoreMenu(); });
   document.addEventListener('scroll', () => { hideCtxMenu(); hideLogCtxMenu(); hideMoreMenu(); }, true);
+  // план обновления: клики по чипам-фильтрам/тогглу вида (делегирование — контейнер
+  // перерисовывается) и по узлам-папкам дерева (свернуть/развернуть)
+  $('planHead').addEventListener('click', (e) => {
+    const chip = e.target.closest('.plan-chip');
+    if (chip) { PLAN_FILTER = chip.getAttribute('data-fkey') || null; renderPlanControls(); renderPlanTable(); return; }
+    if (e.target.closest('.plan-viewtog')) { PLAN_TREE = !PLAN_TREE; renderPlanControls(); renderPlanTable(); }
+  });
+  $('planBody').addEventListener('click', (e) => {
+    const dir = e.target.closest('.plan-dir');
+    if (!dir) return;
+    const k = dir.getAttribute('data-dir');
+    if (PLAN_TREE_COLLAPSED.has(k)) PLAN_TREE_COLLAPSED.delete(k); else PLAN_TREE_COLLAPSED.add(k);
+    renderPlanTable();
+  });
   // Esc закрывает верхнюю открытую модалку / поповер
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
+    // Esc на экране читаемости = «Продолжить»: закрыть и перейти к туру (не бросать новичка)
+    if (!$('firstRunOverlay').classList.contains('hidden')) { $('frContinueBtn').click(); return; }
     if (!$('tourOverlay').classList.contains('hidden')) { endTour(); return; }
     if (!$('ctxMenu').classList.contains('hidden')) { hideCtxMenu(); return; }
     if (!$('logCtxMenu').classList.contains('hidden')) { hideLogCtxMenu(); return; }
@@ -378,7 +520,7 @@ function wireUI() {
       modCards.forEach((c, m) => { const z = +c.style.zIndex || 0; if (z >= tz) { tz = z; top = m; } });
       if (top) { closeModCard(top); return; }
     }
-    for (const id of ['helpOverlay', 'compatOverlay', 'addOverlay', 'profileOverlay', 'settingsOverlay']) {
+    for (const id of ['planOverlay', 'helpOverlay', 'compatOverlay', 'addOverlay', 'profileOverlay', 'settingsOverlay']) {
       if (!$(id).classList.contains('hidden')) { hide(id); return; }
     }
     if (!$('confirmOverlay').classList.contains('hidden')) { $('confirmCancel').click(); return; }
@@ -430,11 +572,10 @@ function passFilter(node) {
   }
   return true;
 }
-// показать/скрыть скрытые моды (синхронизирует обе галочки: фильтр и настройки)
+// показать/скрыть скрытые моды (галочка в поповере фильтра)
 function toggleShowHidden(val) {
   STATE.show_hidden = !!val;
   if ($('fShowHidden')) $('fShowHidden').checked = !!val;
-  if ($('setShowHidden2')) $('setShowHidden2').checked = !!val;
   api().set_show_hidden(!!val).then(() => refreshTree());
 }
 // быстрые фильтры-чипы по пользовательским тегам (строятся по TREE.all_tags)
@@ -487,6 +628,7 @@ function toggleTheme() {
   document.documentElement.dataset.theme = next;
   $('themeBtn').textContent = next === 'light' ? '☀' : '🌙';
   STATE.theme = next;
+  applyView();               // переинтерполировать контраст под новую тему
   api().set_theme(next);
 }
 
@@ -1857,6 +1999,259 @@ function onMergeSilent(d) {
   toast('✔ ' + ((d && d.text) || 'Обновлено') + sub, 'ok');
 }
 
+// ───────── план обновления (просмотр, из ПКМ «Посмотреть план обновления») ─────────
+let PLAN_IID = null;
+let PLAN_DATA = null;                    // последний план (для перерисовки при переключении «в байтах»)
+const PLAN_ST = {
+  add: '➕ добавится', update: '⬆ заменится', automerge: '🔀 авто-слияние',
+  player_only: '✋ ваш файл', conflict_text: '⚠ конфликт', conflict_binary: '⚠ конфликт',
+  conflict_deleted: '⚠ удалён (у вас правки)', deleted_clean: '🗑 удалится',
+};
+const SRC_CLASS = { developer: 'src-developer', hotfix: 'src-hotfix', disk: 'src-disk' };
+const SRC_KIND = { developer: 'разработчик', hotfix: 'хотфикс', disk: 'ваш диск' };
+
+// группы действий для фильтра/счётчиков плана (per-file status → группа). Конфликты
+// (текст/бинарь/удалён-с-правками) объединены в одну группу, как счётчик summary.conflicts.
+const PLAN_GROUPS = [
+  { key: 'update', label: 'заменится', st: ['update'] },
+  { key: 'add', label: 'добавится', st: ['add'] },
+  { key: 'automerge', label: 'авто-слияние', st: ['automerge'] },
+  { key: 'player_only', label: 'ваш файл', st: ['player_only'] },
+  { key: 'conflict', label: 'конфликт', st: ['conflict_text', 'conflict_binary', 'conflict_deleted'] },
+  { key: 'deleted_clean', label: 'удалится', st: ['deleted_clean'] },
+];
+let PLAN_FILTER = null;                  // активная группа-фильтр (ключ) или null = все
+let PLAN_TREE = false;                   // вид: дерево по папкам (sticky между открытиями)
+let PLAN_TREE_COLLAPSED = new Set();     // свёрнутые узлы-папки (по полному пути), сброс на новый план
+
+function planGroupCounts(files) {
+  const c = {}, st2g = {};
+  for (const g of PLAN_GROUPS) { c[g.key] = 0; for (const s of g.st) st2g[s] = g.key; }
+  for (const f of files) { const k = st2g[f.status]; if (k) c[k]++; }
+  return c;
+}
+
+// размер: КБ/МБ по умолчанию, точные байты — при включённом тоггле «в байтах»
+function fmtSize(b, bytes) {
+  if (b == null) return '—';
+  if (bytes) return b.toLocaleString('ru-RU') + ' Б';
+  if (b < 1024) return b + ' Б';
+  if (b < 1024 * 1024) return (b / 1024).toFixed(b < 10240 ? 1 : 0) + ' КБ';
+  return (b / (1024 * 1024)).toFixed(1) + ' МБ';
+}
+// «мой файл → обновление» в одной ячейке: приглушённое старое, акцентное новое
+function cmpCell(mine, their, pick, bytes) {
+  const mv = mine ? esc(pick(mine)) : null;
+  const tv = their ? esc(pick(their)) : null;
+  if (mv != null && tv != null) return `<span class="c-mine">${mv}</span><span class="c-arrow">→</span><span class="c-new">${tv}</span>`;
+  if (tv != null) return `<span class="c-new">${tv}</span>`;              // только новое (add)
+  if (mv != null) return `<span class="c-mine">${mv}</span>`;            // только моё (удаление/player_only)
+  return '<span class="c-none">—</span>';
+}
+
+// окно плана — перемещаемое и с регулируемым размером (как i-popup строк):
+// тянем за заголовок — двигаем, за правый нижний угол — CSS resize; геометрия в localStorage
+function loadPlanGeom() { try { return JSON.parse(localStorage.getItem('planGeom') || 'null'); } catch (e) { return null; } }
+function savePlanGeom(m) {
+  try {
+    localStorage.setItem('planGeom', JSON.stringify({
+      left: parseInt(m.style.left) || 0, top: parseInt(m.style.top) || 0,
+      width: m.offsetWidth, height: m.offsetHeight,
+    }));
+  } catch (e) {}
+}
+function applyPlanGeom() {
+  const ov = $('planOverlay'), m = ov.querySelector('.plan-modal');
+  ov.classList.add('free');                        // абсолютное позиционирование (как карточка мода)
+  const g = loadPlanGeom(), vw = window.innerWidth, vh = window.innerHeight;
+  let w = Math.min((g && g.width) || Math.min(900, vw * 0.94), vw - 8);
+  let h = Math.min((g && g.height) || Math.round(vh * 0.74), vh - 8);
+  m.style.width = w + 'px'; m.style.height = h + 'px';
+  let left = (g && g.left != null) ? g.left : Math.round((vw - w) / 2);
+  let top = (g && g.top != null) ? g.top : Math.round((vh - h) / 2);
+  m.style.left = Math.max(2, Math.min(left, vw - 80)) + 'px';
+  m.style.top = Math.max(2, Math.min(top, vh - 40)) + 'px';
+}
+function setupPlanPanel() {
+  const ov = $('planOverlay'), m = ov.querySelector('.plan-modal'), h = $('planTitle');
+  h.addEventListener('mousedown', (e) => {
+    const r = m.getBoundingClientRect();
+    const dx = e.clientX - r.left, dy = e.clientY - r.top;
+    const move = (ev) => {
+      m.style.left = Math.max(2, Math.min(ev.clientX - dx, window.innerWidth - 60)) + 'px';
+      m.style.top = Math.max(2, Math.min(ev.clientY - dy, window.innerHeight - 30)) + 'px';
+    };
+    const up = () => { savePlanGeom(m); document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up); };
+    document.addEventListener('mousemove', move);
+    document.addEventListener('mouseup', up);
+    e.preventDefault();
+  });
+  if (window.ResizeObserver) {
+    const ro = new ResizeObserver(() => {
+      if (ov.classList.contains('hidden')) return;   // не сохраняем геометрию скрытого окна
+      clearTimeout(m._rot); m._rot = setTimeout(() => savePlanGeom(m), 300);
+    });
+    ro.observe(m);
+  }
+}
+
+function previewPlan(iid) {
+  PLAN_IID = iid; PLAN_DATA = null;
+  onPreviewBegin();                     // мгновенная обратная связь — окно в состоянии загрузки
+  api().preview_update_plan(iid).then((r) => {
+    if (!r || !r.ok) { hide('planOverlay'); PLAN_IID = null; toast((r && r.error) || 'Не удалось построить план', 'warn'); }
+  });
+}
+
+function onPreviewBegin() {
+  $('planTitle').textContent = 'План обновления';
+  $('planHead').innerHTML = '';
+  $('planLegend').innerHTML = '';
+  $('planUpdateBtn').style.display = 'none';
+  $('planBytesWrap').style.display = 'none';
+  $('planBody').innerHTML = '<div class="plan-empty">Собираю план (читаю каталог и сверяю файлы на диске)…</div>';
+  if ($('planOverlay').classList.contains('hidden')) { applyPlanGeom(); show('planOverlay'); }
+}
+
+function onPreviewError(d) {
+  hide('planOverlay');
+  PLAN_IID = null;
+  toast((d && d.error) || 'Не удалось построить план', 'warn');
+}
+
+function onPreviewPlan(p) {
+  PLAN_DATA = p;
+  PLAN_FILTER = null;                    // новый план — сбрасываем фильтр и свёрнутые узлы
+  PLAN_TREE_COLLAPSED = new Set();
+  $('planTitle').textContent = 'План обновления · ' + esc(p.name || p.id || '');
+  const vt = (p.version_old || p.version_new)
+    ? `<div class="plan-ver">Версия: <b>${esc(p.version_old || '—')}</b> → <b>${esc(p.version_new || '—')}</b>`
+      + `${p.source_label ? ' · сборка ' + esc(p.source_label) : ''}</div>`
+    : '';
+  // чипы-счётчики стали фильтрами по действию + переключатель «дерево/список» — рендер
+  // в отдельном контейнере (перерисовывается при клике без повторного запроса плана)
+  $('planHead').innerHTML = vt + '<div id="planCtls" class="plan-ctlbar"></div>'
+    + '<div class="plan-note" style="margin-top:0">Колонки «Дата»/«Размер»: <b>ваш файл на диске</b> → <b>обновление</b>.</div>';
+  renderPlanControls();
+  renderPlanTable();
+  $('planLegend').innerHTML = 'Источник: '
+    + '<span class="src-badge src-developer">пак сборки</span> '
+    + '<span class="src-badge src-hotfix">хотфикс-репозиторий</span>';
+  $('planUpdateBtn').style.display = (p.files || []).length ? '' : 'none';
+  $('planBytesWrap').style.display = (p.files || []).length ? '' : 'none';
+}
+
+// панель управления планом: чипы-фильтры по действию (с счётчиками) + тоггл вида
+function renderPlanControls() {
+  const p = PLAN_DATA; if (!p || !$('planCtls')) return;
+  const files = p.files || [];
+  const counts = planGroupCounts(files);
+  const chips = [`<button type="button" class="plan-chip${PLAN_FILTER ? '' : ' on'}" data-fkey="">`
+    + `Все <b>${files.length}</b></button>`];
+  for (const g of PLAN_GROUPS) if (counts[g.key])
+    chips.push(`<button type="button" class="plan-chip${PLAN_FILTER === g.key ? ' on' : ''}" `
+      + `data-fkey="${g.key}"><b>${counts[g.key]}</b> ${esc(g.label)}</button>`);
+  const tog = files.length
+    ? `<button type="button" class="plan-viewtog" data-tree title="Свернуть файлы по папкам">`
+      + `${PLAN_TREE ? '☰ Список' : '🗂 Дерево'}</button>`
+    : '';
+  $('planCtls').innerHTML = `<div class="plan-chips">${chips.join('')}</div>${tog}`;
+}
+
+// одна файловая строка таблицы; в дереве (tree) путь — только имя файла с отступом depth
+function planFileRow(f, bytes, tree, depth) {
+  const detail = f.source === 'hotfix'
+    ? (f.source_detail || '').split('/').pop()
+    : (f.source_detail || '');
+  const kindTip = SRC_KIND[f.source] || f.source;
+  const src = `<span class="src-badge ${SRC_CLASS[f.source] || ''}" title="${esc(kindTip + (detail ? ': ' + detail : ''))}">${esc(detail || kindTip)}</span>`;
+  const dOnly = (d) => (d || '').split(' ')[0] || '—';
+  const dTitle = esc(((f.mine && f.mine.date) || '') + ((f.mine && f.their) ? '  →  ' : '') + ((f.their && f.their.date) || ''));
+  const dateCell = cmpCell(f.mine, f.their, (x) => dOnly(x.date), false);
+  const sizeCell = cmpCell(f.mine, f.their, (x) => fmtSize(x.size, bytes), bytes);
+  const base = f.path.split(/[\/\\]/).pop();
+  const pathHtml = tree
+    ? `<span class="f-leaf" style="padding-left:${8 + depth * 16}px">${esc(base)}</span>`
+    : esc(f.path).replace(/\//g, '/<wbr>');
+  return `<tr><td class="f-st">${esc(PLAN_ST[f.status] || f.status)}</td>`
+    + `<td class="f-path" title="${esc(f.path)}">${pathHtml}</td>`
+    + `<td class="f-src">${src}</td>`
+    + `<td class="f-cmp" title="${dTitle}">${dateCell}</td>`
+    + `<td class="f-cmp">${sizeCell}</td></tr>`;
+}
+
+// древовидный рендер: строим дерево по сегментам пути, сжимаем цепочки одиночных папок
+// (Evolution/EvoTranc/DATA/Items → один узел), узлы-папки сворачиваются кликом.
+function planTreeRows(files, bytes) {
+  const root = { dirs: new Map(), files: [] };
+  for (const f of files) {
+    const parts = f.path.split(/[\/\\]/).filter(Boolean);
+    parts.pop();                                    // имя файла — не часть пути папок
+    let node = root;
+    for (const seg of parts) {
+      if (!node.dirs.has(seg)) node.dirs.set(seg, { dirs: new Map(), files: [] });
+      node = node.dirs.get(seg);
+    }
+    node.files.push(f);
+  }
+  const count = (node) => {
+    let n = node.files.length;
+    for (const c of node.dirs.values()) n += count(c);
+    return n;
+  };
+  const rows = [];
+  const walk = (node, prefix, depth) => {
+    const dirs = [...node.dirs.entries()].sort((a, b) => a[0].localeCompare(b[0], 'ru'));
+    for (let [name, child] of dirs) {
+      let full = prefix ? prefix + '/' + name : name;
+      while (child.files.length === 0 && child.dirs.size === 1) {   // сжатие цепочки
+        const [cn, cc] = [...child.dirs.entries()][0];
+        name += '/' + cn; full += '/' + cn; child = cc;
+      }
+      const collapsed = PLAN_TREE_COLLAPSED.has(full);
+      rows.push(`<tr class="plan-dir" data-dir="${esc(full)}"><td colspan="5" style="padding-left:${8 + depth * 16}px">`
+        + `<span class="tri">${collapsed ? '▸' : '▾'}</span> 📁 <span class="dir-name">${esc(name)}</span>`
+        + ` <span class="dir-n">${count(child)}</span></td></tr>`);
+      if (!collapsed) walk(child, full, depth + 1);
+    }
+    const fs = node.files.slice().sort((a, b) => a.path.localeCompare(b.path, 'ru'));
+    for (const f of fs) rows.push(planFileRow(f, bytes, true, depth));
+  };
+  walk(root, '', 0);
+  return rows.join('');
+}
+
+// перерисовка только таблицы (переключение «в байтах»/фильтра/вида — без запроса плана)
+function renderPlanTable() {
+  const p = PLAN_DATA; if (!p) return;
+  const bytes = $('planBytes').checked;
+  let files = p.files || [];
+  if (!files.length) {
+    $('planBody').innerHTML = '<div class="plan-empty">Изменяемых файлов нет — мод уже актуален'
+      + (p.reconciled ? '. Ложная пометка «⬆ обновление» снята.' : '.') + '</div>';
+    return;
+  }
+  if (PLAN_FILTER) {                                 // фильтр по группе действий
+    const g = PLAN_GROUPS.find((x) => x.key === PLAN_FILTER);
+    const set = new Set(g ? g.st : []);
+    files = files.filter((f) => set.has(f.status));
+  }
+  const body = PLAN_TREE ? planTreeRows(files, bytes)
+    : files.map((f) => planFileRow(f, bytes, false, 0)).join('');
+  const gLab = (PLAN_GROUPS.find((x) => x.key === PLAN_FILTER) || {}).label;
+  const filterNote = PLAN_FILTER
+    ? `<div class="plan-note">Показаны только «${esc(gLab)}»: ${files.length} файл(ов). Чип «Все» — снять фильтр.</div>`
+    : '';
+  $('planBody').innerHTML =
+    '<div class="plan-scroll"><table class="plan-table">'
+    + '<thead><tr>'
+    + '<th>Действие</th><th>Файл</th><th>Источник</th>'
+    + '<th class="col-cmp">Дата</th><th class="col-cmp">Размер</th>'
+    + `</tr></thead><tbody>${body}</tbody></table></div>`
+    + filterNote
+    + (p.unchanged ? `<div class="plan-note">Без изменений: ${p.unchanged} файл(ов) — в список не включены.</div>` : '');
+}
+
 // ───────── прогресс/лог ─────────
 // контролы таблицы/тулбара, блокируемые на время операции (прокрутку не трогаем)
 const BUSY_CTRLS = ['addBtn', 'installBtn', 'mergeBtn', 'compatBtn', 'removeBtn',
@@ -1935,10 +2330,11 @@ function logStamp() {
 }
 
 // ───────── контекстное меню (ПКМ по моду) ─────────
-let ctxMid = null, ctxPidx = null, ctxNode = null;
+let ctxMid = null, ctxPidx = null, ctxNode = null, ctxIid = null;
 function openCtxMenu(e, iid) {
   const n = NODE[iid];
   ctxNode = n || null;
+  ctxIid = iid || null;
   ctxMid = (n && n.mid) || null;
   ctxPidx = pidxOf(iid);                 // запись профиля (добавленная) — можно отменить
   $('ctxOpenMod').style.display = ctxMid ? '' : 'none';
@@ -1956,6 +2352,10 @@ function openCtxMenu(e, iid) {
     $('ctxTags').textContent = '🏷 Теги…' + suf;
     $('ctxNote').textContent = '📝 Заметка…';   // заметка всегда для одной строки — без (N)
   }
+  // «Посмотреть план обновления» — только для строк с обновлением (значок ⬆) и мержимых
+  const canPlan = !!(n && n.mergeable && n.status_class === 'upd');
+  $('ctxPlan').style.display = canPlan ? '' : 'none';
+  $('ctxPlanSep').style.display = canPlan ? '' : 'none';
   $('ctxRemoveOne').style.display = (ctxPidx !== null) ? '' : 'none';   // убрать эту строку
   $('ctxCancelAdd').style.display = (ctxPidx !== null) ? '' : 'none';   // отменить все добавления
   const menu = $('ctxMenu');
@@ -2185,7 +2585,9 @@ function tourSyncModal(step) {
 }
 
 function maybeAutoTour() {
-  if (STATE && !STATE.tutorial_done) setTimeout(() => startTour(), 500);
+  // при первом запуске сперва показываем экран читаемости (Размер текста/Масштаб/Контраст),
+  // чтобы новичок с нечитаемым текстом мог настроить его ДО тура. «Продолжить» → тур.
+  if (STATE && !STATE.tutorial_done) setTimeout(() => show('firstRunOverlay'), 500);
 }
 function startTour() {
   tourIdx = 0;

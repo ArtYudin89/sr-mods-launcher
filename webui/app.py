@@ -97,7 +97,7 @@ IS_RWT = bool(EMBEDDED_TOKEN)
 # из репозитория ({version, url?, notes?}). url можно оставить пустым — тогда показ без
 # ссылки на скачивание (просто «доступна новая версия»).
 # ВНИМАНИЕ: при релизе выставить реальный следующий номер (текущий публичный > 0.13.1).
-LAUNCHER_VERSION = '0.21.0'
+LAUNCHER_VERSION = '0.22.0'
 RELEASE_REF = 'state/launcher_release.json'
 # Ссылка на полную справку в репозитории (ИНСТРУКЦИЯ-ПРОСТАЯ.md, имя в percent-encoding —
 # кириллица в пути; так браузер откроет её без ручного кодирования).
@@ -138,6 +138,12 @@ DEFAULT_CONFIG = {
     'mod_meta': {},
     'show_hidden': False,        # показывать ли скрытые моды в списке
     'desc_in_list': False,       # показывать полное описание прямо в строке (иначе только (i))
+    # Доступность/адаптация под разные экраны (HD/FullHD): масштаб всего интерфейса
+    # (проценты; применяется как CSS zoom) и уровень контраста текста/линий (проценты;
+    # 100 = как в теме, выше — сильнее разница с фоном). Оба живут поверх тёмной/светлой темы.
+    'ui_scale': 100,             # 80..160 — масштаб всего интерфейса (zoom)
+    'text_scale': 100,           # 80..170 — размер только текста (множитель шрифтов)
+    'contrast': 100,             # 100..150
 }
 
 
@@ -403,29 +409,87 @@ class Api:
         поверх переданного набора. Без форков (или allow=False) — desc как есть + его индекс."""
         main_index = core.load_chunk_index(desc=desc, repo=self._repo(), token=self._token())
         mod_id = desc.get('id')
+        # набор relpath'ов, пришедших из форков (для «Посмотреть план обновления»:
+        # такие файлы помечаются источником «хотфикс»). Пишем в атрибут, а не в возврат,
+        # чтобы не менять сигнатуру (читает только preview сразу после вызова).
+        # _last_fork_sources: relpath → repo форка; _last_fork_dates: relpath → mtime-эпоха
+        # (дата хотфикса из каталога форка — локальна и надёжна, без API коммитов).
+        self._last_fork_files = set()
+        self._last_fork_sources = {}
+        self._last_fork_dates = {}
         if not (allow and self._forks() and mod_id):
             return desc, main_index
-        fork_descs, fork_indexes = [], []
+        # Pol/Shu @-варианты: форк-хотфикс может быть записан под base-id
+        # (напр. ShusRangers/ShuDomiks), тогда как desc['id'] несёт @-суффикс
+        # (…@PolDomiks). Ищем в каталоге форка И точный ключ, И base-id — иначе форк для
+        # @-варианта не находится и хотфикс не доставляется (детект при этом форсит его по
+        # юнит-манифесту → вечный ложный «⬆ обновление» с пустым планом). См. ShuDomiks.
+        base_id = mod_id.split('@', 1)[0]
+        fork_descs, fork_indexes, fork_repos, fork_mtimes = [], [], [], []
         for src in self._forks():                     # только форки, ВЫСШИЙ приоритет первым
             repo, tok = src['repo'], src['token']
             cat = self._catalog_for(repo, tok)
-            if mod_id not in cat:
+            fkey = mod_id if mod_id in cat else (base_id if base_id in cat else None)
+            if not fkey:
                 continue                              # форк не содержит этот мод
             try:
-                d = core.descriptor_for({'id': mod_id}, cat, repo, tok)
+                d = core.descriptor_for({'id': fkey}, cat, repo, tok)
             except Exception as e:
-                self.log(f'⚠ форк {repo}: дескриптор {mod_id} не загружен ({e})'); d = None
+                self.log(f'⚠ форк {repo}: дескриптор {fkey} не загружен ({e})'); d = None
             if not d:
                 continue
-            fork_descs.append(d)
+            fork_descs.append(d); fork_repos.append(repo)
+            try:
+                fork_mtimes.append(int((cat.get(fkey) or {}).get('mtime') or 0) or None)
+            except (TypeError, ValueError):
+                fork_mtimes.append(None)
             try:
                 fork_indexes.append(self._index_for(repo, tok, desc=d))
             except Exception as e:
                 self.log(f'⚠ форк {repo}: индекс частей не загружен ({e})')
         if not fork_descs:
             return desc, main_index
-        # форки поверх переданного desc (идентичность/остальные файлы — из desc)
-        merged = core.merge_descriptors(fork_descs + [desc])
+        # НАЛОЖЕНИЕ ПО install-rel, а НЕ по RAW-пути дескриптора. Форк и основной дескриптор
+        # используют РАЗНЫЕ корни raw-пути для одного физического файла (напр.
+        # 'Universe Redux Fixes_unpacked/Mods/…' у форка vs '{app}/Mods/…' у основного).
+        # merge_descriptors ключует по raw-пути → форк НЕ перекрывает файл, а плодит
+        # фантом-дубль: план даёт ложный conflict (base=None) или пустышку и расходится с
+        # детектом, который сверяет по install-rel. Здесь для каждого файла форка берём его
+        # install-rel и ПЕРЕЗАПИСЫВАЕМ sha того же файла в desc, СОХРАНЯЯ raw-путь основного
+        # (снимок/3-way ключуются по нему). Файлы форка без пары в desc добавляем как есть.
+        files = {'code': dict((desc.get('files') or {}).get('code') or {}),
+                 'assets': dict((desc.get('files') or {}).get('assets') or {})}
+        main_by_ir = {}                               # install-rel -> (kind, raw) основного
+        for kind in ('code', 'assets'):
+            for raw in files[kind]:
+                main_by_ir.setdefault(core.install_relpath(raw), (kind, raw))
+        done_ir = set()                               # install-rel уже перекрыт (высший форк победил)
+        for fd, frepo, fmt in zip(fork_descs, fork_repos, fork_mtimes):   # высший форк первым
+            for kind in ('code', 'assets'):
+                for fraw, fmeta in ((fd.get('files') or {}).get(kind) or {}).items():
+                    ir = core.install_relpath(fraw)
+                    if ir in done_ir:
+                        continue                      # более приоритетный форк уже занял файл
+                    hit = main_by_ir.get(ir)
+                    if hit:                            # перекрываем файл основного (raw основного)
+                        hkind, hraw = hit
+                        files[hkind][hraw] = fmeta
+                        win_raw = hraw
+                    else:                              # новый файл мода из форка
+                        files[kind][fraw] = fmeta
+                        main_by_ir[ir] = (kind, fraw)
+                        win_raw = fraw
+                    done_ir.add(ir)
+                    self._last_fork_files.add(win_raw)
+                    self._last_fork_sources.setdefault(win_raw, frepo)
+                    if fmt:
+                        self._last_fork_dates.setdefault(win_raw, fmt)
+        if not done_ir:
+            return desc, main_index
+        merged = dict(desc)                           # идентичность/метаданные — из desc
+        merged['files'] = files
+        merged['version'] = core._fileset_version(files)
+        merged['overlaid'] = True
         index = core.merge_chunk_indexes(fork_indexes + [main_index])
         return merged, index
 
@@ -982,6 +1046,9 @@ class Api:
             'always_show_plan': self.config.get('always_show_plan', False),
             'show_hidden': self.config.get('show_hidden', False),
             'desc_in_list': self.config.get('desc_in_list', False),
+            'ui_scale': self.config.get('ui_scale', 100),
+            'text_scale': self.config.get('text_scale', 100),
+            'contrast': self.config.get('contrast', 100),
             'help_url': HELP_URL,
         }
 
@@ -2082,6 +2149,36 @@ class Api:
         self._save_config()
         return True
 
+    def set_ui_scale(self, v):
+        """Масштаб всего интерфейса в процентах (для мелкого текста на HD/4K). 80..160."""
+        try:
+            v = int(v)
+        except (TypeError, ValueError):
+            v = 100
+        self.config['ui_scale'] = max(80, min(160, v))
+        self._save_config()
+        return self.config['ui_scale']
+
+    def set_text_scale(self, v):
+        """Размер ТОЛЬКО текста в процентах (множитель шрифтов, без zoom). 80..170."""
+        try:
+            v = int(v)
+        except (TypeError, ValueError):
+            v = 100
+        self.config['text_scale'] = max(80, min(170, v))
+        self._save_config()
+        return self.config['text_scale']
+
+    def set_contrast(self, v):
+        """Уровень контраста текста/линий в процентах. 100 = как в теме, до 150 — сильнее."""
+        try:
+            v = int(v)
+        except (TypeError, ValueError):
+            v = 100
+        self.config['contrast'] = max(100, min(150, v))
+        self._save_config()
+        return self.config['contrast']
+
     def set_name_mode(self, mode):
         """Что показывать как имя мода в списке: 'folder' (имя папки) либо
         'module' (поле Name из ModuleInfo — как в самой игре)."""
@@ -3069,32 +3166,43 @@ class Api:
             'groups': groups, 'labels': STATUS_LABELS, 'conflicts': conflicts,
         }
 
-    def _plan_merge_profile(self, i):
+    def _resolve_profile_update(self, i):
+        """Собрать (desc, plan, index) для мода профиля (без применения). None — если
+        обновлять нечем (нет дескриптора/снимка). Может бросить OperationCancelled/Exception.
+        Используется и обычным обновлением, и предпросмотром плана (preview_update_plan)."""
         m = self.profile['mods'][i]
         repo, tok = self._repo(), self._token()
         mods_dir = self._mods_dir()
+        cat = {}
+        if not m.get('url'):
+            cat = core.load_catalog(m.get('catalog', 'descriptors/catalog.json'), repo, tok)
+        desc = core.descriptor_for(self._desc_sel(m), cat, repo, tok)
+        if not desc:
+            self.log('Не удалось получить дескриптор мода (нет в каталоге?).')
+            return None
+        snap = core.load_install_snapshot(mods_dir, desc.get('id'))
+        if snap is None:
+            self.log('Нет снимка прошлой установки — сначала установите мод лаунчером один раз.')
+            return None
+        desc, index = self._overlay_theirs(desc, desc.get('source'), allow=not m.get('url'))
+        plan = core.plan_update_merge(desc, mods_dir, index, token=tok, log=self.log,
+                                      snapshot=snap, tmp_dir=ROOT,
+                                      progress_cb=self._progress,
+                                      should_cancel=self.should_cancel)
+        return desc, plan, index
+
+    def _plan_merge_profile(self, i):
+        m = self.profile['mods'][i]
         self.log(f'=== Обновление: {m.get("name", m.get("id", "?"))} ===')
         try:
-            cat = {}
-            if not m.get('url'):
-                cat = core.load_catalog(m.get('catalog', 'descriptors/catalog.json'), repo, tok)
-            desc = core.descriptor_for(self._desc_sel(m), cat, repo, tok)
-            if not desc:
-                self.log('Не удалось получить дескриптор мода (нет в каталоге?).')
-                self._merge_next(); return
-            snap = core.load_install_snapshot(mods_dir, desc.get('id'))
-            if snap is None:
-                self.log('Нет снимка прошлой установки — сначала установите мод лаунчером один раз.')
-                self._merge_next(); return
-            desc, index = self._overlay_theirs(desc, desc.get('source'), allow=not m.get('url'))
-            plan = core.plan_update_merge(desc, mods_dir, index, token=tok, log=self.log,
-                                          snapshot=snap, tmp_dir=ROOT,
-                                          progress_cb=self._progress,
-                                          should_cancel=self.should_cancel)
+            res = self._resolve_profile_update(i)
         except core.OperationCancelled:
             self.log('Планирование отменено.'); self._merge_next(); return
         except Exception as e:
             self.log(f'ОШИБКА планирования: {e}'); self._merge_next(); return
+        if res is None:
+            self._merge_next(); return
+        desc, plan, index = res
         self._emit_plan_or_skip(('profile', i), desc, plan, index)
 
     def _full_variant_descriptor(self, key, cat, repo, tok, source=None):
@@ -3110,28 +3218,40 @@ class Api:
         srcs = [v['source'] for v in ent.get('variants', [])
                 if (v.get('source') or '').split('/')[0] == camp] if camp else []
         if len(srcs) <= 1:                       # один источник — сливать нечего
-            return core.descriptor_for({'id': key, 'source': src or (srcs[0] if srcs else None)},
-                                       cat, repo, tok)
+            one = src or (srcs[0] if srcs else None)
+            d = core.descriptor_for({'id': key, 'source': one}, cat, repo, tok)
+            self._last_variant_sources = {rp: one for rp in core.desc_files_flat(d)} if d else {}
+            return d
         try:
             packs = self._get_packs(tok)
         except Exception:
             packs = {}
         # порядок применения по load_order пака: выше = позже = приоритетнее (fixes бьёт base)
         srcs.sort(key=lambda s: (packs.get(s) or {}).get('load_order', 999), reverse=True)
-        descs = [core.descriptor_for({'id': key, 'source': s}, cat, repo, tok) for s in srcs]
-        descs = [d for d in descs if d]
-        if not descs:
+        pairs = [(s, core.descriptor_for({'id': key, 'source': s}, cat, repo, tok)) for s in srcs]
+        pairs = [(s, d) for s, d in pairs if d]
+        if not pairs:
+            self._last_variant_sources = {}
             return None
-        merged = core.merge_descriptors(descs)   # fixes-первым → перекрывает base
+        # атрибуция «файл → пак-источник»: pairs идут от приоритетного (fixes) к базовому,
+        # setdefault оставляет источник-победитель (тот, чей файл реально попал в набор)
+        fsrc = {}
+        for s, d in pairs:
+            for rp in core.desc_files_flat(d):
+                fsrc.setdefault(rp, s)
+        self._last_variant_sources = fsrc
+        merged = core.merge_descriptors([d for _, d in pairs])   # fixes-первым → перекрывает base
         if merged is not None and src:
             merged = dict(merged); merged['source'] = src
         return merged
 
-    def _plan_merge_disk(self, mid):
+    def _resolve_disk_update(self, mid):
+        """Собрать (desc, plan, index) для дискового мода (без применения). None — если
+        мод не найден в каталоге. Может бросить OperationCancelled/Exception. Используется
+        и обычным обновлением, и предпросмотром плана (preview_update_plan)."""
         repo, tok = self._repo(), self._token()
         mods_dir = self._mods_dir()
-        self.log(f'=== Обновление дискового мода: {mid} ===')
-        try:
+        if True:
             # через _catalog_for → тот же кэш, что читают _camp_variant_entry/_variant_keys.
             # Иначе при пустом self._catalog_cache (мёрж без предварительной проверки) подбор
             # Pol/Shu-варианта молча проваливался в default базового id (original).
@@ -3201,7 +3321,7 @@ class Api:
                              f'из {info["total"]}){note}')
             if not desc:
                 self.log(f'Мод {mid} не найден в каталоге — обновить нечем.')
-                self._merge_next(); return
+                return None
             snap = core.load_install_snapshot(mods_dir, mid)
             # Наложение форков — по КАТАЛОЖНОМУ ключу варианта (desc['id'], напр.
             # ShusRangers/ShuPirates@PolPirates), ДО нормализации id к дисковой папке-mid.
@@ -3217,11 +3337,187 @@ class Api:
                                           snapshot=snap, tmp_dir=ROOT,
                                           progress_cb=self._progress,
                                           should_cancel=self.should_cancel)
+        return desc, plan, index
+
+    def _plan_merge_disk(self, mid):
+        self.log(f'=== Обновление дискового мода: {mid} ===')
+        try:
+            res = self._resolve_disk_update(mid)
         except core.OperationCancelled:
             self.log('Планирование отменено.'); self._merge_next(); return
         except Exception as e:
             self.log(f'ОШИБКА планирования: {e}'); self._merge_next(); return
+        if res is None:
+            self._merge_next(); return
+        desc, plan, index = res
         self._emit_plan_or_skip(('disk', mid), desc, plan, index)
+
+    # ───────── предпросмотр плана обновления (read-only, из ПКМ) ─────────
+    def preview_update_plan(self, iid):
+        """Построить и показать план обновления мода БЕЗ применения (пункт ПКМ
+        «Посмотреть план обновления»). Работает и в тихом режиме — ничего не пишет
+        на диск. Тяжёлую часть (сеть) считает в фоне, результат шлёт событием."""
+        if self.busy:
+            return {'ok': False, 'error': 'Идёт операция — дождитесь окончания.'}
+        if getattr(self, '_previewing', False):
+            return {'ok': False, 'error': 'План уже строится…'}
+        err = self._require_game()
+        if err:
+            return {'ok': False, 'error': err}
+        if iid.startswith('d:'):
+            target = ('disk', iid[2:])
+        elif iid[1:].isdigit() and self.profile['mods'][int(iid[1:])].get('type') == 'desc':
+            target = ('profile', int(iid[1:]))
+        else:
+            return {'ok': False, 'error':
+                    'План доступен только для модов из каталога/по ссылке или дисковых. '
+                    'Паки и сборки обновляются кнопкой «Установить».'}
+        self._previewing = True
+        self._cancel.clear()      # предпросмотр вне очереди обновления — не отменён
+        threading.Thread(target=self._preview_worker, args=(target,), daemon=True).start()
+        return {'ok': True}
+
+    def _preview_worker(self, target):
+        try:
+            self._emit('preview_begin', {'id': target[1] if target[0] == 'disk' else None})
+            self._last_fork_files = set()
+            self._last_fork_sources = {}
+            self._last_fork_dates = {}
+            self._last_variant_sources = {}
+            if target[0] == 'disk':
+                res = self._resolve_disk_update(target[1])
+            else:
+                res = self._resolve_profile_update(target[1])
+            if not res:
+                self._emit('preview_error',
+                           {'error': 'Обновлять нечего либо мод не найден в каталоге.'})
+                return
+            desc, plan, index = res
+            # Согласованность с реальным обновлением: если применять нечего (всё уже на
+            # диске совпадает с новой версией — «застрявшая» пометка из-за устаревшего
+            # снимка), снимаем бейдж «⬆ обновление», как это делает _emit_plan_or_skip.
+            s = plan['summary']
+            actionable = (sum(s.get(k, 0) for k in
+                              ('add', 'update', 'automerge', 'deleted_clean')) + s.get('conflicts', 0))
+            det = self._serialize_plan_detailed(target, desc, plan)
+            if actionable == 0:
+                upd_mid = target[1] if target[0] == 'disk' else (desc.get('id') if desc else None)
+                if upd_mid and upd_mid in self._updates:
+                    self._updates.pop(upd_mid, None)
+                    self._emit('tree_dirty')
+                    det['reconciled'] = True     # фронт покажет «пометка снята»
+            self._emit('preview_plan', det)
+        except core.OperationCancelled:
+            self._emit('preview_error', {'error': 'Построение плана отменено.'})
+        except Exception as e:
+            self._emit('preview_error', {'error': str(e)})
+        finally:
+            self._previewing = False
+
+    def _fork_commit_date(self):
+        """ISO-дата последнего коммита форк-репо (для файлов-хотфиксов). Кэш по repo."""
+        forks = self._forks()
+        if not forks:
+            return None
+        src = forks[0]
+        cache = getattr(self, '_fork_date_cache', None)
+        if cache is None:
+            cache = self._fork_date_cache = {}
+        repo = src['repo']
+        if repo not in cache:
+            try:
+                cache[repo] = core.unit_remote_updated(repo, src.get('token'))
+            except Exception:
+                cache[repo] = None
+        return cache[repo]
+
+    def _serialize_plan_detailed(self, target, desc, plan):
+        """План обновления с деталями по каждому изменяемому файлу. Для каждого файла две
+        стороны сравнения: «мой файл» (на диске — дата и размер) и «обновление» (входящий
+        файл — дата по источнику и размер из манифеста). Источник указывается ТОЧНО: из
+        какого пака/сборки (напр. redux/redux_fixes vs original/original_installer) или из
+        какого форк-репозитория (хотфикс). Файлы без изменений — только счётчиком."""
+        mid = target[1] if target[0] == 'disk' else desc.get('id')
+        mods_dir = self._mods_dir()
+        fork_files = getattr(self, '_last_fork_files', set()) or set()
+        fork_src = getattr(self, '_last_fork_sources', {}) or {}
+        fork_dates = getattr(self, '_last_fork_dates', {}) or {}
+        var_src = getattr(self, '_last_variant_sources', {}) or {}
+        # размер И РЕАЛЬНАЯ ДАТА ФАЙЛА (mtime разработчика) — из per-file метаданных
+        # дескриптора. Агрегатор пишет mtime в манифесты (EMIT_DEV_MTIME), и он доезжает
+        # в дескриптор; в слитом desc mtime — от источника-победителя (форк > пак).
+        theirs_size, theirs_mtime = {}, {}
+        for kind in ('code', 'assets'):
+            for rp, meta in (desc.get('files', {}).get(kind) or {}).items():
+                theirs_size[rp] = meta.get('size')
+                theirs_mtime[rp] = meta.get('mtime')
+
+        def epoch_date(e):
+            try:
+                return fmt_date(datetime.fromtimestamp(e).isoformat()) if e else ''
+            except Exception:
+                return ''
+        dev_date = epoch_date(self._dev_date(mid))    # фолбэк на уровень мода (старые манифесты)
+        fork_commit = fmt_date(self._fork_commit_date()) if fork_files else ''   # общий фолбэк
+        def_src = desc.get('source') or ''
+
+        def hotfix_date(rp):     # дата хотфикса: mtime из каталога форка, иначе дата коммита
+            # ...иначе дата родительского мода (dev_date): форк-хотфикс кладёт блоб без
+            # снимка и без per-file mtime, а mtime записи каталога форка/дата коммита могут
+            # отсутствовать (нет токена/сеть) → без этого фолбэка правая ячейка «обновление»
+            # пуста (симптом того же `bsha is None`, что форсит conflict_binary). См. память.
+            return epoch_date(fork_dates.get(rp)) or fork_commit or dev_date
+
+        def disk_stat(rp):
+            try:
+                st = (mods_dir / core.install_relpath(rp)).stat()
+                return (fmt_date(datetime.fromtimestamp(st.st_mtime).isoformat()), st.st_size)
+            except Exception:
+                return ('', None)
+
+        # статусы, где на диск ПРИХОДИТ новый файл мода (есть сторона «обновление»)
+        INCOMING = {'add', 'update', 'automerge', 'conflict_text', 'conflict_binary'}
+        # статусы, где на диске УЖЕ есть файл игрока (есть сторона «мой файл»)
+        HAS_MINE = {'update', 'automerge', 'player_only', 'conflict_text',
+                    'conflict_binary', 'conflict_deleted', 'deleted_clean'}
+        files, unchanged = [], 0
+        for r in plan['actions']:
+            st, rp = r['status'], r['relpath']
+            if st == 'unchanged':
+                unchanged += 1
+                continue
+            disp = core.install_relpath(rp)
+            # реальная дата файла из дескриптора (per-file mtime); фолбэк — дата уровня
+            # источника (хотфикс: каталог форка/коммит; разработчик: дата мода в каталоге)
+            per_file = epoch_date(theirs_mtime.get(rp))
+            # источник входящего файла: форк-хотфикс > пак сборки > дефолт дескриптора
+            if rp in fork_files:
+                kind, detail = 'hotfix', (fork_src.get(rp) or '')
+                their_date = per_file or hotfix_date(rp)
+            else:
+                kind, detail = 'developer', (var_src.get(rp) or def_src)
+                their_date = per_file or dev_date
+            mine = their = None
+            if st in HAS_MINE:
+                md, ms = disk_stat(rp)
+                mine = {'date': md, 'size': ms}
+            if st in INCOMING:
+                their = {'date': their_date, 'size': theirs_size.get(rp)}
+            files.append({'path': disp, 'status': st, 'source': kind,
+                          'source_detail': detail, 'mine': mine, 'their': their})
+        # порядок: сперва хотфиксы, затем по источнику-паку, затем по имени файла
+        order = {'hotfix': 0, 'developer': 1, 'disk': 2}
+        files.sort(key=lambda f: (order.get(f['source'], 9),
+                                  f.get('source_detail') or '', f['path'].lower()))
+        return {
+            'id': mid, 'name': (mid or '').split('/')[-1] or mid,
+            'source_label': plan.get('source'),
+            'version_old': plan.get('version_old'),
+            'version_new': plan.get('version_new'),
+            'summary': plan['summary'], 'labels': STATUS_LABELS,
+            'files': files, 'unchanged': unchanged,
+            'has_forks': bool(fork_files),
+        }
 
     def apply_merge(self, decisions, remember=False):
         pm = getattr(self, '_pending_merge', None)

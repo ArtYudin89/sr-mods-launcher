@@ -325,6 +325,7 @@ input:focus-visible,select:focus-visible,textarea:focus-visible,
 .settings-modal{width:880px;}
 .settings-modal .m-body{display:grid;grid-template-columns:1fr 1fr;column-gap:26px;align-items:start;}
 .settings-modal .m-body > .m-row{margin:12px 0;}
+.settings-modal .m-body > .m-row-wide{grid-column:1 / -1;}   /* «Вид» — во всю ширину, 3 регулятора в ряд */
 .settings-modal .m-body > details{grid-column:1 / -1;}
 /* содержимое «Дополнительно» — в две колонки (masonry-поток, строки не рвутся) */
 .settings-modal .adv-grid{columns:2;column-gap:26px;}
@@ -668,3 +669,102 @@ body.busy .toggle.click{pointer-events:none;opacity:.5;}
   text-transform:uppercase;letter-spacing:.4px;padding:7px 10px 7px 0;font-weight:600;white-space:nowrap;}
 .rel-tbl td{padding:7px 0;border-bottom:1px solid var(--line);}
 .rel-tbl tr:last-child td{border-bottom:none;}
+
+/* ============ ВИД: степперы масштаба / размера текста / контраста ============ */
+/* Степперы (−/＋), а не ползунки: масштаб применяется как zoom и «уводил» бы бегунок
+   из-под курсора при перетаскивании. Размер текста — множитель шрифтов (CSSOM), масштаб —
+   zoom с компенсацией vw/vh, контраст — переопределение --fg/--muted/--line (всё в applyView). */
+/* три регулятора компактной колонкой (ярлык слева, кнопки в ряд) — сгруппировано */
+.step-grid{display:flex;flex-direction:column;gap:7px;margin-top:6px;}
+.step-row{display:flex;align-items:center;gap:6px;margin:0;}
+.step-lab{width:104px;flex:none;font-size:12px;color:var(--fg);text-transform:none;letter-spacing:0;}
+.step-btn{width:30px;height:28px;flex:none;border:1px solid var(--line);background:var(--panel-2);
+  color:var(--fg);border-radius:7px;font-size:16px;line-height:1;display:inline-flex;
+  align-items:center;justify-content:center;cursor:pointer;}
+.step-btn:hover{border-color:var(--accent);}
+.step-btn:disabled{opacity:.4;cursor:not-allowed;}
+.step-val{min-width:64px;text-align:center;font-size:12.5px;color:var(--fg);
+  font-variant-numeric:tabular-nums;}
+.step-reset{width:26px;height:28px;flex:none;border:1px solid transparent;background:transparent;
+  color:var(--muted);border-radius:7px;font-size:14px;cursor:pointer;margin-left:2px;}
+.step-reset:hover{border-color:var(--line);color:var(--fg);}
+
+/* значок «?» — подсказка у названия группы настроек (текст в title, нативная всплывашка) */
+.help-q{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;
+  border-radius:50%;border:1px solid var(--line);color:var(--muted);font-size:10px;font-weight:700;
+  margin-left:6px;cursor:help;vertical-align:middle;text-transform:none;letter-spacing:0;}
+.help-q:hover{border-color:var(--accent);color:var(--accent);}
+/* чекбоксы в левом рельсе (перенесённые из настроек) */
+.rail-chk{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--fg);cursor:pointer;
+  padding:2px 4px;border-radius:6px;white-space:nowrap;}
+.rail-chk:hover{background:var(--row-hover);}
+.rail-chk input{accent-color:var(--accent);width:14px;height:14px;flex:none;}
+
+/* ============ МОДАЛКА: план обновления (перемещаемая и с регулируемым размером) ============ */
+/* как i-popup строк: тянем за заголовок — двигаем, за правый нижний угол — меняем размер */
+.plan-modal{width:900px;max-width:94vw;height:74vh;max-height:92vh;min-width:460px;min-height:280px;
+  display:flex;flex-direction:column;resize:both;overflow:hidden;}
+.plan-modal h2{cursor:move;flex:none;-webkit-user-select:none;user-select:none;}
+.plan-modal .m-body{flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden;padding-bottom:2px;}
+.plan-modal #planHead{flex:none;}
+.plan-modal #planBody{flex:1;min-height:0;display:flex;flex-direction:column;}
+.plan-modal .m-foot{flex:none;}
+/* когда окно «отпущено» из центра (перетащили/восстановили геометрию) — позиционируем абсолютно.
+   :not(.hidden) ОБЯЗАТЕЛЬНО: иначе .free (объявлен позже) перебивал .hidden → окно не закрывалось. */
+.overlay.free:not(.hidden){display:block;}
+#planOverlay.free .plan-modal{position:absolute;margin:0;}
+/* внутри плавающего окна таблица занимает всю доступную высоту (единый скролл) */
+.plan-modal .plan-scroll{flex:1;min-height:0;max-height:none;}
+
+/* панель управления планом: чипы-фильтры слева, тоггл вида справа */
+.plan-ctlbar{display:flex;align-items:center;gap:8px;margin:2px 0 12px;}
+.plan-chips{display:flex;flex-wrap:wrap;gap:6px;margin:0;}
+.plan-chip{font-size:11.5px;padding:2px 9px;border-radius:6px;background:var(--chip);
+  color:var(--fg);white-space:nowrap;}
+.plan-chip b{font-weight:700;}
+/* чипы теперь кнопки-фильтры: активный подсвечен акцентом */
+button.plan-chip{border:1px solid transparent;cursor:pointer;font-family:inherit;line-height:1.5;}
+button.plan-chip:hover:not(.on){border-color:var(--line);}
+.plan-chip.on{background:var(--accent);color:#fff;border-color:var(--accent);}
+.plan-chip.on b{color:#fff;}
+.plan-viewtog{margin-left:auto;font-size:11.5px;padding:3px 10px;border-radius:6px;
+  background:var(--chip);color:var(--fg);border:1px solid var(--line);cursor:pointer;
+  white-space:nowrap;font-family:inherit;}
+.plan-viewtog:hover{border-color:var(--accent);}
+/* строки-папки древовидного вида */
+.plan-table tr.plan-dir td{cursor:pointer;background:var(--head);font-size:11.5px;
+  color:var(--fg);white-space:nowrap;user-select:none;}
+.plan-table tr.plan-dir:hover td{background:var(--chip);}
+.plan-dir .tri{display:inline-block;width:12px;color:var(--muted);}
+.plan-dir .dir-name{font-family:var(--mono);}
+.plan-dir .dir-n{color:var(--muted);font-size:10.5px;margin-left:4px;}
+.plan-table .f-leaf{font-family:var(--mono);display:inline-block;}
+.plan-ver{font-size:12.5px;color:var(--muted);margin-bottom:8px;}
+.plan-ver b{color:var(--fg);}
+.plan-scroll{max-height:52vh;overflow:auto;border:1px solid var(--line);border-radius:9px;}
+/* авто-раскладка: колонки тянутся по содержимому и делят свободное место окна; узкие
+   колонки (действие/источник/дата/размер) НЕ переносятся, путь берёт на себя перенос */
+.plan-table{width:100%;border-collapse:collapse;font-size:12px;table-layout:auto;}
+.plan-table th{text-align:left;color:var(--muted);font-weight:600;font-size:10.5px;
+  text-transform:uppercase;letter-spacing:.3px;padding:6px 9px;position:sticky;top:0;
+  background:var(--head);border-bottom:1px solid var(--line);white-space:nowrap;z-index:1;}
+.plan-table th.col-cmp{text-align:right;}
+.plan-table td{padding:5px 9px;border-bottom:1px solid var(--line);vertical-align:top;}
+.plan-table tr:last-child td{border-bottom:none;}
+.plan-table td.f-path{font-family:var(--mono);font-size:11.5px;overflow-wrap:anywhere;
+  min-width:170px;color:var(--fg);}
+.plan-table td.f-st{white-space:nowrap;font-size:11.5px;color:var(--fg);}
+.plan-table td.f-src{white-space:nowrap;}
+/* колонки сравнения «мой файл» → «обновление»: НЕ переносятся (нужен запас ширины) */
+.plan-table td.f-cmp{text-align:right;font-variant-numeric:tabular-nums;font-size:11.5px;white-space:nowrap;}
+.plan-table .c-mine{color:var(--muted);}
+.plan-table .c-arrow{color:var(--muted);opacity:.6;margin:0 3px;}
+.plan-table .c-new{color:var(--fg);font-weight:600;}
+.plan-table .c-none{color:var(--muted);opacity:.5;}
+.src-badge{display:inline-block;padding:1px 8px;border-radius:5px;font-size:11px;
+  white-space:nowrap;font-weight:600;vertical-align:bottom;}
+.src-developer{background:rgba(58,120,240,.16);color:var(--accent-2);}
+.src-hotfix{background:rgba(240,181,74,.20);color:var(--warn);}
+.src-disk{background:rgba(70,201,139,.16);color:var(--ok);}
+.plan-note{font-size:12px;color:var(--muted);margin-top:9px;line-height:1.45;}
+.plan-empty{font-size:13px;color:var(--muted);padding:14px 4px;}

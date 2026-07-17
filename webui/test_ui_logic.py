@@ -124,6 +124,109 @@ r = a.clear_queue()
 check('clear_queue вернул число удалённых', 2, r['removed'])
 check('очередь пуста', [], a.profile['mods'])
 
+print('\n=== set_ui_scale / set_text_scale / set_contrast: клампинг диапазонов ===')
+a = fresh_api('redux'); a.config = {}
+check('scale 200 → 160 (макс)', 160, a.set_ui_scale(200))
+check('scale 50 → 80 (мин)', 80, a.set_ui_scale(50))
+check('scale "x" → 100 (дефолт)', 100, a.set_ui_scale('x'))
+check('text 999 → 170 (макс)', 170, a.set_text_scale(999))
+check('text 10 → 80 (мин)', 80, a.set_text_scale(10))
+check('text "y" → 100 (дефолт)', 100, a.set_text_scale('y'))
+check('contrast 999 → 150 (макс)', 150, a.set_contrast(999))
+check('contrast 90 → 100 (мин)', 100, a.set_contrast(90))
+check('contrast "abc" → 100 (дефолт)', 100, a.set_contrast('abc'))
+
+print('\n=== _serialize_plan_detailed: точный источник (пак/форк) + стороны мой↔обновление ===')
+from pathlib import Path
+a = fresh_api('redux')
+a._mods_dir = lambda: Path(r'C:\nonexistent_test_dir_zzz')     # диск-stat всегда падает → ('', None)
+a._dev_date = lambda mid: 1600000000
+a._forks = lambda: []                                          # → fork_date '' (атрибуцию не ломает)
+a._last_fork_files = {'Mods/ModX/b.dat'}                       # b.dat пришёл из форка → хотфикс
+a._last_fork_sources = {'Mods/ModX/b.dat': 'ArtYudin89/sr-mods-hotfixes'}
+a._last_variant_sources = {'Mods/ModX/a.dat': 'redux/redux_fixes',
+                           'Mods/ModX/c.dat': 'redux/redux_base_installer',
+                           'Mods/ModX/e.dat': 'redux/redux_base_installer'}
+desc = {'id': 'Cat/ModX', 'source': 'redux/redux_fixes', 'version': '2',
+        'files': {'code': {'Mods/ModX/a.dat': {'sha256': 'A', 'size': 100, 'mtime': 1650646800},
+                           'Mods/ModX/b.dat': {'sha256': 'B', 'size': 200}},
+                  'assets': {}}}
+plan = {'source': 'redux/redux_fixes', 'version_old': '1', 'version_new': '2',
+        'summary': {'update': 2, 'player_only': 1, 'deleted_clean': 1, 'unchanged': 1, 'conflicts': 0},
+        'actions': [
+            {'relpath': 'Mods/ModX/a.dat', 'status': 'update'},        # пак redux_fixes, есть моё+новое
+            {'relpath': 'Mods/ModX/b.dat', 'status': 'update'},        # хотфикс-репо
+            {'relpath': 'Mods/ModX/c.dat', 'status': 'player_only'},   # база redux, только моё
+            {'relpath': 'Mods/ModX/e.dat', 'status': 'deleted_clean'}, # удаление, только моё
+            {'relpath': 'Mods/ModX/d.dat', 'status': 'unchanged'},     # не в списке, только счётчик
+        ]}
+det = a._serialize_plan_detailed(('disk', 'Cat/ModX'), desc, plan)
+byname = {f['path'].split('/')[-1].split('\\')[-1]: f for f in det['files']}
+check('в списке 4 изменяемых файла (unchanged исключён)', 4, len(det['files']))
+check('unchanged посчитан отдельно', 1, det['unchanged'])
+check('a.dat → kind разработчик', 'developer', byname['a.dat']['source'])
+check('a.dat → точный пак redux_fixes', 'redux/redux_fixes', byname['a.dat']['source_detail'])
+check('a.dat → новое: размер из манифеста', 100, byname['a.dat']['their']['size'])
+check('a.dat → новое: РЕАЛЬНАЯ дата файла (per-file mtime 2022)',
+      True, '2022' in byname['a.dat']['their']['date'])
+check('b.dat → хотфикс без per-file mtime и без даты форк-репо: правая ячейка НЕ пустая '
+      '(фолбэк на dev_date родительского мода — не «—»)',
+      True, bool(byname['b.dat']['their']['date']))
+check('b.dat → фолбэк-дата = дата родительского мода (dev_date 2020)',
+      True, '2020' in byname['b.dat']['their']['date'])
+check('a.dat → есть сторона «моё» (update)', True, byname['a.dat']['mine'] is not None)
+check('b.dat → kind хотфикс', 'hotfix', byname['b.dat']['source'])
+check('b.dat → точный форк-репо', 'ArtYudin89/sr-mods-hotfixes', byname['b.dat']['source_detail'])
+check('b.dat → новое: размер 200', 200, byname['b.dat']['their']['size'])
+check('c.dat (player_only) → пак-установщик redux', 'redux/redux_base_installer', byname['c.dat']['source_detail'])
+check('c.dat → нет стороны «обновление»', None, byname['c.dat']['their'])
+check('c.dat → есть сторона «моё»', True, byname['c.dat']['mine'] is not None)
+check('e.dat (deleted) → нет стороны «обновление»', None, byname['e.dat']['their'])
+check('has_forks=True (были форк-файлы)', True, det['has_forks'])
+
+print('\n=== preview_update_plan: защита от занятости/паков ===')
+a = fresh_api('redux'); a.busy = True
+r = a.preview_update_plan('d:Cat/ModX')
+check('busy → отказ', False, r['ok'])
+a = fresh_api('redux'); a.busy = False; a._previewing = False
+a._require_game = lambda: 'нет игры'
+r = a.preview_update_plan('d:Cat/ModX')
+check('нет папки игры → отказ', False, r['ok'])
+
+print('\n=== _overlay_theirs: форк по install-rel + base-id fallback (баг ShuDomiks) ===')
+# Pol/Shu @-вариант: форк-хотфикс записан под base-id (Cat/Mod), desc['id'] несёт @-суффикс
+# (Cat/Mod@Pol), а raw-корень форка ('Fork_unpacked/Mods/…') ≠ корню основного
+# ('{app}/Mods/…'). Форк ОБЯЗАН перекрыть файл по install-rel (не плодить фантом-дубль) и
+# найтись по base-id — иначе хотфикс не доставляется, а детект форсит его → вечный бейдж.
+import launcher_core as _core
+a = fresh_api('redux')
+a._repo = lambda: 'main/repo'; a._token = lambda: None
+a._forks = lambda: [{'repo': 'fork/repo', 'token': None}]
+_fork_cat = {'Cat/Mod': {'default_source': 'redux/redux_fixes'}}   # ТОЛЬКО base-id, без @
+a._catalog_for = lambda repo, tok: _fork_cat
+a._index_for = lambda repo, tok, desc=None: {
+    'blobs': {'BBB': {'chunk': 'c'}, 'CCC': {'chunk': 'c'}}, 'chunks': {'c': {'url': 'x'}}}
+_fork_desc = {'id': 'Cat/Mod', 'files': {
+    'code': {'Fork_unpacked/Mods/Cat/Mod/x.scr': {'sha256': 'BBB', 'size': 9}},
+    'assets': {'Fork_unpacked/Mods/Cat/Mod/new.dat': {'sha256': 'CCC', 'size': 3}}}}
+_odf, _olci = _core.descriptor_for, _core.load_chunk_index
+_core.descriptor_for = lambda sel, catalog=None, repo=None, token=None: _fork_desc
+_core.load_chunk_index = lambda desc=None, url=None, repo=None, token=None: {'blobs': {}, 'chunks': {}}
+_main_desc = {'id': 'Cat/Mod@Pol', 'source': 'redux/redux_base_installer', 'files': {
+    'code': {'{app}/Mods/Cat/Mod/x.scr': {'sha256': 'AAA', 'size': 9}},
+    'assets': {'{app}/Mods/Cat/Mod/keep.dat': {'sha256': 'KEEP', 'size': 1}}}}
+_merged, _idx = a._overlay_theirs(_main_desc, 'redux/redux_base_installer')
+_core.descriptor_for, _core.load_chunk_index = _odf, _olci
+_flat = {r: m['sha256'] for k in ('code', 'assets') for r, m in _merged['files'][k].items()}
+check('форк найден по base-id для @-варианта (overlaid)', True, _merged.get('overlaid') is True)
+check('x.scr перекрыт форком по install-rel (sha BBB)', 'BBB', _flat.get('{app}/Mods/Cat/Mod/x.scr'))
+check('нет фантом-дубля по raw-пути форка', False, 'Fork_unpacked/Mods/Cat/Mod/x.scr' in _flat)
+check('новый файл форка добавлен (new.dat=CCC)', 'CCC', _flat.get('Fork_unpacked/Mods/Cat/Mod/new.dat'))
+check('несвязанный файл основного цел (keep.dat)', 'KEEP', _flat.get('{app}/Mods/Cat/Mod/keep.dat'))
+check('идентичность мода сохранена (@-ключ)', 'Cat/Mod@Pol', _merged.get('id'))
+check('preview пометит перекрытый файл hotfix (raw основного в _last_fork_files)',
+      True, '{app}/Mods/Cat/Mod/x.scr' in a._last_fork_files)
+
 print(f'\n===== ИТОГ: PASS={len(PASS)}  FAIL={len(FAIL)} =====')
 if FAIL:
     print('ПРОВАЛЫ:', FAIL); sys.exit(1)

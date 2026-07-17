@@ -4,6 +4,10 @@
 /webui/build/
 /webui/dist/
 /webui/_*.log
+
+# Транзитные артефакты тестов/дизайна (регенерируются, в репо не нужны)
+/webui/screenshots_pw/
+/webui/design_mockups/
 # spec нового UI — коммитим (рецепт сборки), остальные .spec игнорируем
 # (секрета в spec нет — токен в gitignored embedded_secrets.py)
 *.spec

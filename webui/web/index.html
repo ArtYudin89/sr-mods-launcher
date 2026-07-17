@@ -61,6 +61,10 @@
         </div>
       </div>
       <div class="fr-sec">
+        <span class="fr-lbl">Список</span>
+        <label class="rail-chk" title="Показывать описание мода прямо в строке списка (иначе — только по значку ⓘ)"><input type="checkbox" id="railDescInList"> Описание в строке</label>
+      </div>
+      <div class="fr-sec">
         <span class="fr-lbl">Фильтр</span>
         <div class="pop-host">
           <button class="btn ghost" id="filterBtn" title="Показать только нужные состояния и подключения">⚲ Фильтр <span class="fcount" id="filterCount"></span></button>
@@ -239,30 +243,48 @@
       <h2>Настройки</h2>
       <div class="m-body">
         <div class="m-row">
-          <label>Папка игры</label>
-          <div class="sub">Туда, где лежит Rangers.exe. Моды ставятся в подпапку Mods.</div>
+          <label>Папка игры <span class="help-q" title="Туда, где лежит Rangers.exe. Моды ставятся в подпапку Mods.">?</span></label>
           <div style="display:flex;gap:8px">
             <input id="setGamePath" style="flex:1" placeholder="например, D:\Steam\...\Space Rangers HD A War Apart">
             <button class="btn" id="setBrowseBtn">Обзор…</button>
           </div>
         </div>
         <div class="m-row">
-          <label>Версия лаунчера</label>
-          <div class="sub">Проверить, не вышла ли новая версия лаунчера (сравнивает с релизом в репозитории).</div>
+          <label>Версия лаунчера <span class="help-q" title="Проверить, не вышла ли новая версия лаунчера (сравнивает с релизом в репозитории).">?</span></label>
           <div style="display:flex;gap:8px;align-items:center">
             <button class="btn" id="setUpdateBtn" type="button">🔄 Проверить обновление</button>
             <span id="setUpdateStatus" class="sub" style="margin:0"></span>
           </div>
         </div>
         <div class="m-row">
-          <label>Обновление модов</label>
-          <div class="sub">Тихий режим (по умолчанию): бесконфликтные обновления применяются автоматически, без окна — только итог-уведомление. Окно всплывает, лишь когда нужно ваше решение. Включите галочку, если хотите видеть план перед каждым обновлением.</div>
+          <label>Обновление модов <span class="help-q" title="Тихий режим (по умолчанию): бесконфликтные обновления применяются автоматически, без окна — только итог-уведомление. Окно всплывает, лишь когда нужно ваше решение. Включите галочку, если хотите видеть план перед каждым обновлением.">?</span></label>
           <label class="check"><input type="checkbox" id="setAlwaysPlan"> Всегда показывать план перед обновлением</label>
         </div>
         <div class="m-row">
-          <label>Список модов</label>
-          <label class="check"><input type="checkbox" id="setDescInList"> Показывать полное описание прямо в списке</label>
-          <label class="check"><input type="checkbox" id="setShowHidden2"> Показывать скрытые моды</label>
+          <label>Внешний вид <span class="help-q" title="Если мелко или бледно. Размер текста — только шрифты (раскладка компактная). Масштаб — весь интерфейс. Контраст — разница текста с фоном. Поверх тёмной/светлой темы (🌙/☀). Значок ↺ — сброс параметра.">?</span></label>
+          <div class="step-grid">
+            <div class="step-row">
+              <span class="step-lab">Размер текста</span>
+              <button class="step-btn" id="setTextMinus" type="button" title="Мельче">−</button>
+              <span class="step-val" id="setTextVal">100%</span>
+              <button class="step-btn" id="setTextPlus" type="button" title="Крупнее">＋</button>
+              <button class="step-reset" id="setTextReset" type="button" title="Сбросить размер текста">↺</button>
+            </div>
+            <div class="step-row">
+              <span class="step-lab">Масштаб</span>
+              <button class="step-btn" id="setScaleMinus" type="button" title="Уменьшить">−</button>
+              <span class="step-val" id="setScaleVal">100%</span>
+              <button class="step-btn" id="setScalePlus" type="button" title="Увеличить">＋</button>
+              <button class="step-reset" id="setScaleReset" type="button" title="Сбросить масштаб">↺</button>
+            </div>
+            <div class="step-row">
+              <span class="step-lab">Контраст</span>
+              <button class="step-btn" id="setContrastMinus" type="button" title="Слабее">−</button>
+              <span class="step-val" id="setContrastVal">обычный</span>
+              <button class="step-btn" id="setContrastPlus" type="button" title="Сильнее">＋</button>
+              <button class="step-reset" id="setContrastReset" type="button" title="Сбросить контраст">↺</button>
+            </div>
+          </div>
         </div>
         <details>
           <summary style="cursor:pointer;color:var(--muted);font-size:12.5px;margin:6px 0">Дополнительно (база, репозиторий и токен) — обычно менять не нужно</summary>
@@ -451,6 +473,24 @@
     </div>
   </div>
 
+  <!-- МОДАЛКА: план обновления (только просмотр, из ПКМ) -->
+  <div class="overlay hidden" id="planOverlay">
+    <div class="modal plan-modal">
+      <h2 id="planTitle" title="Потяните за заголовок, чтобы переместить окно; за правый нижний угол — изменить размер">План обновления</h2>
+      <div class="m-body">
+        <div id="planHead"></div>
+        <div id="planBody"></div>
+      </div>
+      <div class="m-foot">
+        <span class="sub" style="margin-right:auto" id="planLegend"></span>
+        <label class="check" id="planBytesWrap" style="margin:0 6px 0 0;font-size:12px;color:var(--muted);white-space:nowrap"
+               title="Показывать размеры точно в байтах вместо КБ/МБ"><input type="checkbox" id="planBytes"> в байтах</label>
+        <button class="btn ghost" id="planUpdateBtn" title="Скачать и применить это обновление, сохранив ваши правки">🔀 Обновить</button>
+        <button class="btn primary" id="planCloseBtn">Закрыть</button>
+      </div>
+    </div>
+  </div>
+
   <!-- МОДАЛКА: проверка совместимости -->
   <div class="overlay hidden" id="compatOverlay">
     <div class="modal info-modal">
@@ -471,6 +511,8 @@
     <button id="ctxHide">🙈 Скрыть из списка</button>
     <button id="ctxTags">🏷 Теги…</button>
     <button id="ctxNote">📝 Заметка…</button>
+    <div class="mm-sep" id="ctxPlanSep"></div>
+    <button id="ctxPlan">📋 Посмотреть план обновления</button>
     <div class="mm-sep"></div>
     <button id="ctxRemoveOne">🗑 Убрать из профиля (эту строку)</button>
     <button id="ctxCancelAdd">✖ Отменить добавление (всё)</button>
@@ -515,6 +557,48 @@
         <button class="btn" id="helpGitBtn" title="Открыть полную инструкцию в браузере">🌐 Полная справка на GitHub</button>
         <span class="spacer"></span>
         <button class="btn primary" id="helpCloseBtn">Закрыть</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ПЕРВЫЙ ЗАПУСК: настройка читаемости ДО обучающего тура (новичок с нечитаемым
+       текстом не сможет прочитать сам тур из 17 шагов) -->
+  <div class="overlay hidden" id="firstRunOverlay">
+    <div class="modal info-modal">
+      <h2>👋 Добро пожаловать</h2>
+      <div class="m-body">
+        <div class="note" style="border-left-color:var(--accent)">
+          Если текст мелкий или бледный — настройте читаемость сейчас, чтобы обучающий тур
+          было удобно читать. Эти же настройки всегда доступны в ⚙ Настройках.
+        </div>
+        <div class="step-grid" style="margin-top:12px">
+          <div class="step-row">
+            <span class="step-lab">Размер текста</span>
+            <button class="step-btn" id="frTextMinus" type="button" title="Мельче">−</button>
+            <span class="step-val" id="frTextVal">100%</span>
+            <button class="step-btn" id="frTextPlus" type="button" title="Крупнее">＋</button>
+            <button class="step-reset" id="frTextReset" type="button" title="Сбросить размер текста">↺</button>
+          </div>
+          <div class="step-row">
+            <span class="step-lab">Масштаб</span>
+            <button class="step-btn" id="frScaleMinus" type="button" title="Уменьшить">−</button>
+            <span class="step-val" id="frScaleVal">100%</span>
+            <button class="step-btn" id="frScalePlus" type="button" title="Увеличить">＋</button>
+            <button class="step-reset" id="frScaleReset" type="button" title="Сбросить масштаб">↺</button>
+          </div>
+          <div class="step-row">
+            <span class="step-lab">Контраст</span>
+            <button class="step-btn" id="frContrastMinus" type="button" title="Слабее">−</button>
+            <span class="step-val" id="frContrastVal">обычный</span>
+            <button class="step-btn" id="frContrastPlus" type="button" title="Сильнее">＋</button>
+            <button class="step-reset" id="frContrastReset" type="button" title="Сбросить контраст">↺</button>
+          </div>
+        </div>
+      </div>
+      <div class="m-foot">
+        <button class="btn ghost" id="frSkipBtn" title="Пропустить настройку и обучение">Пропустить обучение</button>
+        <span class="spacer"></span>
+        <button class="btn primary" id="frContinueBtn" title="Перейти к обучающему туру">Продолжить → обучение</button>
       </div>
     </div>
   </div>
