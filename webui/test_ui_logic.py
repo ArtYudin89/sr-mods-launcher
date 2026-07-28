@@ -1,7 +1,7 @@
 """Уровень-1 ассерты: гоняем реальные методы Api как кнопки, сверяем ОЖИДАНИЕ vs ФАКТ.
 Песочница: профиль/конфиг НЕ пишем на диск (стабим _save_*), сеть не трогаем (стабим
 worker'ы и inject-им фейковый каталог/packs). Запуск: python test_ui_logic.py"""
-import sys, types, threading
+import sys, types, threading, time
 sys.path.insert(0, r'C:\claude_sandbox\sr-mods-launcher\webui')
 import app
 
@@ -16,7 +16,10 @@ def fresh_api(base='redux', extra=None):
     a = app.Api.__new__(app.Api)               # без __init__ (не читаем диск)
     a.busy = False
     a._cancel = threading.Event()
+    a._paused = threading.Event()
+    a._chunk_prog = {}; a._chunk_lock = threading.Lock()
     a._updates = {}
+    a._camps_idx = None
     a.profile = {'name': 't', 'game_path': '', 'mods': [], 'enabled': [],
                  'base': base, 'update_extra': list(extra or [])}
     a._save_profile = lambda: None
@@ -226,6 +229,101 @@ check('несвязанный файл основного цел (keep.dat)', 'K
 check('идентичность мода сохранена (@-ключ)', 'Cat/Mod@Pol', _merged.get('id'))
 check('preview пометит перекрытый файл hotfix (raw основного в _last_fork_files)',
       True, '{app}/Mods/Cat/Mod/x.scr' in a._last_fork_files)
+
+print('\n=== 🔒 «не обновлять» (отзыв 1): пометка, детект, массовое обновление ===')
+a = fresh_api('redux'); a.config = {'mod_meta': {}}
+a._updates = {'Cat/ModA': {'n': 3, 'camp': 'redux'}}
+a.set_mod_frozen('Cat/ModA', True)
+check('пометка сохранилась в mod_meta', True, a.config['mod_meta']['Cat/ModA']['frozen'])
+check('_is_frozen видит пометку', True, a._is_frozen('Cat/ModA'))
+check('бейдж «обновление» снят сразу', False, 'Cat/ModA' in a._updates)
+check('соседний мод не задет', False, a._is_frozen('Cat/ModB'))
+a.set_mod_frozen('Cat/ModA', False)
+check('снятие пометки чистит запись', {}, a.config['mod_meta'])
+
+a = fresh_api('redux'); a.config = {'mod_meta': {}}
+a.set_mods_frozen(['Cat/ModA', 'Cat/ModB'], True)
+check('массовая заморозка', [True, True],
+      [a._is_frozen('Cat/ModA'), a._is_frozen('Cat/ModB')])
+
+# скрытый мод: сам по себе обновляется, но настройка «скрытые не обновлять» его замораживает
+a = fresh_api('redux'); a.config = {'mod_meta': {'Cat/ModA': {'hidden': True}}}
+check('скрытый по умолчанию ОБНОВЛЯЕТСЯ', False, a._is_frozen('Cat/ModA'))
+a.set_freeze_hidden(True)
+check('с настройкой freeze_hidden скрытый заморожен', True, a._is_frozen('Cat/ModA'))
+check('нескрытый мод настройкой не затронут', False, a._is_frozen('Cat/ModB'))
+
+# «Обновить все» по замороженной строке: явный отказ вместо тихого ничего
+a = fresh_api('redux'); a.config = {'mod_meta': {'Cat/ModA': {'frozen': True}}}
+a._require_game = lambda: None
+r = a.start_merge(['d:Cat/ModA'])
+check('обновление замороженного отклонено', False, r['ok'])
+check('в тексте объяснено про 🔒', True, 'не обновлять' in r['error'])
+
+# окно конфликтов: «Больше не предлагать» = пропустить + пометить 🔒
+def _pending(a, mid):
+    a._pending_merge = {'target': ('disk', mid), 'desc': {'id': mid},
+                        'plan': {'id': mid, 'actions': [], 'summary': {}}, 'index': {}}
+    a._merge_next = lambda: None
+
+a = fresh_api('redux'); a.config = {'mod_meta': {}}
+_pending(a, 'Cat/ModA'); a.merge_skip()
+check('обычный «Пропустить» не морозит мод', False, a._is_frozen('Cat/ModA'))
+_pending(a, 'Cat/ModA'); a.merge_skip(True)
+check('«Больше не предлагать» ставит 🔒', True, a._is_frozen('Cat/ModA'))
+
+print('\n=== ⏸ пауза операции (отзыв 3) ===')
+a = fresh_api('redux')
+check('по умолчанию не на паузе', False, a.is_paused())
+check('should_cancel без паузы возвращает сразу', False, a.should_cancel())
+a.set_paused(True)
+check('is_paused после нажатия', True, a.is_paused())
+_res = []
+_t = threading.Thread(target=lambda: _res.append(a.should_cancel()), daemon=True)
+_t.start(); _t.join(0.6)
+check('на паузе should_cancel НЕ возвращает управление', True, _t.is_alive())
+a.set_paused(False)
+_t.join(1.5)
+check('после «Продолжить» операция едет дальше', [False], _res)
+a.set_paused(True); a._cancel.set()
+_t2 = threading.Thread(target=lambda: _res.append(a.should_cancel()), daemon=True)
+_t2.start(); _t2.join(1.0)
+check('отмена пробивает паузу', False, _t2.is_alive())
+
+print('\n=== плавный прогресс частей (отзыв 3: «не видно прогресс скачивания») ===')
+a = fresh_api('redux')
+a._dl_bytes = 0; a._pack_ctx = 'тест'
+_ev = []
+a._emit = lambda e, d=None: _ev.append((e, d))
+a._part_progress(1, 4)                       # 1 часть из 4 готова → 25%
+check('после первой части 25%', 25, _ev[-1][1]['pct'])
+time.sleep(0.25)                             # обойти троттлинг эмитов
+a._chunk_progress('c2', 5, 10)               # вторая часть скачана наполовину
+check('доля внутри части учтена (37%)', 38, _ev[-1][1]['pct'])
+time.sleep(0.25)
+a._chunk_progress('c2', 10, 10)              # часть докачана → доля уходит в счётчик
+check('докачанная часть не удваивает прогресс', 25, _ev[-1][1]['pct'])
+
+print('\n=== «Откуда установлен» в карточке (отзыв 5) ===')
+a = fresh_api('redux'); a.config = {'mod_meta': {}}
+a._packs_cache['redux/redux_base_installer']['display_name'] = 'Universe Redux — установщик'
+a._packs_cache['redux/redux_base_installer']['load_order'] = 10
+a._packs_cache['redux/redux_fixes'] = {'camp': 'redux', 'name': 'redux_fixes', 'tier': 'fix',
+                                       'fix_parent': 'redux_base_installer', 'load_order': 20,
+                                       'display_name': 'Universe Redux — фиксы'}
+a._fixparent = {'redux_fixes': 'redux_base_installer'}
+a._pub_cache_all = [('redux/redux_base_installer', {'Cat/ModA/a.dat': 'A'}),
+                    ('redux/redux_fixes', {'Cat/ModA/a.dat': 'B'})]
+si = a._source_info('Cat/ModA')
+check('сборка определена', 'redux', si['camp'])
+check('паки в порядке установки', ['Universe Redux — установщик', 'Universe Redux — фиксы'],
+      [p['title'] for p in si['packs']])
+check('роли паков подписаны', ['основа', 'фиксы'], [p['role'] for p in si['packs']])
+a._pub_cache_all = [('redux/redux_base_installer', {'Cat/ModA/a.dat': 'A'}),
+                    ('redux/redux_fixes', {'Cat/ModB/b.dat': 'B'})]
+si = a._source_info('Cat/ModA')
+check('фикс-пак без файлов этого мода не показывается', ['redux_base_installer'],
+      [p['unit'] for p in si['packs']])
 
 print(f'\n===== ИТОГ: PASS={len(PASS)}  FAIL={len(FAIL)} =====')
 if FAIL:

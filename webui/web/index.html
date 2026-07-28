@@ -19,9 +19,9 @@
       <div class="game-path" id="gamePath" title="Папка, куда установлена игра. Нажмите, чтобы выбрать.">Папка игры не выбрана</div>
       <div class="spacer"></div>
       <button class="icon-btn" id="tourBtn" title="Обучение — тур по интерфейсу лаунчера">🎓</button>
-      <button class="icon-btn" id="helpBtn" title="Справка">❔</button>
-      <button class="icon-btn" id="themeBtn" title="Светлая / тёмная тема">🌙</button>
-      <button class="icon-btn" id="settingsBtn" title="Настройки">⚙</button>
+      <button class="icon-btn busy-ok" id="helpBtn" title="Справка">❔</button>
+      <button class="icon-btn busy-ok" id="themeBtn" title="Светлая / тёмная тема">🌙</button>
+      <button class="icon-btn busy-ok" id="settingsBtn" title="Настройки">⚙</button>
       <button class="btn play" id="launchBtn" title="Запустить Space Rangers HD">▶  Играть</button>
     </div>
     <div class="tr tr2">
@@ -115,7 +115,7 @@
 
       <!-- панель над таблицей: рельс-переключатель · основные действия · «Ещё» · поиск · ⊕⊖ -->
       <div class="toolbar actions-toolbar" id="actionsToolbar">
-        <button class="icon-btn rail-toggle active" id="railToggle" title="Показать/скрыть панель фильтров и отображения">▤</button>
+        <button class="icon-btn rail-toggle active busy-ok" id="railToggle" title="Показать/скрыть панель фильтров и отображения">▤</button>
         <div class="tb-divider"></div>
         <button class="btn primary" id="addBtn" title="Добавить мод, пак или целую сборку в этот профиль">➕ Добавить мод</button>
         <button class="btn" id="installBtn" title="Скачать и установить. Ничего не выбрано галочками — весь профиль целиком; есть выбранные (отмеченные галочкой) — только они.">🧩 Установить все</button>
@@ -139,8 +139,8 @@
           <input class="search" id="searchInp" placeholder="🔎 поиск мода…">
           <button class="search-clear hidden" id="searchClear" title="Очистить поиск" tabindex="-1">✕</button>
         </span>
-        <button class="icon-btn" id="expandBtn" title="Развернуть все группы">⊕</button>
-        <button class="icon-btn" id="collapseBtn" title="Свернуть все группы">⊖</button>
+        <button class="icon-btn busy-ok" id="expandBtn" title="Развернуть все группы">⊕</button>
+        <button class="icon-btn busy-ok" id="collapseBtn" title="Свернуть все группы">⊖</button>
       </div>
 
       <!-- легенда состояний (скрыта по умолчанию) -->
@@ -186,7 +186,8 @@
           <span id="progRight"></span>
         </div>
         <div class="bar pulse" id="progBar"><i></i></div>
-        <div class="progress-top" style="justify-content:flex-end">
+        <div class="progress-top" style="justify-content:flex-end;gap:8px">
+          <button class="btn ghost" id="pauseBtn" title="Приостановить скачивание, чтобы спокойно посмотреть настройки или найти мод. Продолжить — той же кнопкой.">⏸ Пауза</button>
           <button class="btn ghost danger" id="cancelBtn">✖ Отмена</button>
         </div>
       </div>
@@ -221,8 +222,8 @@
       <div class="side-pane hidden" id="paneLog">
         <div class="log-head"><h3>Журнал</h3>
           <span class="spacer"></span>
-          <button class="icon-btn" id="saveLogBtn" title="Сохранить журнал в файл" style="width:28px;height:26px;font-size:13px">💾</button>
-          <button class="icon-btn" id="clearLogBtn" title="Очистить журнал" style="width:28px;height:26px;font-size:13px">🗑</button>
+          <button class="icon-btn busy-ok" id="saveLogBtn" title="Сохранить журнал в файл" style="width:28px;height:26px;font-size:13px">💾</button>
+          <button class="icon-btn busy-ok" id="clearLogBtn" title="Очистить журнал" style="width:28px;height:26px;font-size:13px">🗑</button>
         </div>
         <div class="log" id="logBox"></div>
         <label class="check log-verbose"><input type="checkbox" id="verboseChk"> Подробный лог</label>
@@ -243,25 +244,26 @@
       <h2>Настройки</h2>
       <div class="m-body">
         <div class="m-row">
-          <label>Папка игры <span class="help-q" title="Туда, где лежит Rangers.exe. Моды ставятся в подпапку Mods.">?</span></label>
+          <label>Папка игры <span class="help-q" role="button" tabindex="0" title="Туда, где лежит Rangers.exe. Моды ставятся в подпапку Mods.">?</span></label>
           <div style="display:flex;gap:8px">
             <input id="setGamePath" style="flex:1" placeholder="например, D:\Steam\...\Space Rangers HD A War Apart">
             <button class="btn" id="setBrowseBtn">Обзор…</button>
           </div>
         </div>
         <div class="m-row">
-          <label>Версия лаунчера <span class="help-q" title="Проверить, не вышла ли новая версия лаунчера (сравнивает с релизом в репозитории).">?</span></label>
+          <label>Версия лаунчера <span class="help-q" role="button" tabindex="0" title="Проверить, не вышла ли новая версия лаунчера (сравнивает с релизом в репозитории).">?</span></label>
           <div style="display:flex;gap:8px;align-items:center">
             <button class="btn" id="setUpdateBtn" type="button">🔄 Проверить обновление</button>
             <span id="setUpdateStatus" class="sub" style="margin:0"></span>
           </div>
         </div>
         <div class="m-row">
-          <label>Обновление модов <span class="help-q" title="Тихий режим (по умолчанию): бесконфликтные обновления применяются автоматически, без окна — только итог-уведомление. Окно всплывает, лишь когда нужно ваше решение. Включите галочку, если хотите видеть план перед каждым обновлением.">?</span></label>
+          <label>Обновление модов <span class="help-q" role="button" tabindex="0" title="Тихий режим (по умолчанию): бесконфликтные обновления применяются автоматически, без окна — только итог-уведомление. Окно всплывает, лишь когда нужно ваше решение. Включите галочку, если хотите видеть план перед каждым обновлением.&#10;&#10;Отдельный мод можно вовсе исключить из обновлений: ПКМ по строке → «🔒 Не обновлять».">?</span></label>
           <label class="check"><input type="checkbox" id="setAlwaysPlan"> Всегда показывать план перед обновлением</label>
+          <label class="check"><input type="checkbox" id="setFreezeHidden"> Скрытые моды не обновлять (как 🔒)</label>
         </div>
         <div class="m-row">
-          <label>Внешний вид <span class="help-q" title="Если мелко или бледно. Размер текста — только шрифты (раскладка компактная). Масштаб — весь интерфейс. Контраст — разница текста с фоном. Поверх тёмной/светлой темы (🌙/☀). Значок ↺ — сброс параметра.">?</span></label>
+          <label>Внешний вид <span class="help-q" role="button" tabindex="0" title="Если мелко или бледно. Размер текста — только шрифты (раскладка компактная). Масштаб — весь интерфейс. Контраст — разница текста с фоном. Поверх тёмной/светлой темы (🌙/☀). Значок ↺ — сброс параметра.">?</span></label>
           <div class="step-grid">
             <div class="step-row">
               <span class="step-lab">Размер текста</span>
@@ -467,6 +469,7 @@
                title="Применять выбранные решения по типам конфликтов ко всем оставшимся модам этого обновления, не спрашивая по каждому">
           <input type="checkbox" id="mergeRemember"> Запомнить решения для остальных модов
         </label>
+        <button class="btn ghost" id="mergeFreezeBtn" title="Пропустить и больше не предлагать обновлять этот мод (пометка 🔒 — снимается в контекстном меню строки)">🔒 Больше не предлагать</button>
         <button class="btn ghost" id="mergeSkipBtn" title="Не применять — перейти к следующему / закончить">Пропустить</button>
         <button class="btn primary" id="mergeApplyBtn">Применить</button>
       </div>
@@ -509,6 +512,7 @@
     <button id="ctxOpenMods">📁 Открыть папку Mods</button>
     <div class="mm-sep"></div>
     <button id="ctxHide">🙈 Скрыть из списка</button>
+    <button id="ctxFreeze" title="Мод не будет попадать в проверку обновлений и в «Обновить все» — версия останется той, что стоит сейчас">🔒 Не обновлять</button>
     <button id="ctxTags">🏷 Теги…</button>
     <button id="ctxNote">📝 Заметка…</button>
     <div class="mm-sep" id="ctxPlanSep"></div>

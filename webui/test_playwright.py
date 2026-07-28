@@ -224,6 +224,14 @@ def _mock_mod_info(mid, variant=None):
         'installed': True,
         'variants': [],
         'variant_key': variant or '',
+        # откуда установлен: сборка + паки (отзыв 5)
+        'source_info': {'camp': 'redux', 'source': 'redux/redux_base_installer',
+                        'choice': False,
+                        'packs': [{'unit': 'redux_base_installer',
+                                   'title': 'Universe Redux — установщик', 'role': 'основа'},
+                                  {'unit': 'redux_fixes',
+                                   'title': 'Universe Redux — фиксы', 'role': 'фиксы'}]},
+        'frozen': False,
     }
     return {'ok': True, 'info': info}
 
@@ -1138,6 +1146,72 @@ def scenario_plan_filter_tree(page, base_url):
           page.eval_on_selector_all('#planBody tbody tr', 'els => els.length') == 5)
 
 
+def scenario_help_pause_freeze(page, base_url):
+    """Сц.13: подсказки «?» по клику, ⏸ пауза, пункт «🔒 Не обновлять» (отзывы 1–3)."""
+    print('\n=== Сц.13: подсказки «?», пауза, «не обновлять» ===')
+    init_page(page, base_url)
+
+    # (1) «?» в настройках: раньше клик не делал ничего (только title при наведении)
+    page.click('#settingsBtn')
+    page.wait_for_selector('#settingsOverlay:not(.hidden)', timeout=2000)
+    page.click('#settingsOverlay .help-q >> nth=0')
+    page.wait_for_selector('#helpTip', timeout=2000)
+    txt = page.eval_on_selector('#helpTip', 'e => e.textContent')
+    check('клик по «?» открывает подсказку с текстом', len(txt or '') > 20, txt)
+    page.click('#helpTip .help-tip-x')
+    check('крестик закрывает подсказку', page.locator('#helpTip').count() == 0)
+    page.click('#settingsOverlay .help-q >> nth=0')
+    page.keyboard.press('Escape')
+    check('Esc закрывает подсказку', page.locator('#helpTip').count() == 0)
+    check('в настройках есть «скрытые не обновлять»', page.locator('#setFreezeHidden').count() == 1)
+    page.evaluate("hide('settingsOverlay')")
+
+    # (2) пауза: кнопка меняет надпись по событию op_paused, полоса гаснет
+    page.evaluate("window.__emit('op_begin', {name: 'Установка'})")
+    check('кнопка паузы видна во время операции',
+          page.eval_on_selector('#pauseBtn', 'e => e.textContent').strip().startswith('⏸'))
+    check('поиск НЕ заблокирован во время операции',
+          page.eval_on_selector('#searchInp', 'e => !e.disabled'))
+    check('настройки доступны во время операции',
+          page.eval_on_selector('#settingsBtn', 'e => !e.disabled'))
+    check('действия заблокированы во время операции',
+          page.eval_on_selector('#installBtn', 'e => e.disabled'))
+    page.evaluate("window.__emit('op_paused', {paused: true})")
+    check('на паузе кнопка предлагает продолжить',
+          '▶' in page.eval_on_selector('#pauseBtn', 'e => e.textContent'))
+    check('полоса помечена паузой',
+          page.eval_on_selector('#progBar', "e => e.classList.contains('paused')"))
+    page.evaluate("window.__emit('op_paused', {paused: false})")
+    check('снятие паузы возвращает «⏸ Пауза»',
+          '⏸' in page.eval_on_selector('#pauseBtn', 'e => e.textContent'))
+    page.evaluate("window.__emit('op_end', {status: 'Готово'})")
+
+    # (3) пункт меню «не обновлять» на строке мода
+    leaves = page.locator('#treeBody .row.leaf')
+    if leaves.count():
+        leaves.first.click(button='right')
+        page.wait_for_selector('#ctxMenu:not(.hidden)', timeout=2000)
+        shot(page, '13_ctx_freeze')
+        check('в меню есть «🔒 Не обновлять»',
+              '🔒' in page.eval_on_selector('#ctxFreeze', 'e => e.textContent'))
+        check('пункт виден для мода',
+              page.eval_on_selector('#ctxFreeze', "e => e.style.display !== 'none'"))
+        page.keyboard.press('Escape')
+
+    # (4) карточка мода: строка «Откуда» (пак-источник) и переключатель обновлений
+    info_btn = page.locator('#treeBody .info-btn').first
+    if info_btn.count():
+        info_btn.click()
+        page.wait_for_selector('.mod-card .i-row', timeout=2000)
+        body = page.eval_on_selector('.mod-card .mc-body', 'e => e.textContent')
+        check('в карточке есть строка «Откуда»', 'Откуда' in body, body[:120])
+        check('показан пак-источник', 'Universe Redux — установщик' in body)
+        check('показаны все паки цепочки', 'Universe Redux — фиксы' in body)
+        check('есть кнопка «не обновлять»',
+              page.locator('.mod-card .card-freeze').count() == 1)
+        shot(page, '13b_card_source')
+
+
 def main():
     print('Запуск mock-сервера…')
     srv, base_url = start_server(17777)
@@ -1163,6 +1237,7 @@ def main():
             scenario_feedback_batch,
             scenario_first_run_appearance,
             scenario_plan_filter_tree,
+            scenario_help_pause_freeze,
         ]
 
         for sc in scenarios:

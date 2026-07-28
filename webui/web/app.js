@@ -13,6 +13,7 @@ let activeIid = null;                // «выделена» — активна�
 const collapsed = new Set();         // свёрнутые узлы
 const NODE = {};                     // iid -> узел (для быстрых проверок)
 let busy = false;
+let paused = false;                 // ⏸ операция приостановлена игроком
 let reconcileTimer = null;
 // доступность: клавиатурная навигация по дереву (roving tabindex)
 let treeCursor = null;      // data-iid/data-key строки, на которой сейчас «курсор»
@@ -26,6 +27,7 @@ const STATES = [
   { k: 'avail', label: 'доступен', badge: 'b-avail', tip: 'есть в каталоге — можно установить' },
   { k: 'miss', label: 'недоступен', badge: 'b-miss', tip: 'в профиле есть, но в каталоге не найден' },
   { k: 'unknown', label: 'не в каталоге', badge: 'b-unknown', tip: 'установлен, но в каталоге его нет' },
+  { k: 'frozen', label: 'не обновляется', badge: 'b-frozen', tip: 'вы пометили мод 🔒 — он не проверяется и не обновляется' },
   { k: 'load', label: 'каталог грузится', badge: 'b-load', tip: 'каталог ещё загружается' },
 ];
 const filter = { states: new Set(STATES.map((s) => s.k)), inGame: false, inProfile: false, camps: new Set(), tags: new Set(), onlyHidden: false, noTags: false };
@@ -63,6 +65,7 @@ window.__emit = (event, data) => {
     case 'log': appendLog(data); break;
     case 'tree_dirty': refreshTree(); break;
     case 'op_begin': onOpBegin(data); break;
+    case 'op_paused': onOpPaused(data); break;
     case 'op_end': onOpEnd(data); break;
     case 'progress': onProgress(data); break;
     case 'merge_plan': onMergePlan(data); break;
@@ -350,6 +353,10 @@ function wireUI() {
     STATE.always_show_plan = e.target.checked;
     api().set_always_show_plan(e.target.checked);
   };
+  $('setFreezeHidden').onchange = (e) => {
+    STATE.freeze_hidden = e.target.checked;
+    api().set_freeze_hidden(e.target.checked).then(() => refreshTree());
+  };
   $('railDescInList').onchange = (e) => {
     STATE.desc_in_list = e.target.checked;
     api().set_desc_in_list(e.target.checked).then(() => refreshTree());
@@ -433,8 +440,17 @@ function wireUI() {
   $('addPack').onchange = onAddPack;
   $('addMod').onchange = onAddModSel;
   // обновление
+  $('pauseBtn').onclick = () => api().set_paused(!paused);
   $('mergeApplyBtn').onclick = doMergeApply;
-  $('mergeSkipBtn').onclick = () => { hide('mergeOverlay'); api().merge_skip(); };
+  $('mergeSkipBtn').onclick = () => { hide('mergeOverlay'); api().merge_skip(false); };
+  // «больше не предлагать» — пропустить и пометить мод 🔒 (чтобы не жать это каждый раз)
+  $('mergeFreezeBtn').onclick = () => {
+    hide('mergeOverlay');
+    api().merge_skip(true).then(() => {
+      toast('🔒 мод исключён из обновлений (снять — ПКМ по строке)', 'ok');
+      refreshTree();
+    });
+  };
 
   // закрытие по клику на фон — только для «безопасных» модалок
   // (confirm/merge завязаны на состояние бэкенда → закрываются только кнопками)
@@ -451,6 +467,16 @@ function wireUI() {
     const anyShown = mids.some((m) => { const n = nodeByMid(m); return n && !n.hidden; });
     api().set_mods_hidden(mids, anyShown).then(() => {
       mids.forEach((m) => selected.delete('d:' + m)); refreshTree();
+    });
+  };
+  $('ctxFreeze').onclick = () => {
+    const mids = ctxTargetMids(); hideCtxMenu();
+    if (!mids.length) return;
+    // хоть один обновляется → замораживаем все выбранные; иначе размораживаем
+    const anyLive = mids.some((m) => { const n = nodeByMid(m); return n && !n.frozen; });
+    api().set_mods_frozen(mids, anyLive).then(() => {
+      toast(anyLive ? `🔒 не обновляю: ${mids.length}` : `🔓 обновляю снова: ${mids.length}`, 'ok');
+      refreshTree();
     });
   };
   $('ctxTags').onclick = () => {
@@ -864,9 +890,13 @@ function leafRow(n, lvl) {
   const alt = (STATE.name_mode === 'module' && n.name && n.name !== n.label)
     ? `<span class="alt-name" title="имя папки на диске">${esc(n.label)}</span>` : '';
   const hidMark = n.hidden ? '<span class="hid-mark" title="Скрыт из списка (виден, т.к. включён показ скрытых)">🙈</span>' : '';
-  return `<div class="row leaf lvl${lvl}${sel}${hid}" data-iid="${esc(n.iid)}" data-mid="${esc(n.mid || '')}" role="treeitem" aria-level="${lvl}" aria-selected="${isSel ? 'true' : 'false'}" aria-label="${esc(disp)}, ${esc(n.status)}${n.in_profile ? ', в профиле' : ''}${n.hidden ? ', скрыт' : ''}">
+  const frzMark = n.frozen
+    ? `<span class="frz-mark" title="${n.frozen_by_hidden
+        ? 'Не обновляется: мод скрыт, а в настройках включено «скрытые моды не обновлять»'
+        : 'Не обновляется: вы пометили мод 🔒 (ПКМ по строке — снять пометку)'}">🔒</span>` : '';
+  return `<div class="row leaf lvl${lvl}${sel}${hid}${n.frozen ? ' frozen-mod' : ''}" data-iid="${esc(n.iid)}" data-mid="${esc(n.mid || '')}" role="treeitem" aria-level="${lvl}" aria-selected="${isSel ? 'true' : 'false'}" aria-label="${esc(disp)}, ${esc(n.status)}${n.in_profile ? ', в профиле' : ''}${n.hidden ? ', скрыт' : ''}">
     <div class="name">${check}<span class="tw">·</span>
-      <span class="label-wrap"><span class="name-line">${hidMark}<span class="label">${esc(disp)}</span>${labelBadges(n.labels)}${userTags(n.tags, n.mid)}${alt}${date}</span>${variantSwitch(n)}${desc}</span>${noteIc}${info}</div>
+      <span class="label-wrap"><span class="name-line">${hidMark}${frzMark}<span class="label">${esc(disp)}</span>${labelBadges(n.labels)}${userTags(n.tags, n.mid)}${alt}${date}</span>${variantSwitch(n)}${desc}</span>${noteIc}${info}</div>
     <div class="cell">${esc(colValue(n) || '')}</div>
     <div class="cell">${inGame}</div>
     <div class="cell">${inProf}</div>
@@ -922,7 +952,8 @@ function setVariantVisual(mid, key) {
   });
   renderTree();
 }
-function toggleCollapse(key) { if (busy) return; collapsed.has(key) ? collapsed.delete(key) : collapsed.add(key); renderTree(); }
+// сворачивание групп — чистый просмотр, во время операции тоже разрешено (отзыв 3)
+function toggleCollapse(key) { collapsed.has(key) ? collapsed.delete(key) : collapsed.add(key); renderTree(); }
 function collapseAll() {
   (TREE.camps || []).forEach((c) => c.packs.forEach((p) => collapsed.add('p:' + p.label)));
   renderTree();
@@ -1659,6 +1690,7 @@ function openSettings() {
   $('forkRepo').value = ''; $('forkToken').value = '';
   $('setUpdateStatus').innerHTML = `Текущая: v${esc(STATE.version || '?')}`;
   $('setAlwaysPlan').checked = !!STATE.always_show_plan;
+  $('setFreezeHidden').checked = !!STATE.freeze_hidden;
   FORKS = (STATE.forks || []).map((f) => ({ repo: f.repo, has_token: f.has_token, token: '' }));
   renderForks();
   loadSetOrder();
@@ -1739,8 +1771,10 @@ async function saveSettings() {
   const token = $('setToken').value;
   // форки сохраняем отдельным вызовом; пустой token сохранит ранее введённый (бэкенд)
   const fr = await api().set_forks(FORKS.map((f) => ({ repo: f.repo, token: f.token || '' })));
-  STATE = await api().save_settings($('setGamePath').value, $('setRepo').value,
+  const res = await api().save_settings($('setGamePath').value, $('setRepo').value,
     token === '' ? null : token, $('setBase').value);
+  if (res && res.busy) { toast(res.error, 'err'); return; }   // идёт операция — не сохраняем
+  STATE = res;
   if (fr && fr.forks) STATE.forks = fr.forks;
   applyState(); refreshTree(); hide('settingsOverlay'); toast('Настройки сохранены', 'ok');
 }
@@ -2254,8 +2288,11 @@ function renderPlanTable() {
 
 // ───────── прогресс/лог ─────────
 // контролы таблицы/тулбара, блокируемые на время операции (прокрутку не трогаем)
+// Во время операции блокируем только ДЕЙСТВИЯ (что-то ставят/меняют на диске). Просмотр
+// остаётся живым: поиск, фильтр, сворачивание групп, карточка мода, настройки — иначе
+// на получасовой закачке лаунчер превращается в кирпич (отзыв 3).
 const BUSY_CTRLS = ['addBtn', 'installBtn', 'mergeBtn', 'compatBtn', 'removeBtn',
-  'launchBtn', 'clearModsBtn', 'refreshBtn', 'searchInp', 'expandBtn', 'collapseBtn', 'filterBtn',
+  'launchBtn', 'clearModsBtn', 'refreshBtn',
   'disableAllBtn', 'modcfgReadBtn', 'modcfgWriteBtn', 'moreAdd', 'moreInstall', 'moreMerge', 'moreCompat'];
 function setBusyControls(on) {
   document.body.classList.toggle('busy', on);
@@ -2265,6 +2302,8 @@ function setBusyControls(on) {
 }
 function onOpBegin() {
   busy = true;
+  paused = false;
+  setPauseBtn(false);
   setBusyControls(true);
   setSideTab('log');                       // во время операции показываем журнал
   $('progressCard').classList.remove('hidden');
@@ -2272,8 +2311,27 @@ function onOpBegin() {
   $('progText').textContent = 'Подготовка…';
   $('progRight').textContent = '';
 }
+// ⏸ пауза: бэкенд останавливается на ближайшей контрольной точке (мегабайт скачивания /
+// файл), UI остаётся живым. Кнопка одна и та же — пауза/продолжить.
+function setPauseBtn(on) {
+  const b = $('pauseBtn');
+  if (!b) return;
+  b.textContent = on ? '▶ Продолжить' : '⏸ Пауза';
+  b.classList.toggle('primary', on);
+  b.title = on ? 'Продолжить операцию с того же места'
+    : 'Приостановить скачивание, чтобы спокойно посмотреть настройки или найти мод';
+}
+function onOpPaused(d) {
+  paused = !!(d && d.paused);
+  setPauseBtn(paused);
+  $('progBar').classList.toggle('paused', paused);
+  if (paused) $('progText').textContent = '⏸ Пауза — нажмите «Продолжить»';
+}
 function onOpEnd(d) {
   busy = false;
+  paused = false;
+  setPauseBtn(false);
+  $('progBar').classList.remove('paused');
   setBusyControls(false);
   $('progBar').classList.remove('pulse');
   $('progBar').querySelector('i').style.width = '100%';
@@ -2288,11 +2346,14 @@ function onOpEnd(d) {
 }
 function onProgress(d) {
   const bar = $('progBar');
+  if (paused) return;                    // на паузе полосу и текст не трогаем
   if (d.mode === 'parts') {
     bar.classList.remove('pulse');
     bar.querySelector('i').style.width = (d.pct || 0) + '%';
-    $('progText').textContent = `${d.ctx || 'Установка'} · часть ${d.parts || ''}`;
-    $('progRight').textContent = d.gb && d.gb !== '0.00' ? `↓ ${d.gb} ГБ` : '';
+    // процент внутри части тоже учтён (полоса больше не стоит на месте по 300 МБ)
+    $('progText').textContent = `${d.ctx || 'Установка'} · часть ${d.parts || ''} · ${d.pct || 0}%`;
+    const dl = (d.gb && d.gb !== '0.00') ? `${d.gb} ГБ` : (d.mb && d.mb !== '0' ? `${d.mb} МБ` : '');
+    $('progRight').textContent = dl ? `↓ ${dl}` : '';
   } else if (d.mode === 'pct') {
     bar.classList.remove('pulse');
     bar.querySelector('i').style.width = (d.pct || 0) + '%';
@@ -2341,6 +2402,7 @@ function openCtxMenu(e, iid) {
   // скрытие/теги/заметки — только для настоящих модов (есть mid)
   const hasMid = !!ctxMid;
   $('ctxHide').style.display = hasMid ? '' : 'none';
+  $('ctxFreeze').style.display = hasMid ? '' : 'none';
   $('ctxTags').style.display = hasMid ? '' : 'none';
   $('ctxNote').style.display = hasMid ? '' : 'none';
   if (hasMid) {
@@ -2349,6 +2411,8 @@ function openCtxMenu(e, iid) {
     const suf = nSel > 1 ? ` (${nSel})` : '';
     const anyShown = nSel > 1 ? selectedMids().some((m) => { const x = nodeByMid(m); return x && !x.hidden; }) : !n.hidden;
     $('ctxHide').textContent = (anyShown ? '🙈 Скрыть из списка' : '🙈 Показать в списке') + suf;
+    const anyLive = nSel > 1 ? selectedMids().some((m) => { const x = nodeByMid(m); return x && !x.frozen; }) : !n.frozen;
+    $('ctxFreeze').textContent = (anyLive ? '🔒 Не обновлять' : '🔓 Обновлять снова') + suf;
     $('ctxTags').textContent = '🏷 Теги…' + suf;
     $('ctxNote').textContent = '📝 Заметка…';   // заметка всегда для одной строки — без (N)
   }
@@ -2482,6 +2546,21 @@ function cardInfoRows(i, mid) {
   if (i.small) rows.push(`<div class="i-row"><div class="i-k">Кратко</div><div class="i-v">${para(i.small)}</div></div>`);
   if (i.full) rows.push(`<div class="i-row"><div class="i-k">Описание</div><div class="i-v">${i.full_html || para(i.full)}</div></div>`);
   if (i.section) rows.push(`<div class="i-row"><div class="i-k">Раздел</div><div class="i-v">${esc(i.section)}</div></div>`);
+  // откуда установлен: сборка + пак(и), давшие файлы (отзыв 5)
+  const si = i.source_info;
+  if (si) {
+    const camp = campLabel(si.camp);
+    const packs = (si.packs || []).map((p) =>
+      `<span class="src-pack" title="${esc(p.unit)}">${esc(p.title || p.unit)}${p.role ? ' <span class="sub">· ' + esc(p.role) + '</span>' : ''}</span>`
+    ).join(' <span class="sub">+</span> ');
+    const note = (si.packs || []).length > 1
+      ? '<div class="sub">Файлы мода собраны из нескольких паков сборки по порядку установки: следующий пак перекрывает файлы предыдущего.</div>'
+      : '';
+    const choice = si.choice
+      ? '<div class="sub">Есть варианты из разных паков/сборок — переключатель «Вариант» выше.</div>' : '';
+    rows.push(`<div class="i-row"><div class="i-k">Откуда</div><div class="i-v">
+      <span class="lbl lbl-${esc(si.camp)}" style="margin-left:0">${esc(camp)}</span> ${packs}${note}${choice}</div></div>`);
+  }
   // ваши теги + заметка (редактируются прямо из карточки)
   const node = nodeByMid(mid);
   if (node) {
@@ -2494,6 +2573,16 @@ function cardInfoRows(i, mid) {
     const noteHtml = node.note ? para(node.note) : '<span class="sub">нет</span>';
     rows.push(`<div class="i-row"><div class="i-k">Заметка</div><div class="i-v">${noteHtml}
       <button class="mini card-note" data-mid="${esc(mid)}" title="Изменить заметку">✎ заметка</button></div></div>`);
+    // 🔒 «не обновлять» — прямо из карточки (отзыв 1)
+    const frz = !!node.frozen;
+    rows.push(`<div class="i-row"><div class="i-k">Обновления</div><div class="i-v">${frz
+      ? '<span class="badge b-frozen">🔒 не обновляется</span>'
+      : '<span class="sub">обновляется как обычно</span>'}
+      <button class="mini card-freeze" data-mid="${esc(mid)}" title="${frz
+        ? 'Вернуть мод в проверку обновлений'
+        : 'Исключить мод из проверки обновлений и из «Обновить все» — версия останется текущей'}">${
+        frz ? '🔓 обновлять' : '🔒 не обновлять'}</button>
+      ${node.frozen_by_hidden ? '<div class="sub">Причина: мод скрыт, а в настройках включено «скрытые моды не обновлять».</div>' : ''}</div></div>`);
   }
   rows.push(`<div class="i-row"><div class="i-k">Расположение</div><div class="i-v"><code>${esc(i.location || '')}</code></div></div>`);
   const multi = i.variants && i.variants.length > 1;
@@ -2513,6 +2602,16 @@ function renderModCard(card, mid, i) {
     el.onclick = (e) => { e.stopPropagation(); editTagsFor(el.dataset.mid || mid); });
   body.querySelector('.card-note') && (body.querySelector('.card-note').onclick =
     (e) => { e.stopPropagation(); editNoteFor(mid); });
+  const frzBtn = body.querySelector('.card-freeze');
+  if (frzBtn) frzBtn.onclick = (e) => {
+    e.stopPropagation();
+    const node = nodeByMid(mid);
+    const val = !(node && node.frozen);
+    api().set_mod_frozen(mid, val).then(() => {
+      toast(val ? '🔒 мод исключён из обновлений' : '🔓 мод снова обновляется', 'ok');
+      refreshTree().then(() => refreshCardMeta(mid));
+    });
+  };
 }
 
 // ───────── утилиты ─────────
@@ -2761,6 +2860,51 @@ function promptModal(title, hint, initial, multiline, opts) {
     };
   });
 }
+// ───────── подсказки «?» ─────────
+// Значки «?» рядом с названиями настроек раньше жили на одном лишь title: наведи и жди.
+// По клику не происходило ничего — и это читалось как «кнопка сломана» (отзыв 2).
+// Теперь клик открывает нормальную плашку с тем же текстом (Esc / клик мимо — закрыть).
+function closeHelpTip() {
+  const t = document.getElementById('helpTip');
+  if (t) t.remove();
+}
+function openHelpTip(el) {
+  const txt = el.dataset.help || el.getAttribute('title') || '';
+  if (!txt) return;
+  const wasOpen = document.getElementById('helpTip');
+  closeHelpTip();
+  if (wasOpen && wasOpen._src === el) return;        // повторный клик по тому же «?» — закрыть
+  el.dataset.help = txt;
+  el.removeAttribute('title');                       // чтобы браузерная подсказка не мешала
+  const tip = document.createElement('div');
+  tip._src = el;
+  tip.id = 'helpTip';
+  tip.className = 'help-tip';
+  const html = esc(txt).split('\n').join('<br>');
+  tip.innerHTML = `<div class="help-tip-txt">${html}</div>`
+    + '<button class="help-tip-x" title="Закрыть">✕</button>';
+  document.body.appendChild(tip);
+  const r = el.getBoundingClientRect();
+  const w = tip.offsetWidth, h = tip.offsetHeight;
+  let left = Math.min(r.left, window.innerWidth - w - 10);
+  let top = r.bottom + 6;
+  if (top + h > window.innerHeight - 8) top = Math.max(8, r.top - h - 6);
+  tip.style.left = Math.max(8, left) + 'px';
+  tip.style.top = top + 'px';
+  tip.querySelector('.help-tip-x').onclick = closeHelpTip;
+}
+document.addEventListener('click', (e) => {
+  const q = e.target.closest && e.target.closest('.help-q');
+  if (q) { e.preventDefault(); e.stopPropagation(); openHelpTip(q); return; }
+  if (!(e.target.closest && e.target.closest('#helpTip'))) closeHelpTip();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') { closeHelpTip(); return; }
+  const q = (e.key === 'Enter' || e.key === ' ') && e.target.classList
+    && e.target.classList.contains('help-q');
+  if (q) { e.preventDefault(); openHelpTip(e.target); }
+});
+
 function toast(msg, kind) {
   const t = document.createElement('div');
   t.className = 'toast' + (kind ? ' ' + kind : '');

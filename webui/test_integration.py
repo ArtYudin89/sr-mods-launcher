@@ -168,6 +168,8 @@ class TempGame:
         a = app.Api.__new__(app.Api)
         a.busy = False
         a._cancel = threading.Event()
+        a._paused = threading.Event()
+        a._chunk_prog = {}; a._chunk_lock = threading.Lock()
         a._updates = {}
         a.current_profile = 'default'
         a.config = {
@@ -364,7 +366,8 @@ try:
 
     def fake_reconstruct_camp(repo, camp, units, mods_dir_path, token,
                               log=print, tmp_dir=None, should_cancel=None,
-                              part_cb=None, byte_cb=None, sha_sink=None, dry_run=False):
+                              part_cb=None, byte_cb=None, sha_sink=None, dry_run=False,
+                              chunk_cb=None):
         """Имитирует reconstruct_camp (единый проход по лагерю): пишет фейковые файлы."""
         mds = Path(mods_dir_path)
         nuke_dir = mds / 'ShusRangers' / 'ShuNukes'
@@ -1970,6 +1973,71 @@ try:
     check('T72: правка игрока цела', b'PLAYER-EDIT', _lang.read_bytes())
 finally:
     shutil.rmtree(_w2, ignore_errors=True)
+
+# ═══════════════════════════════════════════════
+#  ГРУППА 22: снимок после «оставил свой файл» (отзыв 4)
+# ═══════════════════════════════════════════════
+print('\n=== ГРУППА 22: снимок честен к решению «оставить мой» ===')
+# Баг: apply_update_plan писал снимок = манифест НОВОЙ версии целиком, даже для файлов,
+# которые игрок решил не обновлять. Дальше детект видел base==theirs и считал расхождение
+# «правкой игрока» (player_only) → мод НАВСЕГДА пропадал из обновлений: «после того, как
+# я отказал обновлять, он вообще перестал видеть, что файлы разные».
+_w3 = Path(tempfile.mkdtemp(prefix='sr_snap_'))
+try:
+    _m3 = _w3 / 'Mods'; _s3 = _w3 / 'snap'; _m3.mkdir(); _s3.mkdir()
+    _old, _new, _mine = b'OLD-v1', b'NEW-v2', b'PLAYER-EDIT'
+    _so, _sn, _sm = _sha(_old), _sha(_new), _sha(_mine)
+    _rp = 'Mods/Cat/Mod/data.dat'                      # бинарь → конфликт без diff3
+    _f3 = _m3 / 'Cat' / 'Mod' / 'data.dat'
+    _f3.parent.mkdir(parents=True, exist_ok=True)
+    _f3.write_bytes(_mine)                             # игрок правил файл руками
+    _desc3 = {'id': 'Cat/Mod', 'version': 'v2', 'source': 'redux/base',
+              'files': {'code': {_rp: {'sha256': _sn, 'size': len(_new)}}, 'assets': {}}}
+    core.save_install_snapshot(_m3, 'Cat/Mod', 'v1', {_rp: _so}, 'redux/base', _s3)
+    _snap3 = core.load_install_snapshot(_m3, 'Cat/Mod', _s3)
+    _plan3 = core.plan_update_merge(_desc3, _m3, {'blobs': {}, 'chunks': {}},
+                                    snapshot=_snap3, snap_dir=_s3, tmp_dir=str(_w3),
+                                    log=lambda *a: None)
+    check('T73: файл виден как конфликт (оба меняли)', 'conflict_binary',
+          _plan3['actions'][0]['status'])
+
+    with patch.object(core, 'fetch_blobs', return_value={_sn: _new}):
+        core.apply_update_plan(_desc3, _plan3, {_rp: 'mine'}, _m3, {'blobs': {}, 'chunks': {}},
+                               snap_dir=_s3, tmp_dir=str(_w3), log=lambda *a: None)
+    check('T74: файл игрока не тронут', _mine, _f3.read_bytes())
+    _after = core.load_install_snapshot(_m3, 'Cat/Mod', _s3)
+    check('T75: в снимке ОСТАЛАСЬ прежняя база (не sha новой версии)', _so,
+          _after['files'][_rp])
+    check('T76: обновление всё ещё видно детектом', 1,
+          core.plan_actionable_sha({_rp: _sn}, _after['files'], {_rp: _sm}))
+
+    # контроль: согласился обновить → снимок догоняет новую версию, детект замолкает
+    with patch.object(core, 'fetch_blobs', return_value={_sn: _new}):
+        core.apply_update_plan(_desc3, _plan3, {_rp: 'theirs'}, _m3,
+                               {'blobs': {}, 'chunks': {}}, snap_dir=_s3,
+                               tmp_dir=str(_w3), log=lambda *a: None)
+    _after2 = core.load_install_snapshot(_m3, 'Cat/Mod', _s3)
+    check('T77: принял новую версию → файл заменён', _new, _f3.read_bytes())
+    check('T78: снимок = новая версия', _sn, _after2['files'][_rp])
+    check('T79: обновлять больше нечего', 0,
+          core.plan_actionable_sha({_rp: _sn}, _after2['files'], {_rp: _sn}))
+
+    # «сохранить оба» (.srnew): сам файл остался прежним → база тоже прежняя
+    _f3.write_bytes(_mine)
+    core.save_install_snapshot(_m3, 'Cat/Mod', 'v1', {_rp: _so}, 'redux/base', _s3)
+    _plan3b = core.plan_update_merge(_desc3, _m3, {'blobs': {}, 'chunks': {}},
+                                     snapshot=core.load_install_snapshot(_m3, 'Cat/Mod', _s3),
+                                     snap_dir=_s3, tmp_dir=str(_w3), log=lambda *a: None)
+    with patch.object(core, 'fetch_blobs', return_value={_sn: _new}):
+        core.apply_update_plan(_desc3, _plan3b, {_rp: 'both'}, _m3,
+                               {'blobs': {}, 'chunks': {}}, snap_dir=_s3,
+                               tmp_dir=str(_w3), log=lambda *a: None)
+    check_true('T80: новая версия легла рядом (.srnew)',
+               (_f3.parent / 'data.dat.srnew').exists())
+    check('T81: «оба» — база осталась прежней', _so,
+          core.load_install_snapshot(_m3, 'Cat/Mod', _s3)['files'][_rp])
+finally:
+    shutil.rmtree(_w3, ignore_errors=True)
 
 # ═══════════════════════════════════════════════
 #  Итог

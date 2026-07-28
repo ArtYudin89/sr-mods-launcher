@@ -173,50 +173,82 @@ def download_url(url, token, dest, progress_cb=None, should_cancel=None, byte_cb
 
 
 def spawn_self_replace(current_exe, new_exe, log=print):
-    """Windows-самообновление: запустить фоновый .bat, который дождётся выхода текущего
-    процесса лаунчера (по PID), заменит exe скачанным и перезапустит его. После вызова
-    лаунчер ДОЛЖЕН закрыться, чтобы освободить файл. Работает только для frozen (.exe)."""
-    import os, subprocess
+    """Windows-самообновление: запустить фоновый .bat, который заменит exe скачанным,
+    дождётся выхода лаунчера и запустит новую версию. После вызова лаунчер ДОЛЖЕН
+    закрыться, чтобы файл освободился. Работает только для frozen (.exe).
+
+    Три вещи, на которых предыдущая версия молча ломалась (отзывы «автообновление не
+    работает»), — все три про то, что помощник исполняет чужой текст в чужой кодировке:
+    1) ПУТЬ В ТЕКСТ .bat НЕ ПИШЕМ. cmd читает батник в OEM-кодировке (cp866), а он писался
+       в utf-8: путь с кириллицей (C:\\Users\\Артём\\…) превращался в мусор — move молча не
+       срабатывал, а `start` показывал окно «Не удаётся найти …», и лаунчер не возвращался.
+       Папку берёт сам cmd через %~dp0 (он знает её в Unicode, без перекодировки), в тексте
+       остаются только ИМЕНА файлов, а текст пишем в OEM-кодировке — тогда и имя с
+       кириллицей (если игрок переименовал exe) доедет целым.
+    2) Помощник запускается БЕЗ DETACHED_PROCESS (см. ниже): без консоли cmd теряет кодовую
+       страницу и снова читает батник мусором.
+    3) Выхода лаунчера ждём НЕ через `tasklist … | find <pid>`: конвейер поднимает ещё два
+       процесса и в отцепленном помощнике умирал молча, не дойдя до подмены. Ждём проще и
+       по существу: запущенный exe переименовать МОЖНО, а удалить — нельзя, пока процесс
+       жив. «Получилось удалить .old.exe» = «лаунчер вышел» — без PID и без конвейера.
+       Пауза — ping, а не timeout (тому нужен консольный ввод)."""
+    import subprocess
     current_exe, new_exe = Path(current_exe), Path(new_exe)
     bak = current_exe.with_name(current_exe.stem + '.old.exe')
     bat = current_exe.with_name('_sr_selfupdate.bat')
-    pid = os.getpid()
-    # ждём, пока PID лаунчера исчезнет (файл разблокируется), затем меняем и стартуем.
-    # exe заменяем через .old.exe (переименование запущенного/старого) — надёжнее move поверх.
     script = (
         '@echo off\r\n'
-        'chcp 65001 >nul\r\n'
-        f'title Обновление SR Mods Launcher\r\n'
+        'title SR Mods Launcher update\r\n'
+        'setlocal\r\n'
+        'set "DIR=%~dp0"\r\n'
+        f'set "EXE=%DIR%{current_exe.name}"\r\n'
+        f'set "NEW=%DIR%{new_exe.name}"\r\n'
+        f'set "BAK=%DIR%{bak.name}"\r\n'
+        'if exist "%BAK%" del /F /Q "%BAK%" >nul 2>&1\r\n'
+        'move /Y "%EXE%" "%BAK%" >nul 2>&1\r\n'
+        'move /Y "%NEW%" "%EXE%" >nul 2>&1\r\n'
+        # новая версия не встала → вернуть прежнюю, чтобы игрок не остался без лаунчера
+        'if not exist "%EXE%" move /Y "%BAK%" "%EXE%" >nul 2>&1\r\n'
+        'set /a TRIES=0\r\n'
         ':wait\r\n'
-        f'tasklist /FI "PID eq {pid}" 2>nul | find "{pid}" >nul\r\n'
-        'if not errorlevel 1 (\r\n'
-        '  timeout /t 1 /nobreak >nul\r\n'
-        '  goto wait\r\n'
-        ')\r\n'
-        f'if exist "{bak}" del /F /Q "{bak}" >nul 2>&1\r\n'
-        f'move /Y "{current_exe}" "{bak}" >nul 2>&1\r\n'
-        f'move /Y "{new_exe}" "{current_exe}" >nul 2>&1\r\n'
-        f'if exist "{bak}" del /F /Q "{bak}" >nul 2>&1\r\n'
-        f'start "" "{current_exe}"\r\n'
+        'if not exist "%BAK%" goto done\r\n'
+        'del /F /Q "%BAK%" >nul 2>&1\r\n'
+        'if not exist "%BAK%" goto done\r\n'
+        'set /a TRIES+=1\r\n'
+        'if %TRIES% GEQ 60 goto done\r\n'         # ~2 минуты и хватит ждать
+        'ping -n 3 127.0.0.1 >nul\r\n'
+        'goto wait\r\n'
+        ':done\r\n'
+        'start "" "%EXE%"\r\n'
         'del "%~f0"\r\n'
     )
-    bat.write_text(script, encoding='utf-8')
-    DETACHED_PROCESS = 0x00000008
+    try:                                  # OEM-кодировка консоли (RU Windows → cp866)
+        import ctypes
+        enc = 'cp%d' % ctypes.windll.kernel32.GetOEMCP()
+        bat.write_text(script, encoding=enc)
+    except Exception:
+        bat.write_text(script, encoding='utf-8')
+    # БЕЗ DETACHED_PROCESS: у отцепленного процесса нет консоли, а cmd без консоли теряет
+    # кодовую страницу и читает текст батника мусором — путь/имя с кириллицей ломались.
+    # CREATE_NO_WINDOW даёт СВОЮ консоль (скрытую, окно не мигает) с нормальной OEM-CP;
+    # CREATE_NEW_PROCESS_GROUP отвязывает помощника от закрывающегося лаунчера.
     CREATE_NEW_PROCESS_GROUP = 0x00000200
     CREATE_NO_WINDOW = 0x08000000
     subprocess.Popen(['cmd', '/c', str(bat)],
-                     creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
+                     creationflags=CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
                      close_fds=True, cwd=str(current_exe.parent))
     log('Помощник обновления запущен — лаунчер закроется и перезапустится.')
 
 
 def _parallel_fetch_extract(need, mods_dir, tmp, resolver, log,
                             should_cancel=None, part_cb=None,
-                            workers=None, byte_cb=None, sha_sink=None):
+                            workers=None, byte_cb=None, sha_sink=None, chunk_cb=None):
     """Скачать нужные части ПАРАЛЛЕЛЬНО и извлечь файлы во все целевые пути.
 
     need: {chunk_name: {sha256: [(relpath, kind), ...]}}.
-    resolver(chunk, cpath, should_cancel, byte_cb): скачать часть chunk в файл cpath.
+    resolver(chunk, cpath, should_cancel, byte_cb, progress_cb): скачать часть chunk в cpath.
+    chunk_cb(chunk, done_bytes, total_bytes) — прогресс ВНУТРИ части (для плавной полосы;
+    done==total означает «часть докачана»).
     Параллелится только СКАЧИВАНИЕ (узкое место — сеть); распаковка/запись идут в
     главном потоке по мере готовности частей → на диске одновременно не больше
     ~workers скачанных частей. Кооперативная отмена и побайтовые ретраи сохранены.
@@ -230,7 +262,10 @@ def _parallel_fetch_extract(need, mods_dir, tmp, resolver, log,
     def fetch(chunk):
         _check_cancel(should_cancel)
         cpath = tmp / f'_chunk_{chunk}'
-        resolver(chunk, cpath, should_cancel, byte_cb)   # ретраи внутри _stream_download
+        pcb = (lambda d, t, _c=chunk: chunk_cb(_c, d, t)) if chunk_cb else None
+        resolver(chunk, cpath, should_cancel, byte_cb, pcb)  # ретраи внутри _stream_download
+        if chunk_cb:
+            chunk_cb(chunk, 1, 1)                        # часть скачана целиком
         return chunk, cpath
 
     done = 0
@@ -472,7 +507,7 @@ def list_unit_mods(repo, camp, unit, token):
 def reconstruct_unit(repo, camp, unit, mods_dir, token, progress_cb=None,
                      log=print, tmp_dir=None, dry_run=False, mod=None, should_cancel=None,
                      part_cb=None, byte_cb=None, sha_sink=None, skip_present=False,
-                     fork_files=None, fork_index=None):
+                     fork_files=None, fork_index=None, chunk_cb=None):
     """Собрать юнит (или один мод mod=mod_key) из HF: код И ассеты берутся из
     content-addressed чанков asset_index по code.manifest + assets.manifest.
     mod=None -> весь юнит; mod='Кат/Имя' или '_base' -> только этот мод.
@@ -547,42 +582,42 @@ def reconstruct_unit(repo, camp, unit, mods_dir, token, progress_cb=None,
         return stats
 
     # Скачать нужные части ПАРАЛЛЕЛЬНО и извлечь файлы во все целевые пути.
-    def resolve(chunk, cpath, sc, bcb):
+    def resolve(chunk, cpath, sc, bcb, pcb=None):
         meta = index['chunks'].get(chunk, {})
         url = meta.get('url')
         if url:                                  # HF public / любой прямой URL
             ctoken = token if meta.get('store') == 'github' else None
-            download_url(url, ctoken, cpath, None, sc, bcb)
+            download_url(url, ctoken, cpath, pcb, sc, bcb)
         else:                                    # back-compat: GitHub release по тегу
             tag = meta.get('release_tag')
             crel = release_by_tag(repo, tag, token)
             casset = next((a for a in crel.get('assets', []) if a['name'] == chunk), None)
             if not casset:
                 raise RuntimeError(f'часть {chunk}: нет ссылки/релиза')
-            download_asset(casset, token, cpath, None, sc, bcb)
+            download_asset(casset, token, cpath, pcb, sc, bcb)
 
     _parallel_fetch_extract(need, mods_dir, tmp, resolve, log,
                             should_cancel=should_cancel, part_cb=part_cb, byte_cb=byte_cb,
-                            sha_sink=sha_sink)
+                            sha_sink=sha_sink, chunk_cb=chunk_cb)
     log(f'Готово: {stats["code_files"]} код + {stats["asset_files"]} ассетов в {mods_dir}')
     return stats
 
 
 def reconstruct_camp(repo, camp, units, mods_dir, token, log=print, tmp_dir=None,
                      should_cancel=None, part_cb=None, byte_cb=None, sha_sink=None,
-                     dry_run=False):
+                     dry_run=False, chunk_cb=None):
     """Установить ВЕСЬ лагерь одним идемпотентным проходом (обёртка над reconstruct_multi:
     все юниты одного лагеря camp). См. reconstruct_multi. Прунинг не включаем — лагерь и так
     ставится полным набором, а per-мод сироты чистит install_descriptor."""
     umulti = [{**u, 'camp': u.get('camp', camp)} for u in units]
     return reconstruct_multi(repo, umulti, mods_dir, token, log=log, tmp_dir=tmp_dir,
                              should_cancel=should_cancel, part_cb=part_cb, byte_cb=byte_cb,
-                             sha_sink=sha_sink, dry_run=dry_run)
+                             sha_sink=sha_sink, dry_run=dry_run, chunk_cb=chunk_cb)
 
 
 def reconstruct_multi(repo, units, mods_dir, token, log=print, tmp_dir=None,
                       should_cancel=None, part_cb=None, byte_cb=None, sha_sink=None,
-                      dry_run=False, prune_snap_id=None, snap_dir=None):
+                      dry_run=False, prune_snap_id=None, snap_dir=None, chunk_cb=None):
     """Установить НЕСКОЛЬКО юнитов (возможно из РАЗНЫХ лагерей и с фильтром на один мод)
     одним идемпотентным проходом.
 
@@ -699,23 +734,23 @@ def reconstruct_multi(repo, units, mods_dir, token, log=print, tmp_dir=None,
     if dry_run:
         return stats
 
-    def resolve(chunk, cpath, sc, bcb):
+    def resolve(chunk, cpath, sc, bcb, pcb=None):
         meta = index['chunks'].get(chunk, {})
         url = meta.get('url')
         if url:                                  # HF public / любой прямой URL
             ctoken = token if meta.get('store') == 'github' else None
-            download_url(url, ctoken, cpath, None, sc, bcb)
+            download_url(url, ctoken, cpath, pcb, sc, bcb)
         else:                                    # back-compat: GitHub release по тегу
             tag = meta.get('release_tag')
             crel = release_by_tag(repo, tag, token)
             casset = next((a for a in crel.get('assets', []) if a['name'] == chunk), None)
             if not casset:
                 raise RuntimeError(f'часть {chunk}: нет ссылки/релиза')
-            download_asset(casset, token, cpath, None, sc, bcb)
+            download_asset(casset, token, cpath, pcb, sc, bcb)
 
     _parallel_fetch_extract(need, mods_dir, tmp, resolve, log,
                             should_cancel=should_cancel, part_cb=part_cb, byte_cb=byte_cb,
-                            sha_sink=sha_sink)
+                            sha_sink=sha_sink, chunk_cb=chunk_cb)
     # прунинг сирот слитого набора (п.10): файлы прошлого снимка набора, которых нет в
     # новом eff, — только модовые и только если disk-sha == снимку (правки игрока целы).
     # Псевдо-дескриптор из eff переиспользует prune_orphans_by_snapshot/снимок набора.
@@ -1684,7 +1719,8 @@ def load_chunk_index(desc=None, url=None, repo=None, token=None):
 
 def install_descriptor(desc, mods_dir, index, token=None, progress_cb=None,
                        log=print, tmp_dir=None, dry_run=False, snap_dir=None,
-                       should_cancel=None, part_cb=None, byte_cb=None, sha_sink=None):
+                       should_cancel=None, part_cb=None, byte_cb=None, sha_sink=None,
+                       chunk_cb=None):
     """Установить мод из дескриптора: блобы (code+assets) резолвятся по sha через index
     -> чанки -> извлечение -> запись в mods_dir/install_relpath(relpath)."""
     mods_dir = Path(mods_dir)
@@ -1712,14 +1748,14 @@ def install_descriptor(desc, mods_dir, index, token=None, progress_cb=None,
         + (f', НЕ найдено файлов: {stats["missing"]}' if stats['missing'] else ''))
     if dry_run:
         return stats
-    def resolve(chunk, cpath, sc, bcb):
+    def resolve(chunk, cpath, sc, bcb, pcb=None):
         meta = index['chunks'].get(chunk, {})
         ctoken = token if meta.get('store') == 'github' else None
-        download_url(meta.get('url'), ctoken, cpath, None, sc, bcb)
+        download_url(meta.get('url'), ctoken, cpath, pcb, sc, bcb)
 
     _parallel_fetch_extract(need, mods_dir, tmp, resolve, log,
                             should_cancel=should_cancel, part_cb=part_cb, byte_cb=byte_cb,
-                            sha_sink=sha_sink)
+                            sha_sink=sha_sink, chunk_cb=chunk_cb)
     # убрать файлы-сироты прошлого варианта/версии этого мода (по прошлому снимку),
     # ДО сохранения нового снимка — иначе на диске остаются лишние файлы (п.10)
     prune_orphans_by_snapshot(mods_dir, desc, snap_dir, log)
@@ -1730,7 +1766,7 @@ def install_descriptor(desc, mods_dir, index, token=None, progress_cb=None,
 
 
 def install_set(plan, mods_dir, index, token=None, log=print, tmp_dir=None, dry_run=False,
-                should_cancel=None, part_cb=None, byte_cb=None, sha_sink=None):
+                should_cancel=None, part_cb=None, byte_cb=None, sha_sink=None, chunk_cb=None):
     """Установить весь разрешённый набор (resolve_set -> план). Ставит все mods плана."""
     results = {}
     for mid in plan['order']:
@@ -1738,7 +1774,8 @@ def install_set(plan, mods_dir, index, token=None, log=print, tmp_dir=None, dry_
         results[mid] = install_descriptor(plan['mods'][mid], mods_dir, index,
                                           token=token, log=log, tmp_dir=tmp_dir,
                                           dry_run=dry_run, should_cancel=should_cancel,
-                                          part_cb=part_cb, byte_cb=byte_cb, sha_sink=sha_sink)
+                                          part_cb=part_cb, byte_cb=byte_cb, sha_sink=sha_sink,
+                                          chunk_cb=chunk_cb)
     return results
 
 
@@ -1758,7 +1795,11 @@ def install_set(plan, mods_dir, index, token=None, log=print, tmp_dir=None, dry_
 # пользователя, с привязкой к конкретной инсталляции по пути Mods.
 # После применения обновления снимок := манифест новой версии (то, что отгрузил
 # мод) — он и есть общий предок для следующего 3-way; на диске при этом может
-# остаться правка игрока (это `mine` в следующий раз).
+# остаться правка игрока (это `mine` в следующий раз). ВАЖНО: только для файлов,
+# которые реально приняли новую версию. Там, где игрок оставил свой файл (решение
+# 'mine'/'both') или блоб не скачался, в снимке остаётся ПРЕЖНЯЯ база — иначе
+# base==theirs и следующая проверка сочтёт расхождение правкой игрока, а мод
+# навсегда пропадёт из списка обновлений (см. save_snapshot_from_desc/overrides).
 # ---------------------------------------------------------------------------
 
 TEXT_EXTS = {
@@ -1825,9 +1866,21 @@ def load_install_snapshot(mods_dir, mod_id, snap_dir=None):
     return None
 
 
-def save_snapshot_from_desc(mods_dir, desc, snap_dir=None):
-    """Снимок из дескриптора: {relpath: sha256}. Вызывается после установки/обновления."""
+def save_snapshot_from_desc(mods_dir, desc, snap_dir=None, overrides=None):
+    """Снимок из дескриптора: {relpath: sha256}. Вызывается после установки/обновления.
+
+    overrides — {relpath: sha|None} для файлов, которые НЕ приняли новую версию (игрок
+    оставил свой / блоб не скачался). Снимок обязан описывать то, что реально лежит на
+    диске: если записать туда новую sha для файла, который мы не писали, следующая
+    проверка обновлений увидит base==theirs и посчитает расхождение «правкой игрока» →
+    мод навсегда исчезнет из обновлений (см. plan_actionable_sha, ветка player_only).
+    None в overrides = убрать запись (базы для этого файла нет)."""
     flat = {rp: m['sha256'] for rp, m in desc_files_flat(desc).items()}
+    for rp, sha in (overrides or {}).items():
+        if sha:
+            flat[rp] = sha
+        else:
+            flat.pop(rp, None)
     return save_install_snapshot(mods_dir, desc.get('id'), desc.get('version'),
                                  flat, desc.get('source'), snap_dir)
 
@@ -1883,7 +1936,7 @@ def prune_orphans_by_snapshot(mods_dir, desc, snap_dir=None, log=print):
 
 
 def fetch_blobs(index, shas, token, tmp, log=print, progress_cb=None, should_cancel=None,
-                byte_cb=None, part_cb=None):
+                byte_cb=None, part_cb=None, chunk_cb=None):
     """Скачать блобы по sha256 из content-addressed чанков. -> {sha: bytes}.
     Чанк скачивается один раз, из него извлекаются все нужные блобы."""
     tmp = Path(tmp)
@@ -1906,7 +1959,10 @@ def fetch_blobs(index, shas, token, tmp, log=print, progress_cb=None, should_can
         meta = index['chunks'].get(chunk, {})
         cpath = tmp / f'_chunk_{chunk}'
         ctoken = token if meta.get('store') == 'github' else None
-        download_url(meta['url'], ctoken, cpath, None, should_cancel, byte_cb)
+        pcb = (lambda d, t, _c=chunk: chunk_cb(_c, d, t)) if chunk_cb else None
+        download_url(meta['url'], ctoken, cpath, pcb, should_cancel, byte_cb)
+        if chunk_cb:
+            chunk_cb(chunk, 1, 1)                     # часть скачана целиком
         return chunk, cpath
 
     workers = max(1, min(PARALLEL_DOWNLOADS, len(chunks)))
@@ -2118,7 +2174,7 @@ def summarize_plan(actions):
 
 def apply_update_plan(desc, plan, decisions, mods_dir, index, token=None, log=print,
                       snap_dir=None, tmp_dir=None, progress_cb=None, dry_run=False,
-                      should_cancel=None, byte_cb=None, part_cb=None):
+                      should_cancel=None, byte_cb=None, part_cb=None, chunk_cb=None):
     """Применить план обновления. decisions: {relpath: решение} для conflict_*:
       conflict_text/binary -> 'mine' | 'theirs' | 'both' (both: новая рядом как .srnew)
       conflict_deleted     -> 'keep' | 'delete'
@@ -2140,10 +2196,14 @@ def apply_update_plan(desc, plan, decisions, mods_dir, index, token=None, log=pr
     need_theirs.discard(None)
     blobs = ({} if dry_run else
              fetch_blobs(index, need_theirs, token, tmp, log, progress_cb, should_cancel,
-                         byte_cb=byte_cb, part_cb=part_cb))
+                         byte_cb=byte_cb, part_cb=part_cb, chunk_cb=chunk_cb))
 
     stats = {'written': 0, 'merged': 0, 'kept': 0, 'deleted': 0,
              'sidecar': 0, 'conflict': 0, 'skipped': 0}
+    # файлы, которые НЕ приняли новую версию (игрок оставил свой / блоб не скачался):
+    # в снимок для них идёт ПРЕЖНЯЯ база, а не sha новой версии — иначе следующая
+    # проверка сочтёт расхождение правкой игрока и мод молча выпадет из обновлений.
+    keep_base = {}
     for r in actions:
         st, rp, tsha = r['status'], r['relpath'], r.get('theirs')
         fp = mods_dir / install_relpath(rp)
@@ -2153,6 +2213,7 @@ def apply_update_plan(desc, plan, decisions, mods_dir, index, token=None, log=pr
             data = blobs.get(tsha)
             if data is None:
                 stats['skipped'] += 1
+                keep_base[rp] = r.get('base')      # файл не записан → база прежняя
             elif not dry_run:
                 fp.parent.mkdir(parents=True, exist_ok=True)
                 fp.write_bytes(data)
@@ -2190,13 +2251,15 @@ def apply_update_plan(desc, plan, decisions, mods_dir, index, token=None, log=pr
                     side.parent.mkdir(parents=True, exist_ok=True)
                     side.write_bytes(data)
                 stats['sidecar'] += 1
+                keep_base[rp] = r.get('base')  # сам файл остался прежним (новая — рядом)
             else:                              # 'mine' — оставить файл игрока
                 stats['kept'] += 1
+                keep_base[rp] = r.get('base')
         else:                                  # unchanged / player_only
             stats['kept'] += 1
 
     if not dry_run:
-        save_snapshot_from_desc(mods_dir, desc, snap_dir)
+        save_snapshot_from_desc(mods_dir, desc, snap_dir, overrides=keep_base)
     return stats
 
 

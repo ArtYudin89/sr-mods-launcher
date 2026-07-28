@@ -261,6 +261,10 @@ input:focus-visible,select:focus-visible,textarea:focus-visible,
 .b-avail{background:rgba(70,201,139,.18);color:var(--ok);}
 .b-miss{background:rgba(240,99,90,.18);color:var(--danger);}
 .b-unknown{background:rgba(240,181,74,.18);color:var(--warn);}
+/* 🔒 «не обновляется» — мод исключён игроком из обновлений (отзыв 1) */
+.b-frozen{background:transparent;color:var(--muted);}
+.frz-mark{font-size:11px;margin-right:3px;opacity:.75;cursor:default;}
+.row.leaf.frozen-mod .label{opacity:.85;}
 .b-load{background:var(--chip);color:var(--muted);}
 .tag{font-size:11px;color:var(--muted);background:var(--chip);border-radius:6px;padding:1px 8px;}
 /* счётчик включённых модов группы в колонках «В игре» / «В профиле» */
@@ -278,6 +282,8 @@ input:focus-visible,select:focus-visible,textarea:focus-visible,
 .bar{height:8px;background:var(--bg);border-radius:6px;overflow:hidden;position:relative;}
 .bar > i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--accent),var(--accent-2));border-radius:6px;transition:width .25s;}
 .bar.pulse > i{width:35%!important;animation:pulse 1.1s ease-in-out infinite;}
+/* ⏸ пауза: полоса замирает и гаснет, чтобы её не путали с «висит» */
+.bar.paused > i{animation:none;opacity:.45;filter:grayscale(.6);}
 @keyframes pulse{0%{margin-left:-35%;}100%{margin-left:100%;}}
 
 /* боковая панель */
@@ -299,6 +305,7 @@ input:focus-visible,select:focus-visible,textarea:focus-visible,
 .scount .sc-sep{color:var(--muted);font-weight:400;opacity:.5;}
 .sc.b-ok{color:var(--muted);} .sc.b-upd{color:var(--accent-2);} .sc.b-queued{color:var(--accent);}
 .sc.b-avail{color:var(--ok);} .sc.b-miss{color:var(--danger);} .sc.b-unknown{color:var(--warn);} .sc.b-load{color:var(--muted);}
+.sc.b-frozen{color:var(--muted);}
 .side-foot{padding:9px 14px;border-top:1px solid var(--line);display:flex;align-items:center;gap:10px;font-size:11.5px;color:var(--muted);}
 #verBadge.upd{color:var(--accent);font-weight:600;}
 .dot{width:7px;height:7px;border-radius:50%;background:var(--danger);display:inline-block;}
@@ -405,7 +412,9 @@ input:focus-visible,select:focus-visible,textarea:focus-visible,
 /* во время операции интерактив тулбара/таблицы заблокирован (прокрутка остаётся) */
 /* .seg-b — кнопки выбора в окне «Решения по обновлению»; оно ПОКАЗЫВАЕТСЯ во время
    операции (busy) и ждёт решения игрока → блокировать их нельзя, иначе выбор недоступен */
-body.busy .seg button:not(.seg-b),body.busy .icon-btn{opacity:.5;pointer-events:none;}
+/* .busy-ok — то, что во время операции остаётся живым (настройки, справка, тема,
+   сворачивание групп, журнал): смотреть и искать можно всегда (отзыв 3) */
+body.busy .seg button:not(.seg-b),body.busy .icon-btn:not(.busy-ok){opacity:.5;pointer-events:none;}
 body.busy .base-pick{opacity:.5;pointer-events:none;}
 body.busy .toggle.click{pointer-events:none;opacity:.5;}
 .popover{
@@ -507,6 +516,9 @@ body.busy .toggle.click{pointer-events:none;opacity:.5;}
 .lbl-redux{background:#5a1717;color:#ff7a72;border:1px solid #7a2222;}
 .lbl-orig,.lbl-original{background:#3a3320;color:#f0c870;border:1px solid #5a4d2a;}
 .lbl-shared{background:#1f3a33;color:#67d6b0;border:1px solid #2e5a4d;}
+/* «Откуда» в карточке мода: пак(и), из которых собран мод (отзыв 5) */
+.src-pack{display:inline-block;padding:1px 7px;border-radius:6px;background:var(--row-hover);
+  border:1px solid var(--line);font-size:11.5px;margin:1px 0;}
 /* маркер «патчит файлы игры вне Mods» */
 .game-root-mark{margin-left:6px;color:var(--warn);cursor:help;font-size:12px;}
 /* переключатель варианта мода (Pol/Shu) в строке */
@@ -689,11 +701,20 @@ body.busy .toggle.click{pointer-events:none;opacity:.5;}
   color:var(--muted);border-radius:7px;font-size:14px;cursor:pointer;margin-left:2px;}
 .step-reset:hover{border-color:var(--line);color:var(--fg);}
 
-/* значок «?» — подсказка у названия группы настроек (текст в title, нативная всплывашка) */
+/* значок «?» — подсказка у названия группы настроек. Клик открывает плашку .help-tip
+   (наведение тоже работает, пока плашку не открыли) */
 .help-q{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;
   border-radius:50%;border:1px solid var(--line);color:var(--muted);font-size:10px;font-weight:700;
-  margin-left:6px;cursor:help;vertical-align:middle;text-transform:none;letter-spacing:0;}
-.help-q:hover{border-color:var(--accent);color:var(--accent);}
+  margin-left:6px;cursor:pointer;vertical-align:middle;text-transform:none;letter-spacing:0;}
+.help-q:hover{border-color:var(--accent);color:var(--accent);background:var(--row-hover);}
+.help-q:focus-visible{outline:2px solid var(--accent);outline-offset:1px;}
+.help-tip{position:fixed;z-index:120;max-width:360px;background:var(--panel);color:var(--fg);
+  border:1px solid var(--line);border-radius:10px;padding:10px 30px 10px 12px;font-size:12.5px;
+  line-height:1.45;box-shadow:0 10px 30px rgba(0,0,0,.45);text-transform:none;letter-spacing:0;
+  font-weight:400;white-space:normal;}
+.help-tip-x{position:absolute;top:4px;right:5px;background:none;border:0;color:var(--muted);
+  cursor:pointer;font-size:12px;line-height:1;padding:3px 5px;border-radius:6px;}
+.help-tip-x:hover{color:var(--fg);background:var(--row-hover);}
 /* чекбоксы в левом рельсе (перенесённые из настроек) */
 .rail-chk{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--fg);cursor:pointer;
   padding:2px 4px;border-radius:6px;white-space:nowrap;}

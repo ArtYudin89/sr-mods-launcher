@@ -48,9 +48,11 @@ def base_catalog():
 def fresh():
     a = app.Api.__new__(app.Api)
     a.busy = False; a._cancel = threading.Event(); a._updates = {}
+    a._paused = threading.Event(); a._chunk_prog = {}; a._chunk_lock = threading.Lock()
     a.profile = {'name': 't', 'game_path': '', 'mods': [], 'enabled': [], 'variants': {}}
     a._save_profile = lambda: None; a._emit = lambda *x, **k: None; a.log = lambda *x: None
     a._camps_idx = None; a._descs = {}; a._names = {}
+    a.config = {'mod_meta': {}}
     a._catalog_cache = base_catalog()
     # паки: huk_fixes — фикс-слой huk_mods (fix_parent) → схлоп; huk/solyanka — независимы
     a._fixparent = {'huk_fixes': 'huk_mods'}

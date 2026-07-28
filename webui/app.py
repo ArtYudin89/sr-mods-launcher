@@ -14,6 +14,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -97,7 +98,7 @@ IS_RWT = bool(EMBEDDED_TOKEN)
 # из репозитория ({version, url?, notes?}). url можно оставить пустым — тогда показ без
 # ссылки на скачивание (просто «доступна новая версия»).
 # ВНИМАНИЕ: при релизе выставить реальный следующий номер (текущий публичный > 0.13.1).
-LAUNCHER_VERSION = '0.22.0'
+LAUNCHER_VERSION = '0.23.0'
 RELEASE_REF = 'state/launcher_release.json'
 # Ссылка на полную справку в репозитории (ИНСТРУКЦИЯ-ПРОСТАЯ.md, имя в percent-encoding —
 # кириллица в пути; так браузер откроет её без ручного кодирования).
@@ -135,8 +136,11 @@ DEFAULT_CONFIG = {
     # Пользовательские метаданные модов (глобально, по mid; переживают смену профиля):
     # {mid: {'hidden': bool, 'tags': [str], 'note': str}}. Скрытие убирает мод из списка
     # (пока не включён «показать скрытые»); теги — свои метки-фильтры; note — личная заметка.
+    # frozen — «не обновлять этот мод»: детект обновлений его пропускает, массовое
+    # обновление не трогает (игрок правил мод руками / доволен текущей версией).
     'mod_meta': {},
     'show_hidden': False,        # показывать ли скрытые моды в списке
+    'freeze_hidden': False,      # считать скрытые моды замороженными (не обновлять)
     'desc_in_list': False,       # показывать полное описание прямо в строке (иначе только (i))
     # Доступность/адаптация под разные экраны (HD/FullHD): масштаб всего интерфейса
     # (проценты; применяется как CSS zoom) и уровень контраста текста/линий (проценты;
@@ -240,6 +244,9 @@ class Api:
         # рантайм-состояние
         self.busy = False
         self._cancel = threading.Event()
+        self._paused = threading.Event()   # ⏸ пауза операции (гейт в should_cancel)
+        self._chunk_prog = {}              # chunk -> доля скачанного (плавная полоса)
+        self._chunk_lock = threading.Lock()
         self._catalog_cache = None
         self._packs_cache = None
         self._camps_idx = None             # (by_base, by_leaf) -> множества сборок мода
@@ -683,6 +690,7 @@ class Api:
             return {'ok': False, 'error': 'Сначала укажите папку игры.'}
         self.busy = True
         self._cancel.clear()
+        self._begin_op()
         self._emit('op_begin', {'name': 'Проверка обновлений'})
         threading.Thread(target=self._check_updates_worker, daemon=True).start()
         return {'ok': True}
@@ -745,6 +753,7 @@ class Api:
                 fork_blobs |= set((fidx or {}).get('blobs', {}))
             avail |= fork_blobs
             ups = {}
+            frozen_n = 0
             unavail = 0
             umap = dict(unit_maps)                  # source -> {rel:sha}, для слияния стека
             # фикс-дети по источнику-родителю: 'camp/parent' -> {'camp/fix', …}. Агрегатор
@@ -762,6 +771,9 @@ class Api:
             for mid, m in idx.get('mods', {}).items():
                 if self.should_cancel():
                     raise core.OperationCancelled()
+                if self._is_frozen(mid):       # 🔒 «не обновлять» — даже не сверяем
+                    frozen_n += 1
+                    continue
                 disk = {rel: f['sha'] for rel, f in (m.get('files') or {}).items()}
                 allowed = src_by_base.get(mid)
                 if not allowed:                    # фолбэк по короткому имени (как в index_disk_mods)
@@ -810,6 +822,8 @@ class Api:
                 if n:
                     ups[mid] = {'n': n, 'camp': tcamp}
             self._updates = ups
+            if frozen_n:
+                self.log(f'Пропущено модов «не обновлять» (🔒): {frozen_n}.')
             if unavail:
                 self.vlog(f'(на сервере пока нет {unavail} файлов — они не учитываются)')
             for pm in self.profile.get('mods', []):
@@ -918,6 +932,7 @@ class Api:
             return {'ok': False, 'error': 'Сначала укажите папку игры.'}
         self.busy = True
         self._cancel.clear()
+        self._begin_op()
         self._emit('op_begin', {'name': 'Определение базы'})
         threading.Thread(target=self._autodetect_base_worker, daemon=True).start()
         return {'ok': True}
@@ -1019,7 +1034,37 @@ class Api:
         return ''
 
     def should_cancel(self):
+        """Кооперативная точка отмены — И ПАУЗЫ. Ядро дёргает её в каждом цикле
+        (по мегабайту скачивания, по файлу, между ретраями), поэтому пауза = просто
+        не возвращать управление, пока игрок не нажмёт «Продолжить». Отмена во время
+        паузы срабатывает сразу. Соединение может отвалиться по таймауту сервера —
+        на возобновлении _with_retries перекачает текущую часть заново."""
+        while self._paused.is_set() and not self._cancel.is_set():
+            time.sleep(0.2)
         return self._cancel.is_set()
+
+    def set_paused(self, val):
+        """⏸ Пауза / ▶ продолжение текущей операции (кнопка в полосе прогресса)."""
+        val = bool(val)
+        if val:
+            self._paused.set()
+            self.log('⏸ Пауза — операция приостановлена.')
+        else:
+            self._paused.clear()
+            self.log('▶ Продолжаю операцию.')
+        self._emit('op_paused', {'paused': val})
+        return {'ok': True, 'paused': val}
+
+    def is_paused(self):
+        return bool(self._paused.is_set())
+
+    def _begin_op(self):
+        """Сброс рантайм-состояния прогресса перед стартом любой операции."""
+        self._paused.clear()
+        self._parts_done = self._parts_total = 0
+        self._last_parts_emit = 0
+        with self._chunk_lock:
+            self._chunk_prog.clear()
 
     # ───────── состояние для фронта ─────────
     def get_state(self):
@@ -1045,6 +1090,7 @@ class Api:
             'rail_collapsed': self.config.get('rail_collapsed', False),
             'always_show_plan': self.config.get('always_show_plan', False),
             'show_hidden': self.config.get('show_hidden', False),
+            'freeze_hidden': self.config.get('freeze_hidden', False),
             'desc_in_list': self.config.get('desc_in_list', False),
             'ui_scale': self.config.get('ui_scale', 100),
             'text_scale': self.config.get('text_scale', 100),
@@ -1052,9 +1098,26 @@ class Api:
             'help_url': HELP_URL,
         }
 
+    def _clean_stale_update(self):
+        """Остался ли рядом скачанный <exe>.new.exe — значит прошлое автообновление не
+        применилось (помощник не сработал). Сообщаем в журнал и убираем файл, иначе он
+        лежит мёртвым грузом и следующая попытка выглядит так же молча."""
+        if not FROZEN:
+            return
+        try:
+            cur = Path(sys.executable).resolve()
+            stale = cur.with_name(cur.stem + '.new.exe')
+            if stale.exists():
+                self.log('⚠ Прошлое обновление лаунчера не применилось — файл '
+                         f'{stale.name} остался. Убрал его; попробуйте обновиться ещё раз.')
+                stale.unlink()
+        except Exception:
+            pass
+
     def check_self_update(self):
         """Проверить, вышла ли новая версия самого лаунчера (state/launcher_release.json
         в репозитории). Возвращает {'ok','update','version','current','url','notes'}."""
+        self._clean_stale_update()
         try:
             info = core._fetch_json(RELEASE_REF, self._repo(), self._token())
         except Exception as e:
@@ -1089,6 +1152,7 @@ class Api:
             return {'ok': False, 'error': 'Уже идёт операция.'}
         self.busy = True
         self._cancel.clear()
+        self._begin_op()
         self._emit('op_begin', {'name': 'Обновление лаунчера'})
         threading.Thread(target=self._self_update_worker, daemon=True).start()
         return {'ok': True}
@@ -1469,6 +1533,61 @@ class Api:
         out.sort(key=lambda v: v['name'])
         return out
 
+    def _source_info(self, mid):
+        """Откуда взялся мод: сборка + пак(и), чьи файлы лежат в его папке. Для карточки
+        (отзыв 5: «добавь инфу, из какого пака был мод установлен»).
+
+        Источник = выбранный/установленный вариант (`_chosen_variant` → `camp/unit`), плюс
+        фикс-паки этой же сборки, которые агрегатор сворачивает в тот же набор файлов
+        (fix_parent → родитель): по факту мод «собран» из базы + фиксов, и честнее
+        показать всю цепочку, а не только базовый пак. Порядок — load_order (как ставится).
+        None, если каталог/паки ещё не прогреты. Сети не трогает."""
+        if not mid:
+            return None
+        cat = self._catalog_cache or {}
+        if not cat:
+            return None
+        base = mid.split('@', 1)[0]
+        key = self._chosen_variant(mid) or self._installed_variant_key(mid) or ''
+        _bk, src = self._variant_ref(key) if key else (None, None)
+        if not src:
+            src = ((cat.get(key) or cat.get(base) or {}).get('default_source') or '')
+        if not src or '/' not in src:
+            return None
+        camp, unit = src.split('/', 1)
+        packs = getattr(self, '_packs_cache', None) or {}
+
+        def fam(u):                                  # цепочка фикс-паков → базовый пак
+            seen = set()
+            fp = getattr(self, '_fixparent', None) or {}
+            while u in fp and u not in seen:
+                seen.add(u); u = fp[u]
+            return u
+
+        root = fam(unit)
+        umaps = getattr(self, '_pub_cache_all', None)   # прогретые карты (без загрузки)
+        chain = []
+        for k, p in packs.items():
+            nm = p.get('name') or k.split('/')[-1]
+            if p.get('camp') != camp or fam(nm) != root:
+                continue
+            if nm != unit and umaps is not None:
+                # фикс-пак семьи показываем, только если он ДЕЙСТВИТЕЛЬНО несёт файлы
+                # этого мода (redux_fixes правит не всё подряд)
+                if not self._variant_files(mid.split('@', 1)[0], umaps, f'{camp}/{nm}'):
+                    continue
+            chain.append((k, p))
+        chain.sort(key=lambda kp: (kp[1].get('load_order') or 0, kp[0]))
+        role_ru = {'base': 'основа', 'fix': 'фиксы', 'fixes': 'фиксы'}
+        out = [{'unit': p.get('name') or k.split('/')[-1],
+                'title': (p.get('display_name') or '').strip() or (p.get('name') or ''),
+                'role': role_ru.get(p.get('tier') or p.get('role') or '', '')}
+               for k, p in chain]
+        if not out:                                  # паки не прогреты — хотя бы имя юнита
+            out = [{'unit': unit, 'title': unit, 'role': ''}]
+        return {'camp': camp, 'source': src, 'packs': out,
+                'choice': len(self._variants_of(mid) or []) > 1}
+
     def _dev_date(self, mid):
         """Дата последнего изменения файлов мода РАЗРАБОТЧИКОМ (из каталога/манифеста), а не
         дата установки на диск. Для versions_differ — mtime ВЫБРАННОГО варианта (у фикс-пака
@@ -1611,11 +1730,20 @@ class Api:
 
     # ───────── пользовательские метаданные модов (скрытие/теги/заметки) ─────────
     def _meta_of(self, mid):
-        """Метаданные мода {hidden, tags, note} из config['mod_meta'] с дефолтами."""
+        """Метаданные мода {hidden, frozen, tags, note} из config['mod_meta'] с дефолтами."""
         m = (self.config.get('mod_meta') or {}).get(mid) or {}
         return {'hidden': bool(m.get('hidden')),
+                'frozen': bool(m.get('frozen')),
                 'tags': list(m.get('tags') or []),
                 'note': str(m.get('note') or '')}
+
+    def _is_frozen(self, mid):
+        """Мод исключён из обновлений: явная пометка 🔒 или (по настройке) скрытый."""
+        if not mid:
+            return False
+        meta = self._meta_of(mid)
+        return bool(meta['frozen']
+                    or (meta['hidden'] and self.config.get('freeze_hidden', False)))
 
     def _set_meta(self, mid, _save=True, **kw):
         """Обновить (и по умолчанию сохранить) метаданные мода; пустую запись удаляем,
@@ -1628,6 +1756,7 @@ class Api:
         # нормализация + отбрасывание пустых значений
         rec = {k: v for k, v in rec.items()
                if not (k == 'hidden' and not v)
+               and not (k == 'frozen' and not v)
                and not (k == 'tags' and not v)
                and not (k == 'note' and not v)}
         if rec:
@@ -1651,6 +1780,38 @@ class Api:
     def set_mod_hidden(self, mid, val):
         """Скрыть/показать мод в списке (глобально)."""
         self._set_meta(mid, hidden=bool(val))
+        self._emit('tree_dirty')
+        return {'ok': True}
+
+    def set_mod_frozen(self, mid, val):
+        """🔒 Не обновлять этот мод: проверка обновлений его пропускает, массовое
+        «Обновить все» его не трогает. Строка получает статус «🔒 не обновляется»."""
+        self._set_meta(mid, frozen=bool(val))
+        if val:
+            self._updates.pop(mid, None)      # пометка «⬆ обновление» уходит сразу
+            for m in self.profile.get('mods', []):
+                if m.get('id') == mid:
+                    m['update_available'] = False
+        self._emit('tree_dirty')
+        return {'ok': True}
+
+    def set_mods_frozen(self, mids, val):
+        """Массово: заморозить/разморозить обновления у выбранных модов."""
+        for mid in (mids or []):
+            self._set_meta(mid, _save=False, frozen=bool(val))
+            if val:
+                self._updates.pop(mid, None)
+                for m in self.profile.get('mods', []):
+                    if m.get('id') == mid:
+                        m['update_available'] = False
+        self._save_config()
+        self._emit('tree_dirty')
+        return {'ok': True, 'n': len(mids or [])}
+
+    def set_freeze_hidden(self, val):
+        """Настройка: считать скрытые моды замороженными (не обновлять их)."""
+        self.config['freeze_hidden'] = bool(val)
+        self._save_config()
         self._emit('tree_dirty')
         return {'ok': True}
 
@@ -1803,6 +1964,9 @@ class Api:
                 info['conflicts_ref'].append(rc)
                 have.add(rc['mid'])
         info['dependents'] = self._dependents_of(mid) if mid else []
+        # откуда установлен: сборка + пак(и) — рядом с тегами/заметкой (отзыв 5)
+        info['source_info'] = self._source_info(mid) if mid else None
+        info['frozen'] = self._is_frozen(mid) if mid else False
         return {'ok': True, 'info': info}
 
     def _dep_ref(self, name):
@@ -2037,12 +2201,18 @@ class Api:
                 rows, key=lambda x: (x[0] or '', x[1] or '', x[3])):
             if only_attention and sc == 'ok':
                 continue
-            meta = self._meta_of(mid) if mid else {'hidden': False, 'tags': [], 'note': ''}
+            meta = (self._meta_of(mid) if mid
+                    else {'hidden': False, 'frozen': False, 'tags': [], 'note': ''})
             all_tags.update(meta['tags'])
             if meta['hidden']:
                 hidden_count += 1
                 if not show_hidden:
                     continue                       # скрытый мод — не показываем в списке
+            frozen = self._is_frozen(mid) if mid else False
+            if frozen and sc in ('ok', 'upd'):
+                # у замороженного мода пометки «⬆ обновление» быть не должно даже если она
+                # осталась от проверки ДО пометки — иначе игрок снова видит то, от чего ушёл
+                sc, st = 'frozen', '🔒 не обновляется'
             node = {
                 'iid': iid, 'label': label, 'kind': kind,
                 'name': (self._name_of(mid) if mid else label),
@@ -2056,6 +2226,8 @@ class Api:
                 'desc': (self._desc_of(mid) if mid else ''),
                 'full_desc': (self._full_desc_of(mid) if (mid and desc_in_list) else ''),
                 'hidden': meta['hidden'],
+                'frozen': frozen,
+                'frozen_by_hidden': bool(frozen and not meta['frozen']),
                 'tags': meta['tags'],
                 'note': meta['note'],
                 'has_info': bool(mid),
@@ -2091,6 +2263,7 @@ class Api:
             'all_tags': sorted(all_tags, key=lambda s: s.lower()),
             'hidden_count': hidden_count,
             'show_hidden': show_hidden,
+            'freeze_hidden': bool(self.config.get('freeze_hidden', False)),
             'desc_in_list': desc_in_list,
         }
 
@@ -2213,6 +2386,12 @@ class Api:
         return True
 
     def save_settings(self, game_path, repo, token, base):
+        # во время операции окно настроек ОТКРЫВАЕТСЯ (смотреть/менять оформление можно),
+        # но подмена папки игры/репозитория на лету увела бы текущую закачку мимо цели
+        if self.busy:
+            return {'ok': False, 'busy': True, 'error':
+                    'Идёт операция — папку игры и репозиторий можно сменить после её '
+                    'окончания. Оформление и прочее меняются свободно.'}
         self.profile['game_path'] = (game_path or '').strip()
         self.profile['base'] = (base or '').strip()
         self.config['repo'] = (repo or '').strip()
@@ -2549,6 +2728,8 @@ class Api:
 
     def cancel(self):
         self._cancel.set()
+        self._paused.clear()          # снять паузу, иначе поток застрянет в гейте
+        self._emit('op_paused', {'paused': False})
         self.log('Отмена запрошена…')
         return True
 
@@ -2564,6 +2745,7 @@ class Api:
             return {'ok': False, 'error': 'Ничего не выбрано.'}
         self.busy = True
         self._cancel.clear()
+        self._begin_op()
         self._emit('op_begin', {'name': 'Установка'})
         threading.Thread(target=self._install_worker, args=(indices,), daemon=True).start()
         return {'ok': True}
@@ -2575,10 +2757,38 @@ class Api:
 
     def _part_progress(self, done, total):
         self._parts_done, self._parts_total = done, total
-        self._emit('progress', {'pct': round(done / total * 100) if total else 0,
-                                 'parts': f'{done}/{total}', 'mode': 'parts',
-                                 'ctx': self._pack_ctx,
-                                 'gb': f'{self._dl_bytes / (1 << 30):.2f}'})
+        with self._chunk_lock:
+            self._chunk_prog.clear()          # часть готова — недокачанных долей нет
+        self._emit_parts(force=True)
+
+    def _chunk_progress(self, chunk, done, total):
+        """Прогресс ВНУТРИ скачиваемой части (полоса не стоит на месте между частями:
+        раньше она дёргалась раз в часть — на 300-мегабайтном чанке это выглядело как
+        зависание). Части качаются параллельно, поэтому копим доли по имени части."""
+        frac = (done / total) if total else 0
+        with self._chunk_lock:
+            if frac >= 1:
+                self._chunk_prog.pop(chunk, None)   # докачана — уйдёт в счётчик частей
+            else:
+                self._chunk_prog[chunk] = frac
+        self._emit_parts()
+
+    def _emit_parts(self, force=False):
+        # троттлинг: колбэк прилетает на каждый мегабайт каждой параллельной части,
+        # а каждый _emit — это evaluate_js в UI-поток. 5 обновлений в секунду хватает.
+        now = time.monotonic()
+        if not force and now - getattr(self, '_last_parts_emit', 0) < 0.2:
+            return
+        self._last_parts_emit = now
+        done, total = self._parts_done, self._parts_total
+        with self._chunk_lock:
+            extra = sum(self._chunk_prog.values())
+        pct = round(min(done + extra, total) / total * 100) if total else 0
+        self._emit('progress', {'pct': pct,
+                                'parts': f'{done}/{total}', 'mode': 'parts',
+                                'ctx': self._pack_ctx,
+                                'gb': f'{self._dl_bytes / (1 << 30):.2f}',
+                                'mb': f'{self._dl_bytes / (1 << 20):.0f}'})
 
     def _byte_progress(self, delta):
         with self._dl_lock:
@@ -2688,7 +2898,8 @@ class Api:
         core.reconstruct_multi(
             repo, units, mods_dir, tok, log=self.log, tmp_dir=ROOT,
             should_cancel=self.should_cancel, part_cb=self._part_progress,
-            byte_cb=self._byte_progress, prune_snap_id='__bulk_merge__')
+            byte_cb=self._byte_progress, prune_snap_id='__bulk_merge__',
+            chunk_cb=self._chunk_progress)
 
     def _install_one(self, m, mods_dir, tok):
         """Установить ОДНУ запись сборки (camp / unit / desc / zip)."""
@@ -2713,7 +2924,8 @@ class Api:
             core.reconstruct_camp(
                 m['repo'], m['camp'], ulist, mods_dir, tok,
                 log=self.log, tmp_dir=ROOT, should_cancel=self.should_cancel,
-                part_cb=self._part_progress, byte_cb=self._byte_progress)
+                part_cb=self._part_progress, byte_cb=self._byte_progress,
+                chunk_cb=self._chunk_progress)
         elif m.get('type') == 'unit':
             self._pack_ctx = m.get('name', m.get('unit', ''))
             ff, fidx = self._fork_unit_overlay(m['camp'], m['unit'])
@@ -2722,6 +2934,7 @@ class Api:
                 self._progress, self.log, tmp_dir=ROOT, mod=m.get('mod') or None,
                 should_cancel=self.should_cancel,
                 part_cb=self._part_progress, byte_cb=self._byte_progress,
+                chunk_cb=self._chunk_progress,
                 skip_present=True,             # «починка»: сверка хешей, качаем только отличия
                 fork_files=ff, fork_index=fidx)
         elif m.get('type') == 'desc':
@@ -2737,7 +2950,8 @@ class Api:
                 core.install_descriptor(
                     desc, mods_dir, idx, tok, self._progress, self.log,
                     tmp_dir=ROOT, should_cancel=self.should_cancel,
-                    part_cb=self._part_progress, byte_cb=self._byte_progress)
+                    part_cb=self._part_progress, byte_cb=self._byte_progress,
+                    chunk_cb=self._chunk_progress)
             else:
                 self.log('  дескриптор не найден в каталоге')
         else:
@@ -2757,6 +2971,7 @@ class Api:
             return {'ok': False, 'error': 'В профиле пока нет позиций. Нажмите «➕ Добавить мод».'}
         self.busy = True
         self._cancel.clear()
+        self._begin_op()
         self._emit('op_begin', {'name': 'Установка профиля'})
         threading.Thread(target=self._resolve_set_worker, daemon=True).start()
         return {'ok': True}
@@ -3025,14 +3240,23 @@ class Api:
         err = self._require_game()
         if err:
             return {'ok': False, 'error': err}
-        targets, skipped = [], 0
+        targets, skipped, frozen = [], 0, 0
         for iid in iids:
             if iid.startswith('d:'):
+                if self._is_frozen(iid[2:]):
+                    frozen += 1; continue      # 🔒 «не обновлять» — не трогаем
                 targets.append(('disk', iid[2:]))
             elif iid[1:].isdigit() and self.profile['mods'][int(iid[1:])].get('type') == 'desc':
-                targets.append(('profile', int(iid[1:])))
+                i = int(iid[1:])
+                if self._is_frozen(self.profile['mods'][i].get('id')):
+                    frozen += 1; continue
+                targets.append(('profile', i))
             else:
                 skipped += 1
+        if not targets and frozen:
+            return {'ok': False, 'error':
+                    'Все выбранные моды помечены 🔒 «не обновлять». Снимите пометку '
+                    '(ПКМ по строке), если хотите их обновить.'}
         if not targets:
             return {'ok': False, 'error':
                     'Выберите мод из профиля (добавленный из каталога/по ссылке) '
@@ -3043,9 +3267,12 @@ class Api:
         self._merge_remember = {}          # запомненные решения конфликтов (status -> code)
         self._merge_remember_on = False    # «больше не спрашивать» до конца серии
         self._silent_updates = []          # тихо применённые моды (для итогового тоста)
+        self._begin_op()
         self._emit('op_begin', {'name': 'Обновление'})
         if skipped:
             self.log(f'Пропущено {skipped} (паки/сборки — через «Установить»).')
+        if frozen:
+            self.log(f'Пропущено {frozen} с пометкой 🔒 «не обновлять».')
         threading.Thread(target=self._merge_next, daemon=True).start()
         return {'ok': True}
 
@@ -3541,11 +3768,19 @@ class Api:
                          daemon=True).start()
         return {'ok': True}
 
-    def merge_skip(self):
+    def merge_skip(self, freeze=False):
+        """Пропустить обновление этого мода. freeze=True — заодно пометить его 🔒
+        «не обновлять», чтобы не спрашивать про него каждый раз (отзыв 1)."""
         pm = getattr(self, '_pending_merge', None)
         self._pending_merge = None
         if pm:
             self.log(f'{pm["plan"].get("id")}: пропущено (изменения не применялись).')
+            if freeze:
+                tgt, desc = pm['target'], pm['desc']
+                mid = tgt[1] if tgt[0] == 'disk' else ((desc or {}).get('id') or '')
+                if mid:
+                    self.set_mod_frozen(mid, True)
+                    self.log(f'{mid}: помечен 🔒 «не обновлять» — больше не спрашиваю.')
         self._merge_next()
         return {'ok': True}
 
@@ -3560,7 +3795,8 @@ class Api:
                                            tmp_dir=ROOT, progress_cb=self._progress,
                                            should_cancel=self.should_cancel,
                                            byte_cb=self._byte_progress,
-                                           part_cb=self._part_progress)
+                                           part_cb=self._part_progress,
+                                           chunk_cb=self._chunk_progress)
             self.log(f'Применено: {stats}')
             # мод обновлён → снять пометку «⬆ обновление» (строка станет «✅ установлен»)
             upd_mid = target[1] if target[0] == 'disk' else (desc.get('id') if desc else None)
@@ -3587,6 +3823,7 @@ class Api:
             return {'ok': False, 'error': err}
         self.busy = True
         self._cancel.clear()
+        self._begin_op()
         self._emit('op_begin', {'name': 'Индексация'})
         threading.Thread(target=self._reindex_worker, daemon=True).start()
         return {'ok': True}
