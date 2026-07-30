@@ -176,25 +176,19 @@ def _mock_all_mods():
 
 
 def _mock_camp_packs():
+    """Формат ровно как у core.camp_packs: {лагерь: [запись, ...]} — СПИСОК записей.
+    Прежний мок отдавал {лагерь: {label, packs}}, из-за чего onAddCamp падал на
+    packs.forEach, и селект паков навсегда оставался disabled."""
+    def unit(camp, name, tier, lo, root=False):
+        return {'key': f'{camp}/{name}', 'camp': camp, 'unit': name, 'tier': tier,
+                'name': name, 'load_order': lo, 'shared': False, 'game_root': root}
     return {
         'ok': True,
         'camps': {
-            'redux': {
-                'label': 'ПБ «Свободная Бухта»',
-                'packs': [
-                    {'id': 'redux/redux_base_installer', 'name': 'redux_base_installer',
-                     'tier': 'base', 'bytes': 800_000_000},
-                    {'id': 'redux/FairansVision', 'name': 'FairansVision',
-                     'tier': 'fix', 'bytes': 300_000_000},
-                ],
-            },
-            'universe': {
-                'label': 'Space Rangers Universe (Community)',
-                'packs': [
-                    {'id': 'universe/universe_community', 'name': 'universe_community',
-                     'tier': 'base', 'bytes': 950_000_000},
-                ],
-            },
+            'redux': [unit('redux', 'redux_base_installer', 'base', 10, True),
+                      unit('redux', 'redux_fixes', 'fix', 20, True),
+                      unit('redux', 'FairansVision', 'mod', 50)],
+            'universe': [unit('universe', 'universe_community', 'base', 10, True)],
         },
     }
 
@@ -560,25 +554,26 @@ def scenario_tree_keyboard_nav(page, base_url):
               f'sel before={selected_before}, after={selected_after}')
         shot(page, '01g_space_select')
 
-    # i — открыть окно инфо о моде (правильный ID: infoOverlay)
+    # i — открыть карточку мода. Это НЕ модалка: openModInfo создаёт плавающую
+    # .mod-card прямо в body (прежнего #infoOverlay в разметке давно нет).
     if leaves.count() > 0:
         _focus_row(page, leaves.first)
         time.sleep(0.05)
         page.keyboard.press('i')
         time.sleep(0.5)
-        info_win_visible = page.evaluate(
-            "!document.getElementById('infoOverlay').classList.contains('hidden')"
-        )
-        check('i открывает окно инфо о моде', info_win_visible)
-        # Проверить что тело окна заполнилось (не только "Загрузка...")
-        info_body_text = page.text_content('#infoBody') if info_win_visible else ''
-        info_has_content = bool(info_body_text and 'Загрузка' not in info_body_text)
-        check('окно инфо показывает данные (не "Загрузка…")', info_has_content,
-              f'тело: {info_body_text[:80]!r}')
+        cards = page.locator('.mod-card')
+        card_open = cards.count() > 0
+        check('i открывает карточку мода', card_open)
+        # тело карточки должно заполниться данными (не остаться на «Загрузка…»)
+        card_text = page.text_content('.mod-card .mc-body') if card_open else ''
+        info_has_content = bool(card_text and 'Загрузка' not in card_text)
+        check('карточка мода показывает данные (не «Загрузка…»)', info_has_content,
+              f'тело: {card_text[:80]!r}')
         shot(page, '01h_mod_info')
-        if info_win_visible:
+        if card_open:
             page.keyboard.press('Escape')
-            time.sleep(0.2)
+            time.sleep(0.25)
+            check('Esc закрывает карточку мода', page.locator('.mod-card').count() == 0)
 
 
 def scenario_focus_trap(page, base_url):
@@ -806,6 +801,25 @@ def scenario_add_mod_dialog(page, base_url):
     )
     check('Фокус внутри диалога добавления', focus_in_add)
 
+    # Режим «Сборка → Пак → Мод»: вместо одного мутного «★ вся сборка» должно быть два
+    # явных пункта — движок сборки и её моды (и подсказка при выборе движка).
+    page.locator('#addModeSeg button[data-amode="src"]').click()
+    time.sleep(0.2)
+    page.select_option('#addCamp', 'redux')
+    time.sleep(0.3)
+    opts = page.evaluate(
+        "[...document.querySelectorAll('#addPack option')].map(o => o.value)")
+    check('в списке паков есть пункт «базовые файлы игры»', '__base__' in opts, str(opts[:4]))
+    check('в списке паков есть пункт «все моды сборки»', '__mods__' in opts, str(opts[:4]))
+    check('безымянного «вся сборка» больше нет',
+          not any(o == '' for o in opts), str(opts[:4]))
+    page.select_option('#addPack', '__base__')
+    time.sleep(0.25)
+    hint = page.text_content('#addStatus') or ''
+    check('движок поясняется (Rangers.exe + одна база)',
+          'Rangers.exe' in hint and 'одну базу' in hint, f'подсказка: {hint[:70]!r}')
+    shot(page, '06c_add_parts')
+
     # Закрыть Esc
     page.keyboard.press('Escape')
     time.sleep(0.2)
@@ -906,6 +920,11 @@ def scenario_clear_mods(page, base_url):
     print('\n=== Сц.9: Очистить Mods (двойное подтверждение) ===')
     init_page(page, base_url)
 
+    # «Очистить Mods» живёт в меню «⋯ Ещё» — без него кнопка в DOM есть, но невидима
+    page.locator('#moreBtn').click()
+    time.sleep(0.2)
+    check('меню «Ещё» открылось',
+          page.evaluate("!document.getElementById('moreMenu').classList.contains('hidden')"))
     clear_btn = page.locator('#clearModsBtn')
     clear_btn.click()
     time.sleep(0.3)

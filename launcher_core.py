@@ -106,13 +106,26 @@ def repo_file_bytes(repo, path, token, should_cancel=None, branch=None):
     упереться в анонимный лимит 60 запросов/час у api.github.com.
     С ретраями: нестабильная сеть/DPI рвут TLS — раньше падало по таймауту."""
     branch = branch or DEFAULT_BRANCH
+
+    def raw():
+        r = _SESSION.get(f'{RAW}/{repo}/{branch}/{path}', timeout=(10, 60))
+        r.raise_for_status()
+        return r.content
+
     def do():
-        if token:
-            r = _SESSION.get(f'{API}/repos/{repo}/contents/{path}',
-                             headers=_headers(token, 'application/vnd.github.raw'),
-                             timeout=(10, 60))
-        else:
-            r = _SESSION.get(f'{RAW}/{repo}/{branch}/{path}', timeout=(10, 60))
+        if not token:
+            return raw()
+        r = _SESSION.get(f'{API}/repos/{repo}/contents/{path}',
+                         headers=_headers(token, 'application/vnd.github.raw'),
+                         timeout=(10, 60))
+        # Негодный токен (протухший, чужой, от форка) не должен ослеплять лаунчер на
+        # ПУБЛИЧНОМ репозитории: 401/403 -> та же попытка анонимно через raw. Если репо
+        # и правда приватный, raw тоже ответит 404 — вернётся честная ошибка.
+        if r.status_code in (401, 403):
+            try:
+                return raw()
+            except requests.HTTPError:
+                pass
         r.raise_for_status()
         return r.content
     return _with_retries(do, should_cancel=should_cancel)
@@ -1657,15 +1670,20 @@ def order_modcfg(mods_dir, mod_ids):
     return sorted(mod_ids, key=lambda m: (mod_priority(mods_dir, m), m.replace('/', '\\')))
 
 
-def check_pack_compatibility(selected_units, packs, installed_base=None):
+def check_pack_compatibility(selected_units, packs, installed_base=None,
+                             extra_playable=False, extra_base=False):
     """Структурная совместимость НАБОРА на уровне паков (Фаза 2). Только показывает.
     selected_units: список ключей 'camp/unit'. packs: из load_packs.
     installed_base: имя базового юнита текущей установки (для предупреждения о сейвах).
+    extra_playable: в наборе есть моды ВНЕ паков (добавленные поштучно из каталога или
+      по одному моду пака) — базовых файлов игры они не несут, значит база им тоже нужна.
+    extra_base: базовые файлы игры в наборе уже есть иначе, чем целым base-паком
+      (запись «вся сборка» или отдельный псевдо-мод '_base').
     Возвращает: bases (выбранные базы), fixes, fix_orphans [(fix, нужный_родитель)],
       base_conflict (>1 базы), missing_base, save_warning, mandatory (base/fix к обновлению)."""
     present_names = {packs[u]['name'] for u in selected_units if u in packs}
     bases, fixes, fix_orphans, mandatory = [], [], [], []
-    has_playable = False           # есть ли в наборе моды/фиксы (им нужна база)
+    has_playable = bool(extra_playable)   # есть ли в наборе моды/фиксы (им нужна база)
     for u in selected_units:
         p = packs.get(u)
         if not p:
@@ -1692,8 +1710,10 @@ def check_pack_compatibility(selected_units, packs, installed_base=None):
     return {
         'bases': bases, 'fixes': fixes, 'fix_orphans': fix_orphans,
         'base_conflict': len(bases) > 1,
-        # «нет базы» — только если её нет ни в наборе, ни уже установленной на диске
-        'missing_base': len(bases) == 0 and not installed_base and has_playable,
+        # «нет базы» — только если её нет ни в наборе (базовым паком или иначе:
+        # «вся сборка» / отдельные базовые файлы), ни уже установленной на диске
+        'missing_base': (len(bases) == 0 and not extra_base
+                         and not installed_base and has_playable),
         'installed_base': installed_base,
         'save_warning': save_warning,
         'mandatory': mandatory,

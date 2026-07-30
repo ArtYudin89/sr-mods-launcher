@@ -121,8 +121,8 @@ check('нет индекса диска → окно не навязываем',
 
 print('\n=== clear_queue (отменить ВСЕ добавления) ===')
 a = fresh_api('redux'); a._repo = lambda: 'x/y'
-a.add_mod({'mode': 'src', 'camp': 'redux', 'pack': None, 'mod': ''})
-a.add_mod({'mode': 'src', 'camp': 'universe', 'pack': None, 'mod': ''})
+a.add_mod({'mode': 'src', 'camp': 'redux', 'pack': None, 'part': 'base'})
+a.add_mod({'mode': 'src', 'camp': 'universe', 'pack': None, 'part': 'mods'})
 r = a.clear_queue()
 check('clear_queue вернул число удалённых', 2, r['removed'])
 check('очередь пуста', [], a.profile['mods'])
@@ -324,6 +324,200 @@ a._pub_cache_all = [('redux/redux_base_installer', {'Cat/ModA/a.dat': 'A'}),
 si = a._source_info('Cat/ModA')
 check('фикс-пак без файлов этого мода не показывается', ['redux_base_installer'],
       [p['unit'] for p in si['packs']])
+
+print('\n=== база нужна и модам, набранным поштучно (Rangers.exe с ними не едет) ===')
+import launcher_core as lc
+PK = {'redux/redux_base_installer': {'camp': 'redux', 'name': 'redux_base_installer',
+                                     'tier': 'base', 'update_required': True}}
+# уровень ядра: extra_playable/extra_base
+check('только поштучные моды, базы нет → предупредить', True,
+      lc.check_pack_compatibility([], PK, extra_playable=True)['missing_base'])
+check('поштучные + база на диске → молчим', False,
+      lc.check_pack_compatibility([], PK, installed_base='redux_base_installer',
+                                  extra_playable=True)['missing_base'])
+check('поштучные + база в наборе иначе (сборка/_base) → молчим', False,
+      lc.check_pack_compatibility([], PK, extra_playable=True,
+                                  extra_base=True)['missing_base'])
+check('поштучные + base-пак целиком → молчим', False,
+      lc.check_pack_compatibility(['redux/redux_base_installer'], PK,
+                                  extra_playable=True)['missing_base'])
+check('пустой профиль → не придираемся', False,
+      lc.check_pack_compatibility([], PK)['missing_base'])
+
+def compat_texts(mods):
+    a = fresh_api('redux')
+    a._names = {}
+    a.config = {}
+    a._mods_dir = lambda: Path(r'C:\nonexistent_test_dir_zzz')   # базы на диске нет
+    a._repo = lambda: 'x/y'
+    a.profile['mods'] = mods
+    return ' | '.join(i['text'] for i in a.check_compat()['items'] if i['level'] == 'warn')
+
+warn = lambda mods: 'Rangers.exe' in compat_texts(mods)
+check('профиль из одних каталожных модов → предупреждение есть', True,
+      warn([{'type': 'desc', 'id': 'Cat/ModA'}]))
+check('профиль из одного мода пака → тоже (пак приехал без базовых файлов)', True,
+      warn([{'type': 'unit', 'camp': 'redux', 'unit': 'redux_base_installer',
+             'mod': 'Cat/ModA'}]))
+check('добавлена вся сборка → предупреждения нет', False,
+      warn([{'type': 'desc', 'id': 'Cat/ModA'}, {'type': 'camp', 'camp': 'redux'}]))
+check('добавлены базовые файлы игры (_base) → предупреждения нет', False,
+      warn([{'type': 'desc', 'id': 'Cat/ModA'},
+            {'type': 'unit', 'camp': 'redux', 'unit': 'redux_base_installer',
+             'mod': '_base'}]))
+check('добавлен base-пак целиком → предупреждения нет', False,
+      warn([{'type': 'desc', 'id': 'Cat/ModA'},
+            {'type': 'unit', 'camp': 'redux', 'unit': 'redux_base_installer', 'mod': ''}]))
+
+print('\n=== «Базовые файлы игры»: имя в UI и маршрут установки ===')
+a = fresh_api('redux'); a._repo = lambda: 'x/y'
+app.core.list_unit_mods = lambda repo, camp, unit, tok: ['_base', 'Cat/ModA']
+rows = a.get_unit_mods('redux', 'redux_base_installer')['mods']
+check('служебный ключ сохранён', '_base', rows[0]['key'])
+check('в списке — человеческое имя', app.BASE_MOD_LABEL, rows[0]['name'])
+check('есть пояснение, что это вне Mods', True, 'вне папки Mods' in rows[0]['desc'])
+a.add_mod({'mode': 'src', 'camp': 'redux',
+           'pack': {'camp': 'redux', 'unit': 'redux_base_installer', 'name': 'Redux'},
+           'mod': '_base'})
+check('в профиле запись названа по-человечески', app.BASE_MOD_LABEL,
+      a.profile['mods'][0]['name'])
+# маршрут: '_base' НЕ мод каталога — уходит в bulk (reconstruct_unit), а не в resolve_set
+a._token = lambda: None
+a._resolve_set_worker()
+ps = a._pending_set
+check('_base не ушёл в резолв каталога (иначе молча терялся)', 0,
+      len((ps['plan'] or {}).get('order', [])))
+check('_base поедет через bulk-ветку', ['_base'], [m.get('mod') for m in ps['bulk']])
+# строка в дереве профиля: служебный ключ не должен утечь в подпись ни в одном режиме
+a._names = {}
+check('_name_of не лезет за ModuleInfo к псевдо-моду', app.BASE_MOD_SHORT,
+      a._name_of('_base'))
+
+print('\n=== «вся сборка» разделена на движок и моды ===')
+def packs_full():
+    """Паки трёх сборок: база + фикс к базе + мод + фикс к моду."""
+    return {
+        'redux/redux_base_installer': {'camp': 'redux', 'name': 'redux_base_installer',
+                                       'tier': 'base', 'load_order': 10, 'bytes': 100},
+        'redux/redux_fixes': {'camp': 'redux', 'name': 'redux_fixes', 'tier': 'fix',
+                              'fix_parent': 'redux_base_installer', 'load_order': 20,
+                              'bytes': 10},
+        'redux/some_mods': {'camp': 'redux', 'name': 'some_mods', 'tier': 'mod',
+                            'load_order': 50, 'bytes': 30},
+        'redux/some_mods_fix': {'camp': 'redux', 'name': 'some_mods_fix', 'tier': 'fix',
+                                'fix_parent': 'some_mods', 'load_order': 60, 'bytes': 5},
+        'universe/universe_community': {'camp': 'universe', 'name': 'universe_community',
+                                        'tier': 'base', 'load_order': 10, 'bytes': 100},
+    }
+
+a = fresh_api('redux'); a._repo = lambda: 'x/y'; a._packs_cache = packs_full()
+pk = a._packs_cache
+names = lambda part: sorted(p['name'] for p in a._camp_part_packs('redux', pk, part))
+check('часть «движок» = база + фиксы К БАЗЕ',
+      ['redux_base_installer', 'redux_fixes'], names(app.PART_BASE))
+check('часть «моды» = моды + фиксы К МОДАМ',
+      ['some_mods', 'some_mods_fix'], names(app.PART_MODS))
+check('часть «all» (старые профили) = все паки сборки',
+      ['redux_base_installer', 'redux_fixes', 'some_mods', 'some_mods_fix'],
+      names(app.PART_ALL))
+# порядок установки: база → моды → фиксы модов → фиксы базы (tier в packs.json = 'fix',
+# сравнение только с 'fixes' делало ветку мёртвой и роняло фиксы в ранг обычного мода)
+check('фикс базы ставится ПОСЛЕ модов (ранг 3)', 3,
+      a._unit_install_rank(pk['redux/redux_fixes'], pk))
+check('фикс мода — ранг 2 (после модов, до фиксов базы)', 2,
+      a._unit_install_rank(pk['redux/some_mods_fix'], pk))
+check('размер части считается по её пакам', 110, a._item_bytes(
+    {'type': 'camp', 'camp': 'redux', 'part': app.PART_BASE}))
+
+print('\n=== запрет второй базы (движки разных сборок не смешиваем) ===')
+a = fresh_api('redux'); a._repo = lambda: 'x/y'; a._packs_cache = packs_full()
+r1 = a.add_mod({'mode': 'src', 'camp': 'redux', 'pack': None, 'part': 'base'})
+check('движок redux добавлен', True, bool(r1.get('ok')))
+r2 = a.add_mod({'mode': 'src', 'camp': 'universe', 'pack': None, 'part': 'base'})
+check('движок universe ОТКЛОНЁН', False, bool(r2.get('ok')))
+check('в отказе названа занявшая сборка', True, 'Свободная Бухта' in (r2.get('error') or ''))
+r3 = a.add_mod({'mode': 'src', 'camp': 'universe', 'pack': None, 'part': 'mods'})
+check('моды universe поверх базы redux — можно', True, bool(r3.get('ok')))
+r4 = a.add_mod({'mode': 'src', 'camp': 'redux', 'pack': None, 'part': 'base'})
+check('повторный движок той же сборки → dup, без дубля', True, bool(r4.get('dup')))
+check('в профиле ровно 2 записи', 2, len(a.profile['mods']))
+# та же защита на пути «пак целиком» и «только базовые файлы пака»
+r5 = a.add_mod({'mode': 'src', 'camp': 'universe',
+                'pack': {'camp': 'universe', 'unit': 'universe_community', 'name': 'U'},
+                'mod': ''})
+check('base-пак другой сборки целиком — отказ', False, bool(r5.get('ok')))
+r6 = a.add_mod({'mode': 'src', 'camp': 'universe',
+                'pack': {'camp': 'universe', 'unit': 'universe_community', 'name': 'U'},
+                'mod': '_base'})
+check('«базовые файлы» другой сборки — отказ', False, bool(r6.get('ok')))
+# профиль без движка: база добавляется свободно
+a2 = fresh_api('redux'); a2._repo = lambda: 'x/y'; a2._packs_cache = packs_full()
+a2.add_mod({'mode': 'src', 'camp': 'redux', 'pack': None, 'part': 'mods'})
+check('моды не занимают базу', None, a2._profile_base_camp())
+check('после модов redux движок universe разрешён', True,
+      bool(a2.add_mod({'mode': 'src', 'camp': 'universe', 'pack': None,
+                       'part': 'base'}).get('ok')))
+
+print('\n=== строки профиля: видно, что именно добавлено ===')
+a = fresh_api('redux'); a._repo = lambda: 'x/y'; a._packs_cache = packs_full()
+a.add_mod({'mode': 'src', 'camp': 'redux', 'pack': None, 'part': 'base'})
+check('имя записи движка содержит сборку', True,
+      'Свободная Бухта' in a.profile['mods'][0]['name'])
+a.add_mod({'mode': 'src', 'camp': 'redux', 'pack': None, 'part': 'mods'})
+check('имя записи модов отличается от записи движка', 2,
+      len({m['name'] for m in a.profile['mods']}))
+# заглушка (каталог не загрузился) больше не безымянная
+a._catalog_cache = {}
+a.config = {'mod_meta': {}}
+a._names = {}
+a._mods_dir = lambda: Path(r'C:\nonexistent_test_dir_zzz')
+a._disk_index = {'mods': {}}
+a._pub_cache_all = None
+a._warm_variant_labels = lambda: None      # прогрев лезет в сеть/диск
+a._lazy_load_catalog = lambda: None
+tree = a.get_tree()
+labels = [n['label'] for c in tree['camps'] for n in c['mods']]
+check('движок — отдельная строка с понятным именем', True,
+      any(l == app.PART_TITLES[app.PART_BASE] for l in labels))
+check('заглушка модов названа со сборкой', True,
+      any('Свободная Бухта' in l for l in labels))
+check('безымянного «★ вся сборка» больше нет', False, any(l == '★ вся сборка' for l in labels))
+
+print('\n=== установленный движок виден в списке (после установки очередь пустеет) ===')
+def tree_rows(prof_extra, base_files=None):
+    a = fresh_api('redux'); a._repo = lambda: 'x/y'; a._packs_cache = packs_full()
+    a.config = {'mod_meta': {}}; a._names = {}; a._pub_cache_all = None
+    a._catalog_cache = {}; a._disk_index = {'mods': {}}
+    a._mods_dir = lambda: Path(r'C:\nonexistent_test_dir_zzz')
+    a._warm_variant_labels = lambda: None
+    a._lazy_load_catalog = lambda: None
+    a.profile['mods'] = list(prof_extra)
+    if base_files:
+        a.profile['base_files'] = base_files
+    t = a.get_tree()
+    return [(n['label'], n['status']) for c in t['camps'] for n in c['mods']]
+
+bf = {'camp': 'redux', 'unit': 'redux_base_installer', 'date': '2026-07-29T22:40:01'}
+rows_after = tree_rows([], bf)                       # как после установки: очередь пуста
+line = [r for r in rows_after if r[0] == app.PART_TITLES[app.PART_BASE]]
+check('строка движка есть и после установки', 1, len(line))
+check('и помечена установленной', True, bool(line and 'установлен' in line[0][1]))
+# пока запись движка ещё в очереди — дубля быть не должно
+rows_q = tree_rows([{'type': 'camp', 'camp': 'redux', 'part': 'base', 'name': 'X'}], bf)
+check('в очереди — ровно одна строка движка', 1,
+      len([r for r in rows_q if r[0] == app.PART_TITLES[app.PART_BASE]]))
+check('и она в статусе очереди', True,
+      any('добавлен' in r[1] for r in rows_q if r[0] == app.PART_TITLES[app.PART_BASE]))
+# движок не ставили — строки нет
+check('без установленной базы строки нет', 0,
+      len([r for r in tree_rows([]) if r[0] == app.PART_TITLES[app.PART_BASE]]))
+# факт установки записывается при установке base-пака
+a = fresh_api('redux'); a._packs_cache = packs_full()
+a._mark_base_installed('redux', 'redux_base_installer')
+check('запомнены сборка и юнит движка', ('redux', 'redux_base_installer'),
+      (a.profile['base_files']['camp'], a.profile['base_files']['unit']))
+check('installed_base тоже проставлен', 'redux_base_installer',
+      a.profile.get('installed_base'))
 
 print(f'\n===== ИТОГ: PASS={len(PASS)}  FAIL={len(FAIL)} =====')
 if FAIL:

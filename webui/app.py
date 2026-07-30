@@ -98,7 +98,7 @@ IS_RWT = bool(EMBEDDED_TOKEN)
 # из репозитория ({version, url?, notes?}). url можно оставить пустым — тогда показ без
 # ссылки на скачивание (просто «доступна новая версия»).
 # ВНИМАНИЕ: при релизе выставить реальный следующий номер (текущий публичный > 0.13.1).
-LAUNCHER_VERSION = '0.23.0'
+LAUNCHER_VERSION = '0.24.0'
 RELEASE_REF = 'state/launcher_release.json'
 # Ссылка на полную справку в репозитории (ИНСТРУКЦИЯ-ПРОСТАЯ.md, имя в percent-encoding —
 # кириллица в пути; так браузер откроет её без ручного кодирования).
@@ -181,6 +181,34 @@ def _plF(n):
 ALL_CAMP = '★ вся сборка'
 ALL_PACK = '★ весь пак'
 CAMP_KEYS = ('universe', 'redux', 'original')     # известные сборки (порядок = дефолтный)
+CAMP_TITLES = {'redux': 'ПБ «Свободная Бухта»',   # человеческие имена сборок (как в UI)
+               'universe': 'Space Rangers Universe (Community)',
+               'original': 'Original'}
+
+
+def camp_title(camp):
+    return CAMP_TITLES.get(camp, camp or 'сборка')
+
+
+# Части сборки. Раньше был один пункт «вся сборка», который склеивал две разные
+# операции — поставить движок и набрать моды, — и игрок не понимал, что именно едет.
+# Теперь запись сборки несёт 'part': 'base' (base-пак + его фиксы: Rangers.exe, DATA,
+# CFG) или 'mods' (все моды сборки). Записи БЕЗ 'part' — из профилей старых версий,
+# трактуются как 'all' (прежнее поведение), чтобы не сломать сохранённые профили.
+PART_BASE, PART_MODS, PART_ALL = 'base', 'mods', 'all'
+PART_TITLES = {PART_BASE: 'Базовые файлы игры (движок + фиксы)',
+               PART_MODS: 'Все моды сборки',
+               PART_ALL: 'вся сборка'}
+
+# Псевдо-мод пака: всё, что лежит ВНЕ папки Mods (core.mod_key даёт таким файлам ключ
+# '_base') — Rangers.exe, DATA/, CFG/, matrix/, *.dll. Эти файлы приезжают только с
+# base-паком/сборкой целиком; набранные поштучно моды их НЕ несут. В UI показываем
+# человеческим именем, а не служебным ключом.
+BASE_MOD = '_base'
+BASE_MOD_SHORT = 'Базовые файлы игры'             # короткий ярлык (строка дерева)
+BASE_MOD_LABEL = 'Базовые файлы игры (Rangers.exe, DATA, CFG)'
+BASE_MOD_DESC = ('Движок и общие файлы этой сборки — всё, что лежит вне папки Mods. '
+                 'Нужны, если моды ставятся по отдельности, без полной сборки.')
 
 # Базовые моды, поставляемые с игрой (инсталлятор кладёт их в Mods и сохраняет при
 # переустановке через TempStorageFolder). При «Очистить Mods» их НЕ удаляем. Пути —
@@ -1225,6 +1253,8 @@ class Api:
     def _name_of(self, mid):
         """Имя мода как в игре — поле Name из ModuleInfo (диск, кэш). Фолбэк:
         имя варианта из каталога, затем имя папки. Для режима «Имя из ModuleInfo»."""
+        if mid == BASE_MOD:
+            return BASE_MOD_SHORT             # псевдо-мод: ModuleInfo у него нет
         if mid not in self._names:
             p = self._mi_path(mid)
             nm = ''
@@ -2111,8 +2141,12 @@ class Api:
                 mid = m['mod']; seen.add(mid)
                 on = (mid in disk) or bool(m.get('last_downloaded'))
                 sc, st = status_of(m, on)
-                rows.append((m.get('camp', 'прочее'), self._mod_group(mid), 'мод',
-                             mid.split('/')[-1], sc, st,
+                base_files = mid == BASE_MOD          # псевдо-мод: файлы вне Mods
+                rows.append((m.get('camp', 'прочее'),
+                             self._pack_group(m.get('unit')) if base_files
+                             else self._mod_group(mid),
+                             'файлы игры' if base_files else 'мод',
+                             BASE_MOD_SHORT if base_files else mid.split('/')[-1], sc, st,
                              m.get('last_downloaded') or disk.get(mid, '') if on else '',
                              iid, mid))
             elif typ == 'unit':
@@ -2121,9 +2155,17 @@ class Api:
                              'пак', m.get('name', m.get('unit')), sc, st,
                              m.get('last_downloaded', '') if on else '', iid, ''))
             elif typ == 'camp':
-                # разворачиваем в моды сборки ПОСЛЕ дисковых (чтобы не дублировать уже
-                # установленные) — см. проход camp_adds ниже
-                camp_adds.append((iid, m.get('camp', 'прочее')))
+                part = m.get('part') or PART_ALL
+                if part == PART_BASE:
+                    # движок сборки — одной строкой (в моды разворачивать нечего)
+                    sc, st = status_of(m, bool(m.get('last_downloaded')))
+                    rows.append((m.get('camp', 'прочее'), None, 'файлы игры',
+                                 PART_TITLES[PART_BASE], sc, st,
+                                 m.get('last_downloaded', ''), iid, ''))
+                else:
+                    # разворачиваем в моды сборки ПОСЛЕ дисковых (чтобы не дублировать уже
+                    # установленные) — см. проход camp_adds ниже
+                    camp_adds.append((iid, m.get('camp', 'прочее'), part))
             elif typ == 'desc' and m.get('id') and not m.get('url'):
                 # мод из каталога, добавленный «по названию»: показываем как обычный мод
                 # в ЕГО разделе/папке (а не как «форк» в «прочее» вверху списка)
@@ -2139,6 +2181,19 @@ class Api:
                 rows.append(('прочее', None, 'форк' if typ == 'desc' else 'zip',
                              m.get('name') or m.get('id') or m.get('url', ''),
                              sc, st, m.get('last_downloaded', '') if on else '', iid, ''))
+
+        # Строка «Базовые файлы игры» для УЖЕ установленного движка. Без неё факт установки
+        # нигде не виден: запись из очереди после установки удаляется (_finish_set), а
+        # дисковой строки у движка нет — scan_installed_mods смотрит только в Mods, тогда
+        # как Rangers.exe/DATA/CFG лежат в корне игры.
+        bf = self.profile.get('base_files') or {}
+        bf_camp = bf.get('camp') or (inst_base['camp'] if inst_base else None)
+        queued_base = any(m.get('type') == 'camp' and (m.get('part') or PART_ALL) == PART_BASE
+                          and m.get('camp') == bf_camp
+                          for m in self.profile.get('mods', []))
+        if bf_camp and not queued_base:      # в очереди уже есть своя строка — не двоим
+            rows.append((bf_camp, None, 'файлы игры', PART_TITLES[PART_BASE],
+                         'ok', '✅ установлен', bf.get('date', ''), 'b:base', ''))
 
         camp_disk = inst_base['camp'] if inst_base else 'прочее'
         for mid, ts in sorted(disk.items()):
@@ -2170,11 +2225,15 @@ class Api:
         # строкой «➕ добавлен» в своей группе (превью того, что поставится), а не одной
         # строкой «★ вся сборка» вверху. iid='p{idx}#mid' → «отменить добавление»/удаление
         # ведёт к записи сборки (число idx); установка остаётся bulk (тип camp).
-        for cid, camp in camp_adds:
+        for cid, camp, part in camp_adds:
             all_members = self._camp_member_mids(camp)
-            if not all_members:                # каталог ещё грузится — строка-заглушка,
-                rows.append((camp, None, 'сборка', '★ вся сборка',   # чтобы не прятать факт
-                             'queued', '➕ добавлен', '', cid, ''))    # добавления сборки
+            if not all_members:
+                # каталог не загрузился (нет сети / негодный токен) — показываем факт
+                # добавления строкой-заглушкой, но С ИМЕНЕМ сборки: без него игрок видел
+                # несколько одинаковых «★ вся сборка» и не понимал, что добавил
+                rows.append((camp, None, 'сборка',
+                             f'{PART_TITLES[part]} — {camp_title(camp)}',
+                             'queued', '➕ добавлен', '', cid, ''))
                 continue
             # разворачиваем ТОЛЬКО ещё не показанных членов; если всю сборку уже на диске/
             # в наборе — новых строк нет и заглушка «★ вся сборка» НЕ появляется (моды
@@ -2282,8 +2341,8 @@ class Api:
         packs = self._packs_cache or {}
         t = m.get('type')
         if t == 'camp':
-            return sum(p.get('bytes', 0) for p in packs.values()
-                       if p.get('camp') == m.get('camp'))
+            return sum(p.get('bytes', 0) for p in self._camp_part_packs(
+                m.get('camp'), packs, m.get('part') or PART_ALL))
         if t == 'unit' and not m.get('mod'):
             return packs.get(f"{m.get('camp')}/{m.get('unit')}", {}).get('bytes', 0)
         return 0
@@ -2806,13 +2865,34 @@ class Api:
 
     @staticmethod
     def _unit_install_rank(p, packs):
+        # ВАЖНО: агрегатор пишет tier='fix' (не 'fixes') — сравнение только с 'fixes'
+        # делало ветку мёртвой, и фикс-паки ехали рангом обычного мода, то есть могли
+        # быть перезаписаны модами, которые обязаны ложиться ПОД них.
         tier = p.get('tier')
         if tier == 'base':
             return 0
-        if tier == 'fixes':
+        if tier in ('fix', 'fixes'):
             parent = packs.get(f"{p['camp']}/{p.get('fix_parent', '')}")
             return 3 if (parent and parent.get('tier') == 'base') else 2
         return 1
+
+    @staticmethod
+    def _part_of_unit(p, packs):
+        """К какой части сборки относится пак: PART_BASE — сам base-пак и фиксы К НЕМУ
+        (движок игры), PART_MODS — моды/ассеты сборки и фиксы к ним."""
+        tier = p.get('tier')
+        if tier == 'base':
+            return PART_BASE
+        if tier in ('fix', 'fixes'):
+            parent = packs.get(f"{p.get('camp')}/{p.get('fix_parent', '')}")
+            return PART_BASE if (parent and parent.get('tier') == 'base') else PART_MODS
+        return PART_MODS
+
+    def _camp_part_packs(self, camp, packs, part):
+        """Паки сборки camp, входящие в часть part (PART_ALL — все)."""
+        return [p for p in packs.values()
+                if p.get('camp') == camp
+                and (part in (PART_ALL, None) or self._part_of_unit(p, packs) == part)]
 
     def _install_worker(self, indices):
         tok = self._token()
@@ -2856,6 +2936,14 @@ class Api:
         self._emit('op_end', {'status': status})
         self._emit('tree_dirty')
 
+    def _mark_base_installed(self, camp, unit):
+        """Запомнить установленный движок: чья сборка, какой юнит и когда. Дата нужна
+        строке «Базовые файлы игры» в списке — иначе после установки от неё не остаётся
+        никакого следа (запись очереди удаляется, в Mods движка нет)."""
+        self.profile['installed_base'] = unit
+        self.profile['base_files'] = {'camp': camp, 'unit': unit,
+                                      'date': datetime.now().isoformat()}
+
     def _install_bulk_merged(self, entries, mods_dir, tok, repo):
         """Установить НЕСКОЛЬКО манифестных bulk-записей (сборок/паков) ОДНИМ проходом
         reconstruct_multi: манифесты всех юнитов сливаются в один eff с приоритетом
@@ -2877,13 +2965,13 @@ class Api:
             seen[(c, u)] = d
             order.append(d)
             if d['tier'] == 'base':
-                self.profile['installed_base'] = u
+                self._mark_base_installed(c, u)
 
         for m in entries:
             if m.get('type') == 'camp':
-                for p in packs.values():
-                    if p.get('camp') == m.get('camp'):
-                        add_unit(p)
+                for p in self._camp_part_packs(m.get('camp'), packs,
+                                               m.get('part') or PART_ALL):
+                    add_unit(p)
             else:                                 # целый юнит
                 p = packs.get(f"{m.get('camp')}/{m.get('unit')}")
                 if p:
@@ -2905,9 +2993,13 @@ class Api:
         """Установить ОДНУ запись сборки (camp / unit / desc / zip)."""
         if m.get('type') == 'camp':
             packs = self._get_packs(tok)
-            units = sorted([p for p in packs.values() if p['camp'] == m['camp']],
+            units = sorted(self._camp_part_packs(m['camp'], packs,
+                                                 m.get('part') or PART_ALL),
                            key=lambda p: (self._unit_install_rank(p, packs),
                                           p.get('load_order', 999)))
+            if not units:
+                self.log(f'В сборке {m["camp"]} нет паков для этой части — пропускаю.')
+                return
             # Единый идемпотентный проход по всему сборке: манифесты юнитов сливаются в
             # ОДИН эффективный набор с приоритетом (порядок = низший→высший, кто позже —
             # перезаписывает по целевому пути на диске). Иначе base/fixes/разные моды,
@@ -2919,7 +3011,7 @@ class Api:
                 ulist.append({'unit': p['name'], 'tier': p.get('tier'),
                               'fork_files': ff, 'fork_index': fidx})
                 if p.get('tier') == 'base':
-                    self.profile['installed_base'] = p['name']
+                    self._mark_base_installed(p['camp'], p['name'])
             self._pack_ctx = f'сборка {m["camp"]}'
             core.reconstruct_camp(
                 m['repo'], m['camp'], ulist, mods_dir, tok,
@@ -2983,7 +3075,10 @@ class Api:
             t = m.get('type')
             if t == 'desc':
                 sels.append(self._desc_sel(m))
-            elif t == 'unit' and m.get('mod'):
+            elif t == 'unit' and m.get('mod') and m['mod'] != BASE_MOD:
+                # '_base' — не мод каталога: resolve_set его не найдёт (в catalog.json
+                # таких записей нет) и он молча уехал бы в missing_deps. Его ставит
+                # reconstruct_unit(mod='_base') → ветка bulk ниже.
                 sel = {'id': m['mod']}
                 if m.get('camp') and m.get('unit'):
                     sel['source'] = f"{m['camp']}/{m['unit']}"
@@ -3012,7 +3107,8 @@ class Api:
         # (сборка ставится пофайлово через reconstruct_camp), поэтому передаём их описания,
         # а фронт покажет «все моды сборки …» вместо бессмысленного «сборок: 1».
         bulk_items = [{'type': m.get('type'), 'name': m.get('name', ''),
-                       'camp': m.get('camp', '')} for m in bulk]
+                       'camp': m.get('camp', ''), 'mod': m.get('mod', ''),
+                       'part': m.get('part') or ''} for m in bulk]
         self._emit('deps_confirm', {
             'count': len(order), 'bulk': len(bulk), 'bulk_items': bulk_items,
             'added_deps': (plan or {}).get('added_deps', []),
@@ -3047,7 +3143,11 @@ class Api:
             # ОДНИМ проходом reconstruct_multi — иначе отдельные reconstruct_* затирают
             # общий мод-id и плодят сирот (напр. Mod_Interface из «Солянки» и Huk'sShit).
             # zip и одиночная запись — прежней логикой (нулевой риск регрессий).
-            man_bulk = [m for m in bulk if m.get('type') in ('camp', 'unit')]
+            # записи с 'mod' (напр. только базовые файлы игры) в объединённый проход НЕ
+            # берём: reconstruct_multi ставит юниты целиком и вместо одного псевдо-мода
+            # притащил бы весь пак.
+            man_bulk = [m for m in bulk
+                        if m.get('type') in ('camp', 'unit') and not m.get('mod')]
             if len(man_bulk) >= 2:
                 for m in man_bulk:
                     self.log(f'=== {m.get("name", "?")} ===')
@@ -3140,9 +3240,9 @@ class Api:
             return {'ok': False, 'error': str(e)}
         out = []
         for key in keys:
-            if key == '_base':
-                out.append({'key': key, 'name': '_base', 'camps': [],
-                            'desc': 'Общие файлы игры'})
+            if key == BASE_MOD:
+                out.append({'key': key, 'name': BASE_MOD_LABEL, 'camps': [],
+                            'desc': BASE_MOD_DESC})
                 continue
             ent = self._camp_variant_entry(key, camp)
             if ent and ent[1]:
@@ -3154,9 +3254,36 @@ class Api:
                 out.append({'key': key, 'name': key.split('/')[-1], 'camps': [], 'desc': ''})
         return {'ok': True, 'mods': out}
 
+    def _profile_base_camp(self):
+        """Сборка, движок которой уже набран в профиле (база целиком, часть 'base' или
+        псевдо-мод '_base'), или None. Две базы разом ставить нельзя — их файлы движка
+        перетирают друг друга по (rank, load_order), а не «вторая поверх первой»."""
+        packs = self._packs_cache or {}
+        for m in self.profile.get('mods', []):
+            t, c = m.get('type'), m.get('camp')
+            if t == 'camp' and (m.get('part') or PART_ALL) in (PART_BASE, PART_ALL):
+                return c
+            if t == 'unit':
+                if m.get('mod') == BASE_MOD:
+                    return c
+                if not m.get('mod') and packs.get(
+                        f"{c}/{m.get('unit')}", {}).get('tier') == 'base':
+                    return c
+        return None
+
+    def _base_conflict_error(self, camp):
+        """Текст отказа, если в профиле уже есть база ДРУГОЙ сборки. None — можно."""
+        have = self._profile_base_camp()
+        if not have or have == camp:
+            return None
+        return (f'В профиле уже есть движок сборки «{camp_title(have)}». Две базы разом '
+                f'ставить нельзя: их файлы игры перетрут друг друга, а сейвы привязаны '
+                f'к базе. Уберите «{camp_title(have)}» из профиля или добавьте из '
+                f'«{camp_title(camp)}» только моды.')
+
     def add_mod(self, payload):
         """Добавить запись в сборку. payload:
-        {mode:'src'|'fork', camp, pack:{camp,unit,name}|None, mod:'', url:''}"""
+        {mode:'src'|'fork', camp, pack:{camp,unit,name}|None, mod:'', part:'', url:''}"""
         repo = self._repo()
         if payload.get('mode') == 'search':
             mid = (payload.get('id') or '').strip()
@@ -3186,23 +3313,38 @@ class Api:
         if not camp:
             return {'ok': False, 'error': 'Выберите сборку.'}
         pack = payload.get('pack')
-        if not pack:                                   # всю сборку
-            # дедуп: повторный клик по тому же пресету не должен плодить записи сборки
+        if not pack:                                   # часть сборки: движок / моды
+            part = (payload.get('part') or PART_ALL).strip()
+            if part not in (PART_BASE, PART_MODS, PART_ALL):
+                part = PART_ALL
+            # дедуп: повторный клик по тому же пункту не должен плодить записи
             if any(m.get('type') == 'camp' and m.get('camp') == camp
+                   and (m.get('part') or PART_ALL) == part
                    for m in self.profile.get('mods', [])):
                 return {'ok': True, 'dup': True}
+            if part in (PART_BASE, PART_ALL):
+                err = self._base_conflict_error(camp)
+                if err:
+                    return {'ok': False, 'error': err}
             self.profile.setdefault('mods', []).append({
-                'type': 'camp', 'camp': camp, 'repo': repo,
-                'name': f'{camp} — вся сборка'})
+                'type': 'camp', 'camp': camp, 'part': part, 'repo': repo,
+                'name': f'{camp_title(camp)} — {PART_TITLES[part]}'})
             self._save_profile()
             return {'ok': True}
         mod = {'type': 'unit', 'repo': repo, 'camp': pack['camp'], 'unit': pack['unit'],
                'name': pack['name'], 'mod': ''}
         msel = (payload.get('mod') or '').strip()
+        # база другой сборки уже в профиле → и целый base-пак, и его '_base' запрещены
+        base_pack = (self._packs_cache or {}).get(
+            f"{pack['camp']}/{pack['unit']}", {}).get('tier') == 'base'
+        if msel == BASE_MOD or (base_pack and (not msel or msel == ALL_PACK)):
+            err = self._base_conflict_error(pack['camp'])
+            if err:
+                return {'ok': False, 'error': err}
         if msel and msel != ALL_PACK:
             self._dedup_folder(msel)               # один вариант на папку (#2.2)
             mod['mod'] = msel
-            mod['name'] = msel
+            mod['name'] = BASE_MOD_LABEL if msel == BASE_MOD else msel
         self.profile.setdefault('mods', []).append(mod)
         self._save_profile()
         return {'ok': True}
@@ -3223,7 +3365,8 @@ class Api:
             kept.append(m)
         if dropped:
             self.profile['mods'] = kept
-            self.log(f'Заменён вариант мода «{base.split("/")[-1]}» в наборе.')
+            nm = BASE_MOD_LABEL if base == BASE_MOD else base.split('/')[-1]
+            self.log(f'Заменён вариант мода «{nm}» в наборе.')
 
     # ───────── обновление с сохранением правок (Фаза 4) ─────────
     def _desc_sel(self, m):
@@ -3932,15 +4075,30 @@ class Api:
             packs = self._get_packs(tok)
         except Exception:
             packs = {}
-        units = [f'{m["camp"]}/{m["unit"]}' for m in self.profile.get('mods', [])
-                 if m.get('type') == 'unit' and m.get('unit')]
+        pmods = self.profile.get('mods', [])
+        # ЦЕЛЫЕ паки (без 'mod') — только они несут базовые файлы игры; пак, добавленный
+        # одним модом, приезжает без Rangers.exe/DATA/CFG (core.mod_key → '_base' отсеян).
+        units = [f'{m["camp"]}/{m["unit"]}' for m in pmods
+                 if m.get('type') == 'unit' and m.get('unit') and not m.get('mod')]
+        # базу дают и записи, которых нет в units: «вся сборка» и отдельные базовые файлы
+        extra_base = any(m.get('type') == 'camp'
+                         or (m.get('type') == 'unit' and m.get('mod') == BASE_MOD)
+                         for m in pmods)
+        # моды, набранные поштучно (из каталога или по одному моду пака) — им база нужна,
+        # но сами они её не тянут; без этого «нет базы» на таком профиле молчало
+        loose = any(m.get('type') == 'desc'
+                    or (m.get('type') == 'unit' and m.get('mod')
+                        and m['mod'] != BASE_MOD)
+                    for m in pmods)
         try:
             base = core.detect_installed_base(self._mods_dir())
         except Exception:
             base = None
         base_name = base.get('base') if base else None      # detect_* отдаёт ключ 'base'
         try:
-            rep = core.check_pack_compatibility(units, packs, installed_base=base_name) or {}
+            rep = core.check_pack_compatibility(units, packs, installed_base=base_name,
+                                                extra_playable=loose,
+                                                extra_base=extra_base) or {}
         except Exception as e:
             rep = {}
             self.log(f'Совместимость: ошибка проверки паков ({e})')
@@ -3963,7 +4121,11 @@ class Api:
             items.append({'level': 'ok', 'text': f'База установлена: {base_name}'})
         if rep.get('missing_base'):
             items.append({'level': 'warn',
-                          'text': 'Не выбрана база (нужна для модов/фиксов) — добавьте базовый пак.'})
+                          'text': 'В профиле нет базы. Файлы движка (Rangers.exe, DATA, '
+                                  'CFG) приезжают только с базовым паком или сборкой '
+                                  'целиком — моды, набранные по отдельности, их не несут '
+                                  f'и могут не заработать. Добавьте сборку целиком, её '
+                                  f'базовый пак или пункт «{BASE_MOD_LABEL}» из него.'})
         if rep.get('base_conflict'):
             names = ', '.join(nm(b) for b in rep.get('bases', []))
             items.append({'level': 'warn', 'text': f'В профиле несколько баз ({names}) — оставьте одну.'})

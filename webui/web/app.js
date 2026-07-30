@@ -1325,9 +1325,15 @@ function onDepsConfirm(d) {
     parts.push(s);
   }
   (d.bulk_items || []).forEach((b) => {
-    if (b.type === 'camp') parts.push(`Все моды сборки: <b>${esc(campLabel(b.camp))}</b>`);
-    else if (b.type === 'unit') parts.push(`Весь пак «<b>${esc(b.name || 'пак')}</b>»`);
-    else parts.push(`Архив «<b>${esc(b.name || 'архив')}</b>»`);
+    if (b.type === 'camp') {
+      const what = b.part === 'base' ? 'Базовые файлы игры (движок + фиксы)'
+        : b.part === 'mods' ? 'Все моды сборки' : 'Вся сборка';
+      parts.push(`${what}: <b>${esc(campLabel(b.camp))}</b>`);
+    } else if (b.type === 'unit') {
+      parts.push(b.mod === '_base'
+        ? `Базовые файлы игры из пака «<b>${esc(b.name || 'пак')}</b>»`
+        : `Весь пак «<b>${esc(b.name || 'пак')}</b>»`);
+    } else parts.push(`Архив «<b>${esc(b.name || 'архив')}</b>»`);
   });
   let body = parts.length ? parts.join('<br>') + '.' : '';
   if (lines.length) body += `<div style="margin-top:8px;font-family:var(--mono);font-size:12px;max-height:190px;overflow:auto;color:var(--muted)">${lines.map(esc).join('<br>')}</div>`;
@@ -1533,9 +1539,13 @@ function renderPresets() {
   $('presetRow').querySelectorAll('.pbtn').forEach((b) => b.onclick = () => addPreset(b.dataset.camp));
 }
 async function addPreset(camp) {
-  const r = await api().add_mod({ mode: 'src', camp, pack: null, mod: '' });   // всю сборку
-  if (!r || !r.ok) { toast((r && r.error) || 'Не удалось', 'err'); return; }
-  if (r.dup) { toast(`«${campLabel(camp)}» уже в профиле`, 'ok'); return; }
+  // «Всё X» = две явные записи: движок сборки и её моды (раньше была одна мутная
+  // запись «вся сборка»). Если движок уже занят другой сборкой — бэк откажет.
+  const rb = await api().add_mod({ mode: 'src', camp, pack: null, part: 'base' });
+  if (!rb || (!rb.ok && !rb.dup)) { toast((rb && rb.error) || 'Не удалось', 'err'); return; }
+  const rm = await api().add_mod({ mode: 'src', camp, pack: null, part: 'mods' });
+  if (!rm || (!rm.ok && !rm.dup)) { toast((rm && rm.error) || 'Не удалось', 'err'); return; }
+  if (rb.dup && rm.dup) { toast(`«${campLabel(camp)}» уже в профиле`, 'ok'); return; }
   refreshTree();
   toast(`Добавлено «всё ${campLabel(camp)}» — нажмите «🧩 Установить все»`, 'ok');
 }
@@ -1849,7 +1859,10 @@ function onAddCamp() {
   const camp = $('addCamp').value;
   const packs = CAMPPACKS[camp] || [];
   packsByUnit = {};
-  $('addPack').innerHTML = '<option value="">★ вся сборка</option>';
+  // «вся сборка» разделена на две ЯВНЫЕ операции: движок и моды. Раньше один пункт
+  // делал и то и другое, и по строке в профиле нельзя было понять, что именно едет.
+  $('addPack').innerHTML = '<option value="__base__">★ Базовые файлы игры (движок + фиксы)</option>'
+    + '<option value="__mods__">★ Все моды сборки</option>';
   packs.forEach((p) => {
     packsByUnit[p.unit] = p;
     const o = document.createElement('option');
@@ -1860,10 +1873,17 @@ function onAddCamp() {
   $('addPack').disabled = !camp;
   $('addMod').innerHTML = ''; $('addMod').disabled = true;
 }
+const PART_HINT = {
+  __base__: 'Движок сборки: Rangers.exe, DATA, CFG + фиксы к базе. Держать можно только одну базу — сейвы привязаны к ней.',
+  __mods__: 'Все моды сборки, без файлов движка. Моды разных сборок совмещать можно.',
+};
 async function onAddPack() {
   $('addMod').innerHTML = ''; $('addMod').disabled = true;
   const unit = $('addPack').value;
-  if (!unit) return;                          // всю сборку
+  if (!unit || PART_HINT[unit]) {             // часть сборки (движок / моды)
+    $('addStatus').textContent = PART_HINT[unit] || '';
+    return;
+  }
   const p = packsByUnit[unit]; if (!p) return;
   $('addStatus').textContent = 'Загрузка модов пака…';
   const r = await api().get_unit_mods(p.camp, p.unit);
@@ -1884,7 +1904,8 @@ async function onAddPack() {
 }
 async function onAddModSel() {
   const mid = $('addMod').value;
-  if (!mid || mid === '_base') { $('addStatus').textContent = mid ? 'Общие файлы игры' : ''; return; }
+  // '_base' (базовые файлы игры) идёт общим путём: имя и пояснение уже пришли с бэка
+  if (!mid) { $('addStatus').textContent = ''; return; }
   // краткое описание берём из варианта сборки (уже пришло с get_unit_mods) — иначе
   // get_mod_info по папке вернул бы Shu-вариант для redux-пака
   const m = modsByKey[mid];
@@ -1911,8 +1932,11 @@ async function doAdd() {
     const camp = $('addCamp').value;
     if (!camp) { toast('Выберите сборку', 'err'); return; }
     const unit = $('addPack').value;
-    const pack = unit ? packsByUnit[unit] : null;
-    payload = { mode: 'src', camp, pack: pack ? { camp: pack.camp, unit: pack.unit, name: pack.name } : null, mod: $('addMod').value };
+    const part = PART_HINT[unit] ? unit.replace(/_/g, '') : '';   // __base__ → base
+    const pack = part ? null : (unit ? packsByUnit[unit] : null);
+    payload = { mode: 'src', camp, part,
+      pack: pack ? { camp: pack.camp, unit: pack.unit, name: pack.name } : null,
+      mod: part ? '' : $('addMod').value };
   }
   const r = await api().add_mod(payload);
   if (!r.ok) { toast(r.error, 'err'); return; }

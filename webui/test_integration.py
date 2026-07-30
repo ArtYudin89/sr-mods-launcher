@@ -1605,14 +1605,18 @@ try:
     check_true('T58: Pol-вариант в очереди',
                'ShusRangers/ShuNukes@PolNukes' in ids_in_q)
 
-    print('\n--- T59: add_mod двух разных лагерей → 2 записи ---')
+    print('\n--- T59: движок одной сборки + моды другой → 2 записи, две базы → отказ ---')
     a = g.fresh_api()
-    a.add_mod({'mode': 'src', 'camp': 'redux', 'pack': None, 'mod': ''})
-    a.add_mod({'mode': 'src', 'camp': 'universe', 'pack': None, 'mod': ''})
+    a.add_mod({'mode': 'src', 'camp': 'redux', 'pack': None, 'part': 'base'})
+    a.add_mod({'mode': 'src', 'camp': 'universe', 'pack': None, 'part': 'mods'})
     check('T59: 2 записи', 2, len(a.profile['mods']))
     camps_q = [m.get('camp') for m in a.profile['mods']]
     check_true('T59: redux в очереди', 'redux' in camps_q)
     check_true('T59: universe в очереди', 'universe' in camps_q)
+    # движок второй сборки не пускаем: файлы игры перетрут друг друга, сейвы привязаны к базе
+    r59 = a.add_mod({'mode': 'src', 'camp': 'universe', 'pack': None, 'part': 'base'})
+    check_false('T59: вторая база отклонена', bool(r59.get('ok')))
+    check('T59: записей по-прежнему 2', 2, len(a.profile['mods']))
 
     print('\n--- T60: set_update_extra пустой список → order=[base] ---')
     a = g.fresh_api(base='redux')
