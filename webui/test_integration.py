@@ -367,7 +367,7 @@ try:
     def fake_reconstruct_camp(repo, camp, units, mods_dir_path, token,
                               log=print, tmp_dir=None, should_cancel=None,
                               part_cb=None, byte_cb=None, sha_sink=None, dry_run=False,
-                              chunk_cb=None):
+                              chunk_cb=None, mod_sources=None):
         """Имитирует reconstruct_camp (единый проход по лагерю): пишет фейковые файлы."""
         mds = Path(mods_dir_path)
         nuke_dir = mds / 'ShusRangers' / 'ShuNukes'
@@ -2042,6 +2042,66 @@ try:
           core.load_install_snapshot(_m3, 'Cat/Mod', _s3)['files'][_rp])
 finally:
     shutil.rmtree(_w3, ignore_errors=True)
+
+# ═══════════════════════════════════════════════
+#  ГРУППА 23: выбранная версия мода бьёт load_order сборки (mod_sources)
+# ═══════════════════════════════════════════════
+print('\n=== ГРУППА 23: mod_sources — выбор версии сильнее порядка паков ===')
+# Мод едет в двух паках одной сборки, у второго load_order больше → при установке
+# сборки он всегда перекрывал первый, и выбор версии в карточке ни на что не влиял
+# (DrKlesMod: выбрано 11.11.2025 из drkles_mod, ставилось 07.04.2025 из community_mods;
+# детект молчал, потому что целился в тот же слитый набор). Переиспользуем фикстуры
+# ГРУППЫ 21: huk_mods (раньше) и solyanka_main (позже) несут HuksShit/Mod_Interface.
+_MID_PIN = 'HuksShit/Mod_Interface'
+
+def _run_pin(units, mods, tmp, mod_sources=None):
+    with patch.object(core, 'repo_file_bytes', side_effect=_m_rfb), \
+         patch.object(core, 'download_url', side_effect=_m_dl):
+        return core.reconstruct_multi('repo', units, mods, 'tok', log=lambda *_: None,
+                                      tmp_dir=tmp, mod_sources=mod_sources)
+
+_w4 = Path(tempfile.mkdtemp(prefix='pin_'))
+try:
+    _mods = _w4 / 'Game' / 'Mods'; _tmp = _w4 / 'tmp'
+    _mods.mkdir(parents=True); _tmp.mkdir()
+    _data = _mods / 'HuksShit' / 'Mod_Interface' / 'data.dat'
+    _lang = _mods / 'HuksShit' / 'Mod_Interface' / 'CFG' / 'Rus' / 'Lang.dat'
+
+    print('\n--- T82: без выбора — как раньше, побеждает последний по порядку ---')
+    _run_pin([_HUK, _SOL], _mods, _tmp)
+    check('T82: data.dat = solyanka', _SOL_DATA, _data.read_bytes())
+
+    print('\n--- T83: выбран huk_mods — его версия побеждает solyanka_main ---')
+    _lang.unlink()                                   # T82 принёс его из solyanka
+    _run_pin([_HUK, _SOL], _mods, _tmp, {_MID_PIN: {'redux/huk_mods'}})
+    check('T83: data.dat = huk (выбранный источник)', _HUK_DATA, _data.read_bytes())
+    check_true('T83: файл, которого нет в выбранном паке, не приехал', not _lang.exists())
+
+    print('\n--- T84: повторный проход с тем же выбором идемпотентен ---')
+    _s84 = _run_pin([_HUK, _SOL], _mods, _tmp, {_MID_PIN: {'redux/huk_mods'}})
+    check('T84: ничего не записано', 0, _s84['code_files'] + _s84['asset_files'])
+    check('T84: всё skipped (2)', 2, _s84['skipped'])
+
+    print('\n--- T85: переключение выбора на solyanka_main возвращает её версию ---')
+    _run_pin([_HUK, _SOL], _mods, _tmp, {_MID_PIN: {'redux/solyanka_main'}})
+    check('T85: data.dat = solyanka', _SOL_DATA, _data.read_bytes())
+    check_true('T85: уникальный Lang.dat выбранного пака приехал', _lang.exists())
+
+    print('\n--- T86: выбран источник вне набора — ставим как в сборке, мод не теряется ---')
+    _logs = []
+    with patch.object(core, 'repo_file_bytes', side_effect=_m_rfb), \
+         patch.object(core, 'download_url', side_effect=_m_dl):
+        core.reconstruct_multi('repo', [_HUK, _SOL], _mods, 'tok', log=_logs.append,
+                               tmp_dir=_tmp, mod_sources={_MID_PIN: {'universe/other'}})
+    check('T86: мод не выпал — версия по порядку паков', _SOL_DATA, _data.read_bytes())
+    check_true('T86: о нерелевантном выборе предупредили',
+               any('не входит в этот набор' in l for l in _logs))
+
+    print('\n--- T87: выбор одного мода не трогает остальные ---')
+    _run_pin([_HUK, _SOL], _mods, _tmp, {'Other/Mod': {'redux/huk_mods'}})
+    check('T87: чужой пин не сузил набор', _SOL_DATA, _data.read_bytes())
+finally:
+    shutil.rmtree(_w4, ignore_errors=True)
 
 # ═══════════════════════════════════════════════
 #  Итог

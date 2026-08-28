@@ -98,7 +98,7 @@ IS_RWT = bool(EMBEDDED_TOKEN)
 # из репозитория ({version, url?, notes?}). url можно оставить пустым — тогда показ без
 # ссылки на скачивание (просто «доступна новая версия»).
 # ВНИМАНИЕ: при релизе выставить реальный следующий номер (текущий публичный > 0.13.1).
-LAUNCHER_VERSION = '0.24.0'
+LAUNCHER_VERSION = '0.25.0'
 RELEASE_REF = 'state/launcher_release.json'
 # Ссылка на полную справку в репозитории (ИНСТРУКЦИЯ-ПРОСТАЯ.md, имя в percent-encoding —
 # кириллица в пути; так браузер откроет её без ручного кодирования).
@@ -791,11 +791,8 @@ class Api:
             # манифестов ТОЛЬКО по variants — без фикс-юнита он целится в ДО-фикс базу и
             # вечно видит ложное «⬆ обновление» (апдейт при этом отвечает «обновлять
             # нечего»). Возвращаем фикс-детей в набор источников слияния → детект==апдейт.
-            fix_children = {}
-            for pk, pv in self._get_packs(self._token()).items():
-                fp = pv.get('fix_parent')
-                if fp:
-                    fix_children.setdefault(f"{pv.get('camp')}/{fp}", set()).add(pk)
+            fix_children = self._fix_children_map()
+            pinned = self._pinned_sources()      # явный выбор версии сужает источники
             for mid, m in idx.get('mods', {}).items():
                 if self.should_cancel():
                     raise core.OperationCancelled()
@@ -827,9 +824,15 @@ class Api:
                 # целевой набор = слитый стек сборки tcamp (base+fixes), как на пути
                 # обновления (_full_variant_descriptor) — иначе детект целится в до-фикс
                 # версию из base-installer и вечно видит ложное «⬆ обновление».
-                camp_srcs = {s for s in allowed if (s or '').split('/')[0] == tcamp}
-                if choice and csrc:
-                    camp_srcs.add(csrc)            # выбранный источник обязан участвовать
+                # Если версия выбрана явно — стек сужается до неё (см. _pinned_sources),
+                # иначе более поздний по load_order пак сборки перекрывал выбор, а детект
+                # этого не видел: «выбрано 11.11, установлено 07.04».
+                if mid in pinned:
+                    camp_srcs = set(pinned[mid])
+                else:
+                    camp_srcs = {s for s in allowed if (s or '').split('/')[0] == tcamp}
+                    if choice and csrc:
+                        camp_srcs.add(csrc)        # выбранный источник обязан участвовать
                 for s in list(camp_srcs):          # + свёрнутые фикс-юниты (overlaid_fixes)
                     camp_srcs |= fix_children.get(s, set())
                 theirs = self._merged_camp_files(mid, umap, camp_srcs)
@@ -1424,6 +1427,42 @@ class Api:
         if len(subs) < 2:
             return []
         return [(f'{base}#{v["source"]}', v['source'], v) for v in subs]
+
+    def _fix_children_map(self, packs=None):
+        """'camp/parent' -> {'camp/fix', …}: фикс-юниты, свёрнутые агрегатором в
+        дескриптор родителя (fix_parent). Нужны везде, где набор источников мода
+        сужается: фикс — это оверлей сборки, а не альтернативная версия мода."""
+        packs = packs if packs is not None else self._get_packs(self._token())
+        out = {}
+        for pk, pv in packs.items():
+            fp = pv.get('fix_parent')
+            if fp:
+                out.setdefault(f"{pv.get('camp')}/{fp}", set()).add(pk)
+        return out
+
+    def _pinned_sources(self, packs=None):
+        """{mod_id: {'camp/unit', …}} — моды, у которых игрок ЯВНО выбрал источник.
+
+        Мод может ехать в нескольких паках одной сборки (DrKlesMod: авторская раздача
+        `drkles_mod` load_order 50 и копия постарше внутри сборника `community_mods`
+        load_order 150). Установка сборки сливает юниты по load_order, поэтому копия
+        из сборника ложилась поверх выбранной — игрок видел в карточке 11.11.2025, а на
+        диске получал 07.04.2025, и детект молчал, потому что целился в тот же слитый
+        набор. Явный выбор версии (синтетический ключ '<base>#<source>') сужает набор
+        источников этого мода до выбранного (+ его фикс-дети) — и в детекте, и при
+        установке сборки. '@'-варианты (Pol/Shu) не трогаем: там ключ каталожный, выбор
+        живёт внутри одного юнита и разруливается дескриптором."""
+        packs = packs if packs is not None else self._get_packs(self._token())
+        kids = self._fix_children_map(packs)
+        out = {}
+        for mid, choice in (self.profile.get('variants') or {}).items():
+            if not choice or '#' not in choice:
+                continue
+            _, src = self._variant_ref(choice)
+            if not src:
+                continue
+            out[mid] = {src} | kids.get(src, set())
+        return out
 
     def _variant_ref(self, key):
         """Разобрать ключ варианта в (base_key, source). Реальный каталожный ключ →
@@ -2987,7 +3026,7 @@ class Api:
             repo, units, mods_dir, tok, log=self.log, tmp_dir=ROOT,
             should_cancel=self.should_cancel, part_cb=self._part_progress,
             byte_cb=self._byte_progress, prune_snap_id='__bulk_merge__',
-            chunk_cb=self._chunk_progress)
+            chunk_cb=self._chunk_progress, mod_sources=self._pinned_sources(packs))
 
     def _install_one(self, m, mods_dir, tok):
         """Установить ОДНУ запись сборки (camp / unit / desc / zip)."""
@@ -3017,7 +3056,8 @@ class Api:
                 m['repo'], m['camp'], ulist, mods_dir, tok,
                 log=self.log, tmp_dir=ROOT, should_cancel=self.should_cancel,
                 part_cb=self._part_progress, byte_cb=self._byte_progress,
-                chunk_cb=self._chunk_progress)
+                chunk_cb=self._chunk_progress,
+                mod_sources=self._pinned_sources(packs))
         elif m.get('type') == 'unit':
             self._pack_ctx = m.get('name', m.get('unit', ''))
             ff, fidx = self._fork_unit_overlay(m['camp'], m['unit'])

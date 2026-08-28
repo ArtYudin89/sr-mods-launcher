@@ -618,19 +618,21 @@ def reconstruct_unit(repo, camp, unit, mods_dir, token, progress_cb=None,
 
 def reconstruct_camp(repo, camp, units, mods_dir, token, log=print, tmp_dir=None,
                      should_cancel=None, part_cb=None, byte_cb=None, sha_sink=None,
-                     dry_run=False, chunk_cb=None):
+                     dry_run=False, chunk_cb=None, mod_sources=None):
     """Установить ВЕСЬ лагерь одним идемпотентным проходом (обёртка над reconstruct_multi:
     все юниты одного лагеря camp). См. reconstruct_multi. Прунинг не включаем — лагерь и так
     ставится полным набором, а per-мод сироты чистит install_descriptor."""
     umulti = [{**u, 'camp': u.get('camp', camp)} for u in units]
     return reconstruct_multi(repo, umulti, mods_dir, token, log=log, tmp_dir=tmp_dir,
                              should_cancel=should_cancel, part_cb=part_cb, byte_cb=byte_cb,
-                             sha_sink=sha_sink, dry_run=dry_run, chunk_cb=chunk_cb)
+                             sha_sink=sha_sink, dry_run=dry_run, chunk_cb=chunk_cb,
+                             mod_sources=mod_sources)
 
 
 def reconstruct_multi(repo, units, mods_dir, token, log=print, tmp_dir=None,
                       should_cancel=None, part_cb=None, byte_cb=None, sha_sink=None,
-                      dry_run=False, prune_snap_id=None, snap_dir=None, chunk_cb=None):
+                      dry_run=False, prune_snap_id=None, snap_dir=None, chunk_cb=None,
+                      mod_sources=None):
     """Установить НЕСКОЛЬКО юнитов (возможно из РАЗНЫХ лагерей и с фильтром на один мод)
     одним идемпотентным проходом.
 
@@ -659,7 +661,13 @@ def reconstruct_multi(repo, units, mods_dir, token, log=print, tmp_dir=None,
     prune_snap_id: если задан — ПОСЛЕ записи убрать файлы-сироты слитого набора (те, что
       были в прошлом снимке этого набора, но которых нет в новом eff; только модовые и
       только если disk-sha == снимку — правки игрока целы) и сохранить новый снимок.
-      Так чистятся уникальные файлы пака, который игрок убрал из профиля."""
+      Так чистятся уникальные файлы пака, который игрок убрал из профиля.
+    mod_sources: {mod_key: {'camp/unit', …}} — моды, для которых игрок ЯВНО выбрал
+      версию. Файлы такого мода берутся ТОЛЬКО из перечисленных юнитов, остальные юниты
+      сборки его не переопределяют. Без этого мод, который едет и в авторской раздаче, и
+      в сборнике-компиляции, всегда доставался из пака с бОльшим load_order — выбор
+      версии в карточке ни на что не влиял (DrKlesMod: выбрано 11.11.2025, ставилось
+      07.04.2025 из community_mods)."""
     mods_dir = Path(mods_dir)
     tmp = Path(tmp_dir or mods_dir.parent)
     tmp.mkdir(parents=True, exist_ok=True)
@@ -673,6 +681,12 @@ def reconstruct_multi(repo, units, mods_dir, token, log=print, tmp_dir=None,
     eff = {}            # (where, rel_lower) -> {'sha','kind','relpath'}
     fork_indexes = []   # индексы частей форков, в порядке юнитов (низший→высший)
     conflicts = 0
+
+    # Манифесты читаем ДО слияния: нужно знать, какие юниты вообще несут мод, чтобы
+    # не «запинить» его в юнит, которого нет в этом наборе (иначе мод молча выпал бы
+    # из установки вместо того, чтобы приехать хоть откуда-то).
+    loaded = []         # [(u, {relpath: (sha, kind)})]
+    provided = {}       # mod_key -> {'camp/unit', …}
     for u in units:
         _check_cancel(should_cancel)
         cu, unit = u['camp'], u['unit']
@@ -685,9 +699,38 @@ def reconstruct_multi(repo, units, mods_dir, token, log=print, tmp_dir=None,
         umap = {}       # relpath -> (sha, kind)
         for kind, man in (('code', code_man), ('asset', asset_man)):
             for relpath, meta in man.items():
-                if umod is not None and mod_key(relpath) != umod:
+                mk = mod_key(relpath)
+                if umod is not None and mk != umod:
                     continue
+                provided.setdefault(mk, set()).add(f'{cu}/{unit}')
                 umap[relpath] = (meta['sha256'], kind)
+        loaded.append((u, umap))
+
+    pins = {}
+    for mk, allowed in (mod_sources or {}).items():
+        here = provided.get(mk)
+        if not here:
+            continue                           # мода нет в этом наборе — пин ни при чём
+        if here & set(allowed):
+            pins[mk] = set(allowed)
+        else:
+            log(f'⚠ {mk}: выбранная версия не входит в этот набор паков — '
+                f'ставлю как в сборке')
+
+    for u, umap in loaded:
+        _check_cancel(should_cancel)
+        cu, unit = u['camp'], u['unit']
+        label = f'{cu}/{unit}'
+        pinned_skipped = 0
+        if pins:
+            keep = {}
+            for relpath, val in umap.items():
+                allowed = pins.get(mod_key(relpath))
+                if allowed is not None and label not in allowed:
+                    pinned_skipped += 1        # версия этого мода выбрана в другом паке
+                    continue
+                keep[relpath] = val
+            umap = keep
         ff = u.get('fork_files')
         if ff:
             umap = overlay_manifest(umap, ff)
@@ -706,7 +749,9 @@ def reconstruct_multi(repo, units, mods_dir, token, log=print, tmp_dir=None,
             eff[key] = {'sha': sh, 'kind': kind, 'relpath': relpath}
         conflicts += overridden
         log(f'--- {unit} ({u.get("tier", "?")}) — +{added} файлов'
-            + (f', переопределяет {overridden}' if overridden else '') + ' ---')
+            + (f', переопределяет {overridden}' if overridden else '')
+            + (f', пропущено {pinned_skipped} (версия выбрана в другом паке)'
+               if pinned_skipped else '') + ' ---')
 
     if fork_indexes:                            # форки приоритетнее основного индекса;
         # высший приоритет первым: юниты шли низший→высший → развернуть, затем базовый.

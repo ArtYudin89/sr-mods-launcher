@@ -519,6 +519,52 @@ check('запомнены сборка и юнит движка', ('redux', 'red
 check('installed_base тоже проставлен', 'redux_base_installer',
       a.profile.get('installed_base'))
 
+print('\n=== _pinned_sources (явный выбор версии сужает источники мода) ===')
+# Мод в двух паках одной сборки: авторская раздача (load_order меньше) и копия внутри
+# сборника (больше). Без сужения сборник всегда перекрывал выбор игрока.
+def api_pin(variants):
+    a = fresh_api('redux')
+    a.profile['variants'] = dict(variants)
+    a._catalog_cache = {
+        'Other/DrKlesMod': {'name': 'DrKlesMod', 'default_source': 'redux/drkles_mod',
+                            'variants': [{'source': 'redux/drkles_mod'},
+                                         {'source': 'redux/community_mods'}]},
+        'Shus/ShuDomiks': {'name': 'ShuDomiks',
+                           'default_source': 'redux/redux_base_installer',
+                           'variants': [{'source': 'redux/redux_base_installer'}]},
+        'Shus/ShuDomiks@Pol': {'name': 'PolDomiks',
+                               'default_source': 'redux/redux_base_installer',
+                               'variants': [{'source': 'redux/redux_base_installer'}]},
+    }
+    a._packs_cache = {
+        'redux/drkles_mod': {'camp': 'redux', 'name': 'drkles_mod', 'tier': 'mod'},
+        'redux/community_mods': {'camp': 'redux', 'name': 'community_mods', 'tier': 'mod'},
+        'redux/redux_base_installer': {'camp': 'redux', 'name': 'redux_base_installer',
+                                       'tier': 'base'},
+        'redux/redux_fixes': {'camp': 'redux', 'name': 'redux_fixes', 'tier': 'fix',
+                              'fix_parent': 'redux_base_installer'},
+    }
+    return a
+
+check('без выбора — пинов нет', {}, api_pin({})._pinned_sources())
+check('выбран источник → мод прибит к нему', {'Other/DrKlesMod': {'redux/drkles_mod'}},
+      api_pin({'Other/DrKlesMod':
+               'Other/DrKlesMod#redux/drkles_mod'})._pinned_sources())
+check('переключение на сборник прибивает к сборнику',
+      {'Other/DrKlesMod': {'redux/community_mods'}},
+      api_pin({'Other/DrKlesMod':
+               'Other/DrKlesMod#redux/community_mods'})._pinned_sources())
+# фикс-пак — оверлей сборки, а не альтернативная версия: он обязан остаться в наборе
+check('фикс-дети выбранного источника не отсекаются',
+      {'Shus/ShuDomiks': {'redux/redux_base_installer', 'redux/redux_fixes'}},
+      api_pin({'Shus/ShuDomiks':
+               'Shus/ShuDomiks#redux/redux_base_installer'})._pinned_sources())
+# '@'-варианты (Pol/Shu) — каталожный ключ, выбор живёт внутри одного юнита
+check('@-вариант не создаёт пин', {},
+      api_pin({'Shus/ShuDomiks': 'Shus/ShuDomiks@Pol'})._pinned_sources())
+check('мусорный ключ выбора игнорируется', {},
+      api_pin({'Other/DrKlesMod': 'Other/Nope#redux/nowhere'})._pinned_sources())
+
 print(f'\n===== ИТОГ: PASS={len(PASS)}  FAIL={len(FAIL)} =====')
 if FAIL:
     print('ПРОВАЛЫ:', FAIL); sys.exit(1)
