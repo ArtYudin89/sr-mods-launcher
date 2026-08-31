@@ -259,5 +259,90 @@ check('7 universe-игрок: конфликт ShuKli показан (там о�
 check('7 сборка неизвестна (None): поведение как раньше — конфликт виден',
       'Shu/Kli' in mids(None), str(mids(None)))
 
+# 8) отзыв игрока: «выбираю одну сборку, а по умолчанию моды с меткой другой». На ЧИСТОЙ
+#    игре установленной базы нет → холодный фолбэк падал на глобальный default_source
+#    (тут huk = redux). Теперь сборку задаёт НАБОР игрока.
+def prof_api(mods):
+    a = fresh()
+    a.profile['mods'] = list(mods)
+    a._packs_cache = dict(a._packs_cache)
+    a._packs_cache['universe/universe_base'] = {'camp': 'universe', 'name': 'universe_base',
+                                                'tier': 'base'}
+    return a
+
+k_uni_g = f"{mid}#universe/universe_prochee"
+k_huk_g = f"{mid}#redux/huk_mods"
+check('8 без набора и без диска → как раньше, default_source (huk/redux)',
+      prof_api([])._chosen_variant(mid) == k_huk_g, prof_api([])._chosen_variant(mid))
+a_camp = prof_api([{'type': 'camp', 'camp': 'universe', 'part': 'all', 'name': 'X'}])
+check('8 в наборе движок universe → вариант universe, а не default_source',
+      a_camp._chosen_variant(mid) == k_uni_g, a_camp._chosen_variant(mid))
+check('8 подсказка сборки = universe', a_camp._profile_camp_hint() == 'universe',
+      str(a_camp._profile_camp_hint()))
+# только моды сборки (движок игрок ставит свой) — сборку всё равно видно по набору
+a_mods = prof_api([{'type': 'camp', 'camp': 'universe', 'part': 'mods', 'name': 'X'}])
+check('8 в наборе только моды universe → тоже universe',
+      a_mods._chosen_variant(mid) == k_uni_g, a_mods._chosen_variant(mid))
+# две разных сборки в наборе — гадать нельзя, поведение прежнее
+a_mix = prof_api([{'type': 'camp', 'camp': 'universe', 'part': 'mods', 'name': 'X'},
+                  {'type': 'unit', 'camp': 'redux', 'unit': 'huk_mods', 'mod': '', 'name': 'Y'}])
+check('8 сборок в наборе несколько → подсказки нет', a_mix._profile_camp_hint() is None,
+      str(a_mix._profile_camp_hint()))
+check('8 …и вариант остаётся по default_source', a_mix._chosen_variant(mid) == k_huk_g,
+      a_mix._chosen_variant(mid))
+# установленная база важнее набора (её файлы уже на диске)
+a_inst = prof_api([{'type': 'camp', 'camp': 'universe', 'part': 'mods', 'name': 'X'}])
+a_inst._inst_base_camp = 'redux'
+check('8 установленный движок сильнее набора', a_inst._chosen_variant(mid) == k_huk_g,
+      a_inst._chosen_variant(mid))
+# явный выбор игрока сильнее всего
+a_pick = prof_api([{'type': 'camp', 'camp': 'universe', 'part': 'all', 'name': 'X'}])
+a_pick.profile['variants'] = {mid: k_sol}
+check('8 явный выбор игрока сильнее набора', a_pick._chosen_variant(mid) == k_sol,
+      a_pick._chosen_variant(mid))
+
+# 9) массовое «версии модов — одной сборкой» (отзыв «бегать по списку и везде тыкать redux»)
+def mass_api():
+    a = fresh()
+    a._catalog_cache = dict(base_catalog())
+    # второй versions_differ-мод: есть и в redux, и в universe
+    a._catalog_cache['Tw/Two'] = {
+        'name': 'Two', 'default_source': 'redux/huk_mods', 'versions_differ': True,
+        'variants': [{'source': 'redux/huk_mods', 'version': 'a', 'name': 'Two'},
+                     {'source': 'universe/universe_prochee', 'version': 'b', 'name': 'Two'}]}
+    # мод, которого в universe нет вовсе — трогать его нельзя
+    a._catalog_cache['Tw/OnlyRedux'] = {
+        'name': 'OnlyRedux', 'default_source': 'redux/huk_mods', 'versions_differ': True,
+        'variants': [{'source': 'redux/huk_mods', 'version': 'a', 'name': 'OnlyRedux'},
+                     {'source': 'redux/solyanka_main', 'version': 'b', 'name': 'OnlyRedux'}]}
+    a._catalog_entry = lambda m: a._catalog_cache.get(m)
+    return a
+
+ALL = [mid, 'Tw/Two', 'Tw/OnlyRedux', 'Cat/Solo']
+m = mass_api()
+pv = m.set_variants_camp('universe', ALL, True)
+check('9 preview считает только переключаемые', pv['count'] == 2, str(pv))
+check('9 preview ничего не записал', m.profile.get('variants') in (None, {}), str(m.profile.get('variants')))
+check('9 мод без universe-версии в список не попал',
+      all(x['mid'] != 'Tw/OnlyRedux' for x in pv['items']), str(pv['items']))
+check('9 обычный мод (без вариантов) не попал',
+      all(x['mid'] != 'Cat/Solo' for x in pv['items']), str(pv['items']))
+r = m.set_variants_camp('universe', ALL, False)
+check('9 применение переключило два мода', r['count'] == 2, str(r))
+check('9 выбор записан в профиль', m.profile['variants'].get(mid) == k_uni_g,
+      str(m.profile.get('variants')))
+check('9 второй мод тоже на universe',
+      m.profile['variants'].get('Tw/Two') == 'Tw/Two#universe/universe_prochee',
+      str(m.profile.get('variants')))
+check('9 мод без universe-версии не тронут', 'Tw/OnlyRedux' not in m.profile['variants'],
+      str(m.profile.get('variants')))
+check('9 смена сборки помечена перекачкой', r['redownload'] == 2, str(r))
+check('9 повтор той же сборки → менять нечего',
+      m.set_variants_camp('universe', ALL, False)['count'] == 0, '')
+check('9 без сборки — отказ', m.set_variants_camp('', ALL, True).get('ok') is False, '')
+m2 = mass_api(); m2._catalog_cache = None
+check('9 каталог не прогрет → внятная ошибка, а не падение',
+      m2.set_variants_camp('universe', ALL, True).get('ok') is False, '')
+
 print(f'\n===== ИТОГ: PASS={len(PASS)} FAIL={len(FAIL)} =====')
 sys.exit(1 if FAIL else 0)

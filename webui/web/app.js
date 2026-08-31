@@ -296,6 +296,7 @@ function wireUI() {
   $('moreInstall').onclick = () => { hideMoreMenu(); onInstallClick(); };
   $('moreMerge').onclick = () => { hideMoreMenu(); startMerge(); };
   $('moreCompat').onclick = () => { hideMoreMenu(); checkCompat(); };
+  $('campVariantsBtn').onclick = () => { hideMoreMenu(); openCampVariants(); };
   window.addEventListener('resize', reflowToolbar);
   $('baseSel').onchange = async () => {
     const v = $('baseSel').value;
@@ -546,10 +547,12 @@ function wireUI() {
       modCards.forEach((c, m) => { const z = +c.style.zIndex || 0; if (z >= tz) { tz = z; top = m; } });
       if (top) { closeModCard(top); return; }
     }
+    // Подтверждение — ВЫШЕ обычных модалок (его зовут из окна профилей/обновлений),
+    // поэтому Esc снимает сперва его, а не окно под ним.
+    if (!$('confirmOverlay').classList.contains('hidden')) { $('confirmCancel').click(); return; }
     for (const id of ['planOverlay', 'helpOverlay', 'compatOverlay', 'addOverlay', 'profileOverlay', 'settingsOverlay']) {
       if (!$(id).classList.contains('hidden')) { hide(id); return; }
     }
-    if (!$('confirmOverlay').classList.contains('hidden')) { $('confirmCancel').click(); return; }
     if (!$('mergeOverlay').classList.contains('hidden')) { $('mergeSkipBtn').click(); return; }
     if (selected.size) { selected.clear(); anchorIid = null; renderTree(); return; }  // снять выбор (12)
   });
@@ -687,8 +690,16 @@ function renderTree() {
   const body = $('treeBody');
   const camps = (TREE && TREE.camps) || [];
   if (!camps.length) {
-    body.innerHTML = `<div class="tree-empty">Пока пусто.<br>
-      Нажмите «➕ Добавить мод», чтобы собрать набор, затем «🧩 Установить все».</div>`;
+    // Пустой профиль сам предлагает сборку: пресеты «всё одной сборкой» жили в окне
+    // «Профили модов», и новичок их не находил — шёл по каскаду «Добавить мод» в девять
+    // шагов. Пустой список всё равно ничего не показывает — отдаём место выбору.
+    body.innerHTML = `<div class="tree-empty qstart">
+      <h3>С чего начать</h3>
+      <div class="qs-sub">Выберите сборку — добавим её движок и все моды.<br>Дальше останется нажать «🧩 Установить все».</div>
+      <div class="camp-picks" id="qsCamps"><div class="sub">Загрузка списка сборок…</div></div>
+      <button class="qs-manual" id="qsManual">или собрать профиль вручную →</button></div>`;
+    $('qsManual').onclick = openAdd;
+    fillQuickStart();
     updateActionButtons();
     return;
   }
@@ -721,7 +732,18 @@ function renderTree() {
     const pCol = collapsed.has(pkey);
     rows.push(groupRow('pack', label, pkey, pCol, mods.length, statusCounts(mods), toggleCounts(mods)));
     if (pCol) continue;
-    for (const n of mods) { NODE[n.iid] = n; rows.push(leafRow(n, 2)); }
+    // моды из поставки игры — отдельной подгруппой в конце пака, чтобы не смешивались
+    // со скачиваемыми (игрок принял их за «ORIG/REDUX-моды» и не понимал, зачем они тут)
+    const stockMods = mods.filter((n) => n.stock);
+    const ownMods = stockMods.length ? mods.filter((n) => !n.stock) : mods;
+    for (const n of ownMods) { NODE[n.iid] = n; rows.push(leafRow(n, 2)); }
+    if (!stockMods.length) continue;
+    const skey = 's:' + label;
+    const sCol = collapsed.has(skey);
+    rows.push(groupRow('stock', 'Идут с игрой', skey, sCol, stockMods.length,
+      statusCounts(stockMods), toggleCounts(stockMods), 2));
+    if (sCol) continue;
+    for (const n of stockMods) { NODE[n.iid] = n; rows.push(leafRow(n, 3)); }
   }
   body.innerHTML = rows.length ? rows.join('')
     : `<div class="tree-empty">Ничего не подходит под фильтр.<br>Снимите фильтр или измените поиск.</div>`;
@@ -821,10 +843,11 @@ function onTreeKey(e) {
   }
 }
 
-function groupRow(kind, label, key, isCol, count, counts, tc) {
-  const icon = kind === 'camp' ? '🗂' : '■';
+function groupRow(kind, label, key, isCol, count, counts, tc, depth) {
+  const icon = kind === 'camp' ? '🗂' : (kind === 'stock' ? '🎮' : '■');
   const tw = isCol ? '▸' : '▾';
-  const lvl = 'lvl1';                     // паки/разделы теперь верхний уровень (сборка убран)
+  // паки/разделы — верхний уровень (сборка убрана); depth=2 — подгруппа внутри пака
+  const lvl = depth === 2 ? 'lvl2' : 'lvl1';
   // в свёрнутом состоянии содержимое не видно → показываем разбивку по статусам
   // (цветные цифры через «/»); в развёрнутом достаточно общего счётчика.
   const cell = (isCol && counts) ? statusCountHtml(counts) : `<span class="tag">${count}</span>`;
@@ -832,7 +855,7 @@ function groupRow(kind, label, key, isCol, count, counts, tc) {
   const gc = (n, title) => n ? `<span class="gcnt" title="${title}: ${n} из ${count}">${n}</span>` : '';
   const inGame = tc ? gc(tc.g, 'Подключено в игре') : '';
   const inProf = tc ? gc(tc.p, 'В профиле') : '';
-  return `<div class="row group ${kind} ${lvl}" data-key="${esc(key)}" role="treeitem" aria-level="1" aria-expanded="${isCol ? 'false' : 'true'}" aria-label="${esc(label)}, группа, ${count}, в игре ${tc ? tc.g : 0}, в профиле ${tc ? tc.p : 0}">
+  return `<div class="row group ${kind} ${lvl}" data-key="${esc(key)}" role="treeitem" aria-level="${depth === 2 ? 2 : 1}" aria-expanded="${isCol ? 'false' : 'true'}" aria-label="${esc(label)}, группа, ${count}, в игре ${tc ? tc.g : 0}, в профиле ${tc ? tc.p : 0}">
     <div class="name"><span class="tw">${tw}</span><span class="label">${icon} ${esc(label)}</span></div>
     <div class="cell"></div><div class="cell">${inGame}</div><div class="cell">${inProf}</div>
     <div class="cell">${cell}</div></div>`;
@@ -889,6 +912,10 @@ function leafRow(n, lvl) {
   // во втором режиме рядом показываем папку мелким, чтобы не терять ориентир
   const alt = (STATE.name_mode === 'module' && n.name && n.name !== n.label)
     ? `<span class="alt-name" title="имя папки на диске">${esc(n.label)}</span>` : '';
+  // мод из комплекта игры: приписка к заголовку. Метки сборок оставляем — они про то,
+  // в каких каталогах мод числится, а не про то, откуда он взялся на диске.
+  const stock = n.stock
+    ? '<span class="stock-note" title="Мод входит в поставку игры (Steam кладёт его в Mods сам) — скачивать и устанавливать не нужно">(поставляется с игрой)</span>' : '';
   const hidMark = n.hidden ? '<span class="hid-mark" title="Скрыт из списка (виден, т.к. включён показ скрытых)">🙈</span>' : '';
   const frzMark = n.frozen
     ? `<span class="frz-mark" title="${n.frozen_by_hidden
@@ -896,7 +923,7 @@ function leafRow(n, lvl) {
         : 'Не обновляется: вы пометили мод 🔒 (ПКМ по строке — снять пометку)'}">🔒</span>` : '';
   return `<div class="row leaf lvl${lvl}${sel}${hid}${n.frozen ? ' frozen-mod' : ''}" data-iid="${esc(n.iid)}" data-mid="${esc(n.mid || '')}" role="treeitem" aria-level="${lvl}" aria-selected="${isSel ? 'true' : 'false'}" aria-label="${esc(disp)}, ${esc(n.status)}${n.in_profile ? ', в профиле' : ''}${n.hidden ? ', скрыт' : ''}">
     <div class="name">${check}<span class="tw">·</span>
-      <span class="label-wrap"><span class="name-line">${hidMark}${frzMark}<span class="label">${esc(disp)}</span>${labelBadges(n.labels)}${userTags(n.tags, n.mid)}${alt}${date}</span>${variantSwitch(n)}${desc}</span>${noteIc}${info}</div>
+      <span class="label-wrap"><span class="name-line">${hidMark}${frzMark}<span class="label">${esc(disp)}</span>${stock}${labelBadges(n.labels)}${userTags(n.tags, n.mid)}${alt}${date}</span>${variantSwitch(n)}${desc}</span>${noteIc}${info}</div>
     <div class="cell">${esc(colValue(n) || '')}</div>
     <div class="cell">${inGame}</div>
     <div class="cell">${inProf}</div>
@@ -1392,6 +1419,50 @@ async function doClearMods() {
     null, { okLabel: 'Далее…' });
 }
 
+// ───────── версии модов одной сборкой (массовое переключение вариантов) ─────────
+// Мод, лежащий в нескольких сборках, переключался только поштучно кнопками в строке
+// («бегать по всему списку и везде тыкать redux» — жалоба игрока).
+async function openCampVariants() {
+  const seen = new Set(), mids = [];
+  allNodes().forEach((n) => {
+    if (!n.mid || !n.variants || n.variants.length < 2 || seen.has(n.mid)) return;
+    seen.add(n.mid); mids.push(n.mid);
+  });
+  if (!mids.length) { toast('Модов с версиями из разных сборок не найдено', 'ok'); return; }
+  const list = await loadCampChoices(false);
+  if (!list || !list.length) { toast('Список сборок недоступен', 'err'); return; }
+  let sel = PROF_BASE_CAMP || '';
+  confirmBox('Версии модов — одной сборкой',
+    `<div class="sub" style="margin-bottom:9px">Часть модов раздаётся сразу в нескольких сборках.
+      Выберите сборку — у таких модов будет выбрана её версия. Моды, которых в этой сборке нет,
+      останутся как есть; выбор Pol/Shu не трогаем — это разные моды, а не версии одного.</div>
+     <div class="camp-picks" id="cvCamps">${campPickHTML(list, sel, false)}</div>
+     <div class="sub" id="cvCount" style="margin-top:9px">Выберите сборку.</div>`,
+    () => applyCampVariants(sel, mids), null, { okLabel: 'Переключить' });
+  const preview = async (camp) => {
+    sel = camp;
+    $('confirmBody').querySelectorAll('.camp-pick').forEach((x) =>
+      x.classList.toggle('on', x.dataset.camp === camp));
+    $('cvCount').textContent = 'Считаю…';
+    const r = await api().set_variants_camp(camp, mids, true);
+    if (!$('cvCount')) return;                    // окно успели закрыть
+    $('cvCount').textContent = (!r || !r.ok) ? ((r && r.error) || 'Не удалось посчитать')
+      : (r.count ? `Будет переключено модов: ${r.count}. Их файлы придётся перекачать при установке.`
+        : 'Переключать нечего — все такие моды уже этой сборки.');
+  };
+  $('confirmBody').querySelectorAll('.camp-pick').forEach((b) => b.onclick = () => preview(b.dataset.camp));
+  if (sel) preview(sel);
+}
+async function applyCampVariants(camp, mids) {
+  if (!camp) { toast('Выберите сборку', 'err'); return; }
+  const r = await api().set_variants_camp(camp, mids, false);
+  if (!r || !r.ok) { toast((r && r.error) || 'Не удалось', 'err'); return; }
+  if (!r.count) { toast('Все такие моды уже этой сборки', 'ok'); return; }
+  refreshTree();
+  toast(`Переключено модов: ${r.count}`
+    + (r.redownload ? ` · перекачать при установке: ${r.redownload}` : ''), 'ok');
+}
+
 // ───────── совместимость ─────────
 async function checkCompat() {
   $('compatBody').innerHTML = '<div class="sub">Проверяю…</div>';
@@ -1525,6 +1596,39 @@ async function browseGame() {
 // ───────── профили/настройки ─────────
 async function switchProfile(name) { STATE = await api().switch_profile(name); applyState(); selected.clear(); activeIid = null; relMid = null; renderRelList(null); refreshTree(); }
 const PRESET_CAMPS = ['universe', 'redux', 'original'];   // вшитые пресеты «всё одной метки»
+let CAMPCHOICES = null;        // кэш get_camp_choices (сборки для быстрого старта)
+let QUICK_SEL = '';            // выбранная сборка во вкладке «Быстрый старт»
+let PROF_BASE_CAMP = null;     // сборка, движок которой уже в профиле (или null)
+
+// Список сборок для быстрого старта. force=true — перезапросить (in_profile меняется
+// после добавления). Ошибку не глотаем молча: вызывающий покажет её в своём месте.
+async function loadCampChoices(force) {
+  if (CAMPCHOICES && !force) return CAMPCHOICES;
+  let r; try { r = await api().get_camp_choices(); } catch (e) { r = null; }
+  if (!r || !r.ok) return null;
+  CAMPCHOICES = r.camps || [];
+  PROF_BASE_CAMP = r.base_camp || null;
+  return CAMPCHOICES;
+}
+// Одна кнопка сборки. sel — какую подсветить, disableDone — гасить уже набранные.
+function campPickHTML(list, sel, disableDone) {
+  return list.map((c) => {
+    const done = disableDone && c.in_profile;
+    const cnt = (c.mods === null || c.mods === undefined) ? '' : `${c.mods} ${plural(c.mods, 'мод', 'мода', 'модов')}`;
+    const meta = done ? 'уже в профиле' : cnt;
+    return `<button class="camp-pick${c.camp === sel ? ' on' : ''}" data-camp="${esc(c.camp)}"${done ? ' disabled' : ''}
+      title="${esc(c.title)}${cnt ? ' — ' + cnt : ''}">
+      <span class="lbl lbl-${esc(c.camp)}">${esc(CAMP_BADGE[c.camp] || c.camp.toUpperCase())}</span>
+      <span class="cp-name">${esc(c.title)}</span>
+      ${meta ? `<span class="cp-meta">${esc(meta)}</span>` : ''}</button>`;
+  }).join('');
+}
+function plural(n, one, few, many) {
+  const a = Math.abs(n) % 100, b = a % 10;
+  if (a > 10 && a < 20) return many;
+  if (b > 1 && b < 5) return few;
+  return b === 1 ? one : many;
+}
 function openProfiles() {
   $('newProfName').value = '';
   renderProfList();
@@ -1538,16 +1642,46 @@ function renderPresets() {
      </button>`).join('');
   $('presetRow').querySelectorAll('.pbtn').forEach((b) => b.onclick = () => addPreset(b.dataset.camp));
 }
-async function addPreset(camp) {
-  // «Всё X» = две явные записи: движок сборки и её моды (раньше была одна мутная
-  // запись «вся сборка»). Если движок уже занят другой сборкой — бэк откажет.
-  const rb = await api().add_mod({ mode: 'src', camp, pack: null, part: 'base' });
-  if (!rb || (!rb.ok && !rb.dup)) { toast((rb && rb.error) || 'Не удалось', 'err'); return; }
+// Сборка целиком = две явные записи: движок сборки и её моды (раньше была одна мутная
+// запись «вся сборка»). Если движок уже занят другой сборкой — бэк откажет.
+// withBase=false → только моды (движок игрок оставляет свой).
+// Возвращает {ok, dup} — вызывающий сам решает, что сказать и что перерисовать.
+async function addWholeCamp(camp, withBase) {
+  let rb = { ok: true, dup: true };
+  if (withBase !== false) {
+    rb = await api().add_mod({ mode: 'src', camp, pack: null, part: 'base' });
+    if (!rb || (!rb.ok && !rb.dup)) return { ok: false, error: (rb && rb.error) || 'Не удалось' };
+  }
   const rm = await api().add_mod({ mode: 'src', camp, pack: null, part: 'mods' });
-  if (!rm || (!rm.ok && !rm.dup)) { toast((rm && rm.error) || 'Не удалось', 'err'); return; }
-  if (rb.dup && rm.dup) { toast(`«${campLabel(camp)}» уже в профиле`, 'ok'); return; }
+  if (!rm || (!rm.ok && !rm.dup)) return { ok: false, error: (rm && rm.error) || 'Не удалось' };
+  CAMPCHOICES = null;                       // набор изменился → пересчитать «уже в профиле»
+  return { ok: true, dup: !!(rb.dup && rm.dup) };
+}
+// экран пустого профиля: подставить сборки, клик = добавить целиком и перерисовать
+async function fillQuickStart() {
+  const box = $('qsCamps');
+  if (!box) return;
+  const list = await loadCampChoices(true);
+  if (!$('qsCamps')) return;                 // дерево успели перерисовать
+  if (!list || !list.length) {
+    $('qsCamps').innerHTML = '<div class="sub">Список сборок недоступен — проверьте подключение и нажмите «➕ Добавить мод».</div>';
+    return;
+  }
+  $('qsCamps').innerHTML = campPickHTML(list, '', false);
+  $('qsCamps').querySelectorAll('.camp-pick').forEach((b) => b.onclick = async () => {
+    if (busy) return;
+    b.disabled = true;
+    const ok = await addPreset(b.dataset.camp, true);
+    if (!ok) b.disabled = false;
+  });
+}
+async function addPreset(camp, withBase) {
+  const r = await addWholeCamp(camp, withBase);
+  if (!r.ok) { toast(r.error, 'err'); return false; }
+  if (r.dup) { toast(`«${campLabel(camp)}» уже в профиле`, 'ok'); return true; }
   refreshTree();
   toast(`Добавлено «всё ${campLabel(camp)}» — нажмите «🧩 Установить все»`, 'ok');
+  return true;
 }
 
 // ───────── проверка обновлений: порядок сборок ─────────
@@ -1810,7 +1944,9 @@ async function openAdd() {
   $('addPack').innerHTML = ''; $('addPack').disabled = true;
   $('addMod').innerHTML = ''; $('addMod').disabled = true;
   $('addUrl').value = '';
-  setAddMode('search');                 // по умолчанию — поиск по названию
+  // пустой профиль → сразу «Быстрый старт» (человеку нужна сборка целиком, а не поиск
+  // по названию); профиль уже собран → как раньше, поиск по названию
+  setAddMode((TREE && (TREE.camps || []).length) ? 'search' : 'quick');
   show('addOverlay');
   const r = await api().get_camp_packs();
   if (!r.ok) { $('addStatus').textContent = 'Ошибка: ' + r.error; return; }
@@ -1822,11 +1958,43 @@ async function openAdd() {
 }
 function setAddMode(mode) {
   document.querySelectorAll('#addModeSeg button').forEach((b) => b.classList.toggle('on', b.dataset.amode === mode));
+  $('addQuick').style.display = mode === 'quick' ? 'block' : 'none';
   $('addSearch').style.display = mode === 'search' ? 'block' : 'none';
   $('addSrc').style.display = mode === 'src' ? 'block' : 'none';
   $('addFork').style.display = mode === 'fork' ? 'block' : 'none';
   $('addOverlay').dataset.mode = mode;
   if (mode === 'search') loadAllMods();
+  if (mode === 'quick') fillQuickTab();
+}
+// вкладка «Быстрый старт»: выбор сборки + галочка движка. Ставится не сразу по клику
+// (в отличие от экрана пустого профиля), а по кнопке «Добавить» — как в остальных вкладках.
+async function fillQuickTab() {
+  const list = await loadCampChoices(true);
+  const box = $('quickCamps');
+  if (!box) return;
+  if (!list || !list.length) {
+    box.innerHTML = '<div class="sub">Список сборок недоступен — проверьте подключение.</div>';
+    return;
+  }
+  if (!QUICK_SEL || !list.some((c) => c.camp === QUICK_SEL && !c.in_profile)) {
+    const free = list.find((c) => !c.in_profile);
+    QUICK_SEL = free ? free.camp : '';
+  }
+  box.innerHTML = campPickHTML(list, QUICK_SEL, true);
+  box.querySelectorAll('.camp-pick').forEach((b) => b.onclick = () => {
+    QUICK_SEL = b.dataset.camp;
+    box.querySelectorAll('.camp-pick').forEach((x) => x.classList.toggle('on', x === b));
+  });
+  // движок уже набран → вторую базу бэк не пустит; галочку снимаем и объясняем
+  const chk = $('quickWithBase'), lab = chk && chk.parentElement;
+  if (chk) {
+    const busyBase = !!PROF_BASE_CAMP;
+    chk.checked = !busyBase;
+    chk.disabled = busyBase;
+    if (lab) lab.querySelector('span').textContent = busyBase
+      ? `движок уже есть в профиле — от сборки «${campLabel(PROF_BASE_CAMP)}»`
+      : 'добавить движок сборки — нужен, если игра ещё без модов';
+  }
 }
 async function loadAllMods() {
   if (ALLMODS.length) { renderSearchResults(); return; }
@@ -1861,7 +2029,10 @@ function onAddCamp() {
   packsByUnit = {};
   // «вся сборка» разделена на две ЯВНЫЕ операции: движок и моды. Раньше один пункт
   // делал и то и другое, и по строке в профиле нельзя было понять, что именно едет.
-  $('addPack').innerHTML = '<option value="__base__">★ Базовые файлы игры (движок + фиксы)</option>'
+  // Первым — «вся сборка»: разделение на движок/моды нужно меньшинству, а читалось как
+  // «Все моды сборки не включают базу» (отзыв игрока). Целое идёт до частей.
+  $('addPack').innerHTML = '<option value="__all__">★ Вся сборка (движок + все моды)</option>'
+    + '<option value="__base__">★ Базовые файлы игры (движок + фиксы)</option>'
     + '<option value="__mods__">★ Все моды сборки</option>';
   packs.forEach((p) => {
     packsByUnit[p.unit] = p;
@@ -1874,13 +2045,17 @@ function onAddCamp() {
   $('addMod').innerHTML = ''; $('addMod').disabled = true;
 }
 const PART_HINT = {
+  __all__: 'Движок сборки и все её моды — обычный выбор. В профиль лягут две строки: движок и моды, их можно убрать по отдельности.',
   __base__: 'Движок сборки: Rangers.exe, DATA, CFG + фиксы к базе. Держать можно только одну базу — сейвы привязаны к ней.',
   __mods__: 'Все моды сборки, без файлов движка. Моды разных сборок совмещать можно.',
 };
 async function onAddPack() {
   $('addMod').innerHTML = ''; $('addMod').disabled = true;
   const unit = $('addPack').value;
-  if (!unit || PART_HINT[unit]) {             // часть сборки (движок / моды)
+  if (!unit || PART_HINT[unit]) {             // вся сборка / её часть (движок / моды)
+    // третий селект тут не при чём: пустой, но кликабельный список читался как
+    // «мод не выбран» — показываем прочерк и держим его отключённым
+    $('addMod').innerHTML = '<option value="">— не требуется —</option>';
     $('addStatus').textContent = PART_HINT[unit] || '';
     return;
   }
@@ -1920,6 +2095,16 @@ async function onAddModSel() {
 async function doAdd() {
   const mode = $('addOverlay').dataset.mode || 'search';
   let payload;
+  if (mode === 'quick') {
+    if (!QUICK_SEL) { toast('Выберите сборку', 'err'); return; }
+    const withBase = $('quickWithBase').checked && !$('quickWithBase').disabled;
+    const r = await addWholeCamp(QUICK_SEL, withBase);
+    if (!r.ok) { toast(r.error, 'err'); return; }
+    hide('addOverlay'); refreshTree();
+    toast(r.dup ? `«${campLabel(QUICK_SEL)}» уже в профиле`
+      : `Добавлено «всё ${campLabel(QUICK_SEL)}» — нажмите «🧩 Установить все»`, 'ok');
+    return;
+  }
   if (mode === 'search') {
     if (!SELECTED_SEARCH) { toast('Выберите мод из списка', 'err'); return; }
     payload = { mode: 'search', id: SELECTED_SEARCH.id,
@@ -1932,6 +2117,13 @@ async function doAdd() {
     const camp = $('addCamp').value;
     if (!camp) { toast('Выберите сборку', 'err'); return; }
     const unit = $('addPack').value;
+    if (unit === '__all__') {                 // вся сборка = движок + моды, две записи
+      const r = await addWholeCamp(camp, true);
+      if (!r.ok) { toast(r.error, 'err'); return; }
+      hide('addOverlay'); refreshTree();
+      toast(r.dup ? `«${campLabel(camp)}» уже в профиле` : `Добавлено «всё ${campLabel(camp)}»`, 'ok');
+      return;
+    }
     const part = PART_HINT[unit] ? unit.replace(/_/g, '') : '';   // __base__ → base
     const pack = part ? null : (unit ? packsByUnit[unit] : null);
     payload = { mode: 'src', camp, part,
@@ -2662,11 +2854,11 @@ const TOUR_STEPS = [
   { sel: '.base-pick', title: 'Базовая сборка',
     text: 'Второй ряд шапки: базовая сборка, относительно которой проверяются обновления. «Авто» определит её по файлам в Mods (кнопка 🎯). Рядом — «Проверить обновления». Важно: сейвы привязаны к базе, посреди партии базу менять нельзя.' },
   { sel: '#addOverlay .modal', open: 'add', title: 'Добавление модов',
-    text: 'Три способа: «Поиск» по названию во всём каталоге; «Сборка → Пак → Мод» — выбор по цепочке (можно добавить и ЦЕЛУЮ сборку разом); «По ссылке» — форк-мод по URL дескриптора. Выбранное попадает в очередь профиля, а ставится потом кнопкой «Установить все».' },
+    text: 'Четыре способа. «⚡ Быстрый старт» — взять сборку целиком: движок и все её моды одной кнопкой; пока профиль пуст, эта вкладка открыта сразу. «🔎 По названию» — поиск по всему каталогу. «🗂 Сборка → Пак → Мод» — выбор по цепочке: вся сборка, только движок, только моды, отдельный пак или один мод. «🔗 По ссылке» — форк-мод по URL дескриптора. Выбранное попадает в очередь профиля, а ставится потом кнопкой «Установить все».' },
   { sel: '#railToggle', title: 'Фильтры и вид списка',
     text: 'Левая панель: как группировать список (по папкам или по разделам ModuleInfo), поиск по имени/описанию, фильтры по состоянию, «только скрытые», «без тега» и чипы ваших тегов и меток сборок. Панель сворачивается кнопкой ▤.' },
   { sel: '#treeBody', title: 'Список модов',
-    text: 'Все моды профиля и установленные на диске. Клик по строке — ВЫДЕЛИТЬ её (активная, подсветка — ею управляются «Связи» и карточка ⓘ). Галочка «В профиле» включает/выключает мод в наборе, «В игре» — подключён ли он в самой игре. У модов с несколькими версиями справа переключатель сборки (REDUX / UNI / имя пака) — можно выбрать, из какой сборки взять мод. В строке также дата мода (её можно выделить и скопировать).' },
+    text: 'Все моды профиля и установленные на диске. Клик по строке — ВЫДЕЛИТЬ её (активная, подсветка — ею управляются «Связи» и карточка ⓘ). Галочка «В профиле» включает/выключает мод в наборе, «В игре» — подключён ли он в самой игре. У модов с несколькими версиями справа переключатель сборки (REDUX / UNI / имя пака) — можно выбрать, из какой сборки взять мод. В строке также дата мода (её можно выделить и скопировать). Пока профиль пуст, вместо списка здесь предлагают выбрать сборку целиком. Моды из поставки игры помечены «(поставляется с игрой)» и собраны в подгруппу «Идут с игрой» — их ставить не нужно, они уже в игре.' },
   { sel: '#treeBody', title: 'Теги, заметки, скрытие',
     text: 'Правый клик по моду: 🙈 скрыть из списка, 🏷 свои теги (по ним потом фильтровать — чипы кликабельны), 📝 личная заметка (значок 📝 у кнопки ⓘ, текст — при наведении). Всё это видно и в карточке ⓘ (подвижное окно, можно открыть несколько). Если выделено несколько модов — скрытие и теги применяются ко всем сразу.' },
   { sel: '#treeBody', title: 'Массовый выбор',
@@ -2674,7 +2866,7 @@ const TOUR_STEPS = [
   { sel: '#relWrap', title: 'Связи мода',
     text: 'Сворачиваемый список под основным. Выделите мод — здесь теми же строками появятся моды, которые он ТРЕБУЕТ, для которых он НУЖЕН и с которыми КОНФЛИКТУЕТ (в т.ч. односторонние конфликты — кто объявил конфликт с ним). Клик по связи — перейти к тому моду.' },
   { sel: '#installBtn', title: 'Установить и обновить',
-    text: '«Установить все» качает и ставит моды профиля. «Обновить все» (после «Проверить обновления») ставит новые версии, СОХРАНЯЯ ваши правки в файлах мода. Бесконфликтные обновления по умолчанию идут в тихом режиме, окно с решениями всплывает только когда нужен ваш выбор. Редкие действия — в «⋯ Ещё».' },
+    text: '«Установить все» качает и ставит моды профиля. «Обновить все» (после «Проверить обновления») ставит новые версии, СОХРАНЯЯ ваши правки в файлах мода. Бесконфликтные обновления по умолчанию идут в тихом режиме, окно с решениями всплывает только когда нужен ваш выбор. Редкие действия — в «⋯ Ещё»; там же «🏷 Версии модов — одной сборкой»: перевести на выбранную сборку сразу все моды, которые раздаются в нескольких.' },
   { sel: '#compatBtn', title: 'Проверка совместимости',
     text: 'Покажет, всё ли в наборе согласовано: есть ли ровно одна база, на месте ли фиксы, нет ли конфликтов и незакрытых зависимостей, не сменилась ли база (предупреждение о сейвах). Ничего не меняет — только показывает, решение за вами.' },
   { sel: '.side-tabs', title: 'Игра и Журнал',
@@ -2831,13 +3023,19 @@ function confirmBox(title, html, onOk, onCancel, opts) {
   // подтверждения опасных действий) — чтобы случайный двойной клик не «протолкнул» оба
   ok.parentElement.style.flexDirection = opts.okSwap ? 'row-reverse' : '';
   show('confirmOverlay');
+  // Фокус уводим внутрь подтверждения: иначе он остаётся на кнопке под ним (напр. ✕
+  // профиля в окне профилей) и Enter/Esc этого окна до подтверждения не доходят.
+  try { (opts.okHidden ? cancel : ok).focus(); } catch (e) {}
   const done = (fn) => { hide('confirmOverlay'); $('confirmOverlay').onkeydown = null; if (fn) fn(); };
   ok.onclick = () => done(onOk);
   cancel.onclick = () => done(onCancel);
   // Enter подтверждает (кроме многострочных полей), Esc отменяет — без мыши
+  // stopPropagation обязателен: иначе Escape, погасив подтверждение, всплывёт до
+  // document и закроет ещё и модалку под ним (окно профилей) — одним нажатием два окна
   $('confirmOverlay').onkeydown = (e) => {
-    if (e.key === 'Enter' && e.target.tagName !== 'TEXTAREA' && !opts.okHidden) { e.preventDefault(); done(onOk); }
-    else if (e.key === 'Escape') { e.preventDefault(); done(onCancel); }
+    if (e.key === 'Enter' && e.target.tagName !== 'TEXTAREA' && !opts.okHidden) {
+      e.preventDefault(); e.stopPropagation(); done(onOk);
+    } else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); done(onCancel); }
   };
 }
 // модальный ввод строки/текста (замена window.prompt, которого нет в pywebview).

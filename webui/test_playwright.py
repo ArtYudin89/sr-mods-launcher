@@ -254,6 +254,20 @@ MOCK_DISPATCH = {
     'switch_profile': lambda args: {'ok': True},
     'new_profile': lambda args: {'ok': True, 'name': args[0] if args else 'new'},
     'delete_profile': lambda args: {'ok': True},
+    'get_camp_choices': lambda args: {
+        'ok': True, 'base_camp': None,
+        'camps': [
+            {'camp': 'universe', 'title': 'Space Rangers Unite (Community)', 'mods': 184,
+             'has_base': True, 'in_profile': False},
+            {'camp': 'redux', 'title': 'ПБ «Свободная Бухта»', 'mods': 96,
+             'has_base': True, 'in_profile': False},
+            {'camp': 'original', 'title': 'Original', 'mods': 61,
+             'has_base': True, 'in_profile': True},
+        ]},
+    # третий аргумент — preview: считаем «сколько бы переключилось»
+    'set_variants_camp': lambda args: ({'ok': True, 'count': 2, 'items': []}
+                                       if (len(args) > 2 and args[2])
+                                       else {'ok': True, 'count': 2, 'redownload': 2}),
     'add_mod': lambda args: {'ok': True},
     'remove_pidx': lambda args: {'ok': True},
     'clear_queue': lambda args: {'ok': True},
@@ -1231,6 +1245,103 @@ def scenario_help_pause_freeze(page, base_url):
         shot(page, '13b_card_source')
 
 
+def scenario_confirm_layer_and_quickstart(page, base_url):
+    """Сц.14: подтверждение поверх модалки (отзыв «удаление профиля не подтвердить»),
+    быстрый старт (пустой профиль + вкладка) и массовое переключение версий."""
+    print('\n=== Сц.14: слой подтверждения, быстрый старт, версии одной сборкой ===')
+    init_page(page, base_url)
+
+    # 1) ✕ у профиля в ОТКРЫТОМ окне профилей: подтверждение должно быть кликабельным,
+    #    а не уезжать под окно (одинаковый z-index + позднее место в разметке).
+    page.locator('#profileMenuBtn').click()
+    time.sleep(0.3)
+    dels = page.locator('#profList .prof-del')
+    check('в окне профилей есть кнопка удаления', dels.count() > 0, str(dels.count()))
+    dels.first.click()
+    time.sleep(0.3)
+    check('подтверждение открылось',
+          not page.locator('#confirmOverlay').evaluate("e => e.classList.contains('hidden')"))
+    # главный признак бага: точка кнопки «Продолжить» принадлежит подтверждению,
+    # а не перекрывшему его окну профилей
+    on_top = page.evaluate("""() => {
+      const b = document.getElementById('confirmOk');
+      const r = b.getBoundingClientRect();
+      const el = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+      return !!el && document.getElementById('confirmOverlay').contains(el);
+    }""")
+    check('подтверждение НЕ под окном профилей (кнопка доступна клику)', on_top)
+    shot(page, '14a_confirm_over_profiles')
+    # Esc снимает подтверждение, окно профилей остаётся
+    page.keyboard.press('Escape')
+    time.sleep(0.25)
+    check('Esc закрыл подтверждение',
+          page.locator('#confirmOverlay').evaluate("e => e.classList.contains('hidden')"))
+    check('окно профилей осталось открытым',
+          not page.locator('#profileOverlay').evaluate("e => e.classList.contains('hidden')"))
+    page.keyboard.press('Escape')
+    time.sleep(0.25)
+
+    # 2) вкладка «Быстрый старт» в окне добавления: сборки целиком одной кнопкой
+    page.locator('#addBtn').click()
+    time.sleep(0.4)
+    page.locator('#addModeSeg button[data-amode="quick"]').click()
+    time.sleep(0.4)
+    picks = page.locator('#quickCamps .camp-pick')
+    check('в быстром старте перечислены сборки', picks.count() == 3, str(picks.count()))
+    txt = page.text_content('#quickCamps') or ''
+    check('видно, сколько модов приедет', '184' in txt, txt[:80])
+    check('уже набранная сборка отключена',
+          page.locator('#quickCamps .camp-pick[disabled]').count() == 1)
+    page.locator('#quickCamps .camp-pick:not([disabled])').first.click()
+    time.sleep(0.2)
+    check('клик выделяет сборку', page.locator('#quickCamps .camp-pick.on').count() == 1)
+    shot(page, '14b_quick_start_tab')
+    # в каскаде «Сборка → Пак → Мод» появился пункт «вся сборка»
+    page.locator('#addModeSeg button[data-amode="src"]').click()
+    time.sleep(0.2)
+    page.select_option('#addCamp', 'redux')
+    time.sleep(0.3)
+    opts = page.evaluate("[...document.querySelectorAll('#addPack option')].map(o => o.value)")
+    check('в паках есть «вся сборка»', '__all__' in opts, str(opts[:4]))
+    page.select_option('#addPack', '__all__')
+    time.sleep(0.25)
+    check('«вся сборка» поясняется',
+          'движок' in (page.text_content('#addStatus') or ''))
+    check('третий список показывает прочерк, а не пустоту',
+          '— не требуется —' in (page.text_content('#addMod') or ''))
+    page.keyboard.press('Escape')
+    time.sleep(0.25)
+
+    # 3) пустой профиль предлагает сборку вместо «Пока пусто»
+    page.evaluate("() => { window.__camps = TREE.camps; TREE.camps = []; renderTree(); }")
+    time.sleep(0.4)
+    check('на пустом профиле есть выбор сборки',
+          page.locator('#qsCamps .camp-pick').count() == 3,
+          str(page.locator('#qsCamps .camp-pick').count()))
+    check('есть выход на ручную сборку профиля', page.locator('#qsManual').count() == 1)
+    shot(page, '14c_empty_profile_quickstart')
+    page.evaluate("() => { TREE.camps = window.__camps; renderTree(); }")
+    time.sleep(0.3)
+
+    # 4) «Версии модов — одной сборкой»: превью считает, применение переключает
+    page.locator('#moreBtn').click()
+    time.sleep(0.2)
+    page.locator('#campVariantsBtn').click()
+    time.sleep(0.4)
+    check('окно массового переключения открылось',
+          not page.locator('#confirmOverlay').evaluate("e => e.classList.contains('hidden')"))
+    page.locator('#cvCamps .camp-pick').nth(1).click()
+    time.sleep(0.4)
+    check('показано, сколько модов переключится',
+          'Будет переключено модов: 2' in (page.text_content('#cvCount') or ''),
+          page.text_content('#cvCount') or '')
+    shot(page, '14d_camp_variants')
+    page.locator('#confirmOk').click()
+    time.sleep(0.4)
+    check('после применения окно закрылось',
+          page.locator('#confirmOverlay').evaluate("e => e.classList.contains('hidden')"))
+
+
 def main():
     print('Запуск mock-сервера…')
     srv, base_url = start_server(17777)
@@ -1257,6 +1368,7 @@ def main():
             scenario_first_run_appearance,
             scenario_plan_filter_tree,
             scenario_help_pause_freeze,
+            scenario_confirm_layer_and_quickstart,
         ]
 
         for sc in scenarios:

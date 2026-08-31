@@ -565,6 +565,50 @@ check('@-вариант не создаёт пин', {},
 check('мусорный ключ выбора игнорируется', {},
       api_pin({'Other/DrKlesMod': 'Other/Nope#redux/nowhere'})._pinned_sources())
 
+print('\n=== get_camp_choices (быстрый старт: сборки целиком) ===')
+a = fresh_api('redux'); a._repo = lambda: 'x/y'
+r = a.get_camp_choices()
+check('сборки перечислены', ['universe', 'redux', 'original'], [c['camp'] for c in r['camps']])
+check('счётчик модов из каталога', {'redux': 1, 'universe': 2, 'original': 1},
+      {c['camp']: c['mods'] for c in r['camps']})
+check('у каждой сборки есть движок', [True, True, True], [c['has_base'] for c in r['camps']])
+check('ничего не набрано → in_profile пусто', [False, False, False],
+      [c['in_profile'] for c in r['camps']])
+check('движка в профиле нет', None, r['base_camp'])
+# набрали сборку целиком (две записи, как это делает быстрый старт) → отмечена
+a.add_mod({'mode': 'src', 'camp': 'redux', 'pack': None, 'part': 'base'})
+a.add_mod({'mode': 'src', 'camp': 'redux', 'pack': None, 'part': 'mods'})
+r2 = a.get_camp_choices()
+check('набранная сборка помечена «уже в профиле»', {'redux'},
+      {c['camp'] for c in r2['camps'] if c['in_profile']})
+check('движок профиля виден фронту', 'redux', r2['base_camp'])
+# половина сборки (только моды) — ещё не «целиком»
+a3 = fresh_api('redux'); a3._repo = lambda: 'x/y'
+a3.add_mod({'mode': 'src', 'camp': 'universe', 'pack': None, 'part': 'mods'})
+check('только моды сборки → ещё не «уже в профиле»', set(),
+      {c['camp'] for c in a3.get_camp_choices()['camps'] if c['in_profile']})
+# каталог ещё грузится: счётчик None, но список сборок отдаём сразу
+a4 = fresh_api('redux'); a4._repo = lambda: 'x/y'; a4._catalog_cache = None
+check('каталог не прогрет → счётчик None, не ошибка', [None, None, None],
+      [c['mods'] for c in a4.get_camp_choices()['camps']])
+
+print('\n=== моды из поставки игры: пометка stock (отзыв «это родные моды из стима») ===')
+check('SR2LoadingScreen — из комплекта', True, app._is_base_game_path('Tweaks/SR2LoadingScreen'))
+check('вложенный файл тоже', True, app._is_base_game_path('Tweaks/SR2LoadingScreen/CFG/x.dat'))
+check('регистр не важен', True, app._is_base_game_path('tweaks/leodomikshipsupdate30'))
+check('обычный мод — нет', False, app._is_base_game_path('Tweaks/MyOwnMod'))
+a = fresh_api('redux'); a._repo = lambda: 'x/y'; a._packs_cache = packs_full()
+a.config = {'mod_meta': {}}; a._names = {}; a._pub_cache_all = None
+a._catalog_cache = {}; a._disk_index = {'mods': {}}
+a._mods_dir = lambda: Path(r'C:\nonexistent_test_dir_zzz')
+a._warm_variant_labels = lambda: None; a._lazy_load_catalog = lambda: None
+a._sections = {}; a._descs = {}
+a._disk_mods = lambda: {'Tweaks/SR2LoadingScreen': '', 'Tweaks/MyOwnMod': ''}
+nodes = {n['label']: n for c in a.get_tree()['camps']
+         for n in c['mods'] + [x for p in c['packs'] for x in p['mods']]}
+check('узел мода из комплекта помечен', True, nodes['SR2LoadingScreen']['stock'])
+check('обычный мод не помечен', False, nodes['MyOwnMod']['stock'])
+
 print(f'\n===== ИТОГ: PASS={len(PASS)}  FAIL={len(FAIL)} =====')
 if FAIL:
     print('ПРОВАЛЫ:', FAIL); sys.exit(1)

@@ -98,7 +98,7 @@ IS_RWT = bool(EMBEDDED_TOKEN)
 # из репозитория ({version, url?, notes?}). url можно оставить пустым — тогда показ без
 # ссылки на скачивание (просто «доступна новая версия»).
 # ВНИМАНИЕ: при релизе выставить реальный следующий номер (текущий публичный > 0.13.1).
-LAUNCHER_VERSION = '0.25.0'
+LAUNCHER_VERSION = '0.26.0'
 RELEASE_REF = 'state/launcher_release.json'
 # Ссылка на полную справку в репозитории (ИНСТРУКЦИЯ-ПРОСТАЯ.md, имя в percent-encoding —
 # кириллица в пути; так браузер откроет её без ручного кодирования).
@@ -1707,6 +1707,14 @@ class Api:
             # предпочитаем вариант СБОРКИ игрока, а не глобальный default_source
             if g is None and getattr(self, '_inst_base_camp', None):
                 g = next((x for x in groups if x['camp'] == self._inst_base_camp), None)
+            # ...а у новичка на ЧИСТОЙ игре установленной базы ещё нет — тогда сборку задаёт
+            # НАБОР: игрок уже добавил «Свободную Бухту», а карточки показывали вариант чужой
+            # сборки из глобального default_source (жалоба «выбираю одну сборку — по дефолту
+            # моды с меткой другой»). Профиль здесь авторитетнее каталога.
+            if g is None:
+                pc = self._profile_camp_hint()
+                if pc:
+                    g = next((x for x in groups if x['camp'] == pc), None)
             if g is None:
                 g = self._group_of_source(groups, (cat.get(base) or {}).get('default_source'))
             return (g or groups[0])['key']
@@ -1715,13 +1723,22 @@ class Api:
     def set_variant(self, mid, key):
         """Игрок выбрал вариант key для папки mid. Если он отличается от установленного —
         помечаем мод как требующий обновления (перекачки); иначе снимаем пометку."""
+        r = self._set_variant_nosave(mid, key)
+        if not r.get('ok'):
+            return r
+        self._save_profile()
+        self._emit('tree_dirty')
+        return {'ok': True}
+
+    def _set_variant_nosave(self, mid, key):
+        """Тело set_variant без записи профиля и без tree_dirty — чтобы массовое
+        переключение (set_variants_camp) сохраняло и перерисовывало ОДИН раз."""
         cat = self._catalog_cache or {}
         base = mid.split('@', 1)[0]
         sv_keys = {k for k, _s, _v in self._source_variants(mid)}
         if key not in cat and key not in sv_keys:
             return {'ok': False, 'error': 'Неизвестный вариант.'}
         self.profile.setdefault('variants', {})[base] = key
-        self._save_profile()
         installed = self._installed_variant_key(mid)
         # различаем варианты по ИСТОЧНИКУ (у versions_differ имена совпадают, по имени
         # не отличить); source отсутствует → считаем «другим», т.е. предлагаем перекачку
@@ -1742,8 +1759,51 @@ class Api:
                                    'camp': (want_src.split('/')[0] if want_src else None)}
         else:
             self._updates.pop(base, None)
-        self._emit('tree_dirty')
-        return {'ok': True}
+        return {'ok': True, 'differ': differ}
+
+    def set_variants_camp(self, camp, mids, preview=False):
+        """Массово перевести версии модов на сборку camp («бегать по списку и везде тыкать
+        redux» — жалоба игрока). Трогаем ТОЛЬКО versions_differ (синтетические ключи
+        '<base>#<source>'): у них варианты — это одна и та же папка из разных паков, и
+        выбор сборки объективен. '@'-варианты (Pol/Shu) — сознательный выбор игрока между
+        РАЗНЫМИ модами, массово их не переключаем.
+
+        preview=True — ничего не менять, вернуть список того, что поменялось бы.
+        Возвращает {ok, items:[{mid,name,from,to}], redownload} — redownload считает моды,
+        которым смена группы даст перекачку (это и показываем в подтверждении)."""
+        if not camp:
+            return {'ok': False, 'error': 'Не указана сборка.'}
+        if self._catalog_cache is None:
+            return {'ok': False, 'error': 'Каталог ещё загружается — повторите через секунду.'}
+        items, changed = [], []
+        for mid in (mids or []):
+            groups = self._variant_groups(mid)
+            if not groups:
+                continue
+            g = next((x for x in groups if x['camp'] == camp), None)
+            if g is None:                      # у мода нет версии этой сборки — не трогаем
+                continue
+            cur = self._chosen_variant(mid)
+            if cur == g['key']:
+                continue
+            cur_g = self._group_of_source(groups, self._variant_ref(cur)[1] if cur else None)
+            items.append({'mid': mid, 'name': (self._variant_sub(g['key']) or {}).get('name')
+                          or mid.split('/')[-1],
+                          'from': (cur_g or {}).get('camp') if cur_g else '',
+                          'to': camp})
+            changed.append((mid, g['key']))
+        if preview:
+            return {'ok': True, 'items': items, 'count': len(items)}
+        redownload = 0
+        for mid, key in changed:
+            r = self._set_variant_nosave(mid, key)
+            if r.get('ok') and r.get('differ'):
+                redownload += 1
+        if changed:
+            self._save_profile()
+            self.log(f'Версии модов переведены на сборку «{camp_title(camp)}»: {len(changed)}.')
+            self._emit('tree_dirty')
+        return {'ok': True, 'count': len(changed), 'redownload': redownload}
 
     @staticmethod
     def _variant_files(mid, unit_maps, source):
@@ -2329,6 +2389,9 @@ class Api:
                 'tags': meta['tags'],
                 'note': meta['note'],
                 'has_info': bool(mid),
+                # мод из комплекта игры (Steam кладёт их в Mods сам): метки сборок у него
+                # каталожные и читались как «это ORIG/REDUX», хотя качать его не нужно
+                'stock': bool(mid and _is_base_game_path(mid)),
                 'labels': (self._camps_of(mid) if mid else []),   # сборки-метки (бейджи)
                 'variants': (self._variants_of(mid) if mid else []),  # Pol/Shu-переключатель
                 'chosen': (self._chosen_variant(mid) if mid else ''),
@@ -3269,6 +3332,35 @@ class Api:
         except Exception as e:
             return {'ok': False, 'error': str(e)}
 
+    # Порядок сборок в быстром старте — как на вики (сперва самая полная), а не по алфавиту.
+    QUICK_CAMP_ORDER = ('universe', 'redux', 'original')
+
+    def get_camp_choices(self):
+        """Сборки для «быстрого старта»: [{camp, title, mods, has_base, in_profile}].
+        mods — сколько модов каталога имеют вариант этой сборки (None, пока каталог не
+        прогрет: счётчик косметический, ждать его не нужно). in_profile — сборка уже
+        набрана целиком, повторный клик ничего не добавит."""
+        try:
+            packs = self._get_packs(self._token())
+        except Exception as e:
+            return {'ok': False, 'error': str(e)}
+        camps = sorted({p.get('camp') for p in packs.values() if p.get('camp')},
+                       key=lambda c: (self.QUICK_CAMP_ORDER.index(c)
+                                      if c in self.QUICK_CAMP_ORDER else len(self.QUICK_CAMP_ORDER), c))
+        cat_ready = self._catalog_cache is not None
+        have = {(m.get('camp'), m.get('part') or PART_ALL)
+                for m in self.profile.get('mods', []) if m.get('type') == 'camp'}
+        out = []
+        for c in camps:
+            whole = (c, PART_ALL) in have or {(c, PART_BASE), (c, PART_MODS)} <= have
+            out.append({
+                'camp': c, 'title': camp_title(c),
+                'mods': (len(self._camp_member_mids(c)) if cat_ready else None),
+                'has_base': any(p.get('tier') == 'base' and p.get('camp') == c
+                                for p in packs.values()),
+                'in_profile': whole})
+        return {'ok': True, 'camps': out, 'base_camp': self._profile_base_camp()}
+
     def get_unit_mods(self, camp, unit):
         """Список модов пака (для выбора конкретного мода). Каждый мод — объект
         {key, name, camps, desc}: key — папка (мод-ключ для установки), а имя/описание/
@@ -3310,6 +3402,19 @@ class Api:
                         f"{c}/{m.get('unit')}", {}).get('tier') == 'base':
                     return c
         return None
+
+    def _profile_camp_hint(self):
+        """Сборка, на которую нацелен НАБОР игрока, или None. Сперва движок (_profile_base_camp),
+        а если базы в профиле ещё нет — единственная сборка среди записей camp/unit. Нужна
+        холодному фолбэку выбора варианта: на чистой игре установленной базы нет, и без этой
+        подсказки versions_differ-мод показывался вариантом чужой сборки (default_source).
+        Сборок в наборе несколько → None (гадать нельзя, пусть решает default_source)."""
+        base = self._profile_base_camp()
+        if base:
+            return base
+        camps = {m.get('camp') for m in self.profile.get('mods', [])
+                 if m.get('type') in ('camp', 'unit') and m.get('camp')}
+        return camps.pop() if len(camps) == 1 else None
 
     def _base_conflict_error(self, camp):
         """Текст отказа, если в профиле уже есть база ДРУГОЙ сборки. None — можно."""

@@ -130,6 +130,8 @@
             <button class="mm-only-narrow" id="moreMerge">🔀 Обновить все</button>
             <button class="mm-only-narrow" id="moreCompat">🛡 Совместимость</button>
             <div class="mm-sep mm-collapsed-any"></div>
+            <button id="campVariantsBtn" title="У модов, которые есть в нескольких сборках, выбрать версию одной сборки — вместо того, чтобы переключать каждый мод вручную">🏷 Версии модов — одной сборкой</button>
+            <div class="mm-sep"></div>
             <button class="danger" id="removeBtn" title="Убрать выбранное из профиля (файлы на диске не трогает)">🗑 Убрать из профиля</button>
             <button class="danger" id="clearModsBtn" title="Удалить ВСЕ файлы из папки Mods игры (с подтверждением)">🧹 Очистить Mods</button>
           </div>
@@ -407,9 +409,20 @@
       <h2>Добавить в профиль</h2>
       <div class="m-body">
         <div class="seg" id="addModeSeg" style="margin:4px 0 10px">
-          <button data-amode="search" class="on">🔎 По названию</button>
+          <button data-amode="quick" class="on">⚡ Быстрый старт</button>
+          <button data-amode="search">🔎 По названию</button>
           <button data-amode="src">🗂 Сборка → Пак → Мод</button>
           <button data-amode="fork">🔗 По ссылке</button>
+        </div>
+
+        <div id="addQuick">
+          <div class="m-row">
+            <label>Сборка целиком</label>
+            <div class="sub">Движок игры и все моды этой сборки — то, что нужно почти всем. Потом «🧩 Установить все».</div>
+            <div class="camp-picks" id="quickCamps"><div class="sub">Загрузка списка сборок…</div></div>
+          </div>
+          <label class="q-base"><input type="checkbox" id="quickWithBase" checked>
+            <span>добавить движок сборки — нужен, если игра ещё без модов</span></label>
         </div>
 
         <div id="addSearch">
@@ -429,7 +442,7 @@
           </div>
           <div class="m-row">
             <label>Пак</label>
-            <div class="sub">«Базовые файлы игры» — движок сборки (Rangers.exe, DATA, CFG + фиксы к базе); «Все моды сборки» — только моды. Иначе выберите конкретный пак.</div>
+            <div class="sub">«Вся сборка» — движок и все её моды. Отдельно: «Базовые файлы игры» — только движок (Rangers.exe, DATA, CFG + фиксы к базе), «Все моды сборки» — только моды. Иначе выберите конкретный пак.</div>
             <select id="addPack" disabled></select>
           </div>
           <div class="m-row">

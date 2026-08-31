@@ -17,8 +17,11 @@ DEV = 1600000000  # 2020-09-13
 
 def mk():
     a = app.Api.__new__(app.Api)
-    a._camps_idx = None; a.profile = {'variants': {}}; a._updates = {}
+    a._camps_idx = None; a.profile = {'variants': {}, 'mods': []}; a._updates = {}
     a._save_profile = lambda: None; a._emit = lambda *x, **k: None
+    # холодный фолбэк выбора варианта смотрит на набор профиля (_profile_camp_hint):
+    # в этой песочнице набор пуст, но атрибуты должны существовать
+    a._packs_cache = {}
     return a
 
 # 1) обычный мод — dev-дата из top-level каталога, а не с диска

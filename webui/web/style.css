@@ -314,6 +314,12 @@ input:focus-visible,select:focus-visible,textarea:focus-visible,
 /* модалки */
 .overlay{position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:50;}
 .overlay.hidden{display:none;}
+/* Подтверждение зовётся и ИЗ модалок (удаление профиля в окне профилей, действия в
+   окне обновлений). При равном z-index побеждал бы тот, кто ниже в разметке, — а окно
+   профилей объявлено ПОЗЖЕ #confirmOverlay и перекрывало его: игрок жал ✕ и «ничего
+   не происходило». Своим слоем поднимаем подтверждение над всеми .overlay, но ниже
+   ctx-меню (60), тостов (60) и тура (70). */
+#confirmOverlay{z-index:55;}
 .modal{background:var(--panel);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);width:520px;max-width:92vw;max-height:88vh;overflow:auto;}
 .modal h2{margin:0;padding:18px 22px 6px;font-size:17px;}
 .modal .m-body{padding:6px 22px 8px;color:var(--muted);font-size:13.5px;line-height:1.55;}
@@ -369,6 +375,23 @@ input:focus-visible,select:focus-visible,textarea:focus-visible,
   border:1px solid var(--line);border-radius:8px;padding:7px 11px;font-size:12.5px;color:var(--fg);
   cursor:pointer;font-family:inherit;}
 .preset-row .pbtn:hover{border-color:var(--accent);}
+/* быстрый старт: выбор сборки целиком (пустой профиль + вкладка окна добавления) */
+.camp-picks{display:flex;flex-direction:column;gap:7px;}
+.camp-pick{display:flex;align-items:center;gap:9px;width:100%;text-align:left;
+  background:var(--panel-2);border:1px solid var(--line);border-radius:9px;
+  padding:9px 12px;color:var(--fg);font-size:13px;font-family:inherit;cursor:pointer;transition:.12s;}
+.camp-pick:hover{border-color:var(--accent);}
+.camp-pick.on{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent);background:var(--row-sel);}
+.camp-pick .cp-name{font-weight:600;}
+.camp-pick .cp-meta{margin-left:auto;color:var(--muted);font-size:11.5px;white-space:nowrap;}
+.camp-pick[disabled]{opacity:.55;cursor:default;}
+.q-base{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--muted);margin:2px 0 4px;cursor:pointer;}
+/* пустой профиль — то же меню сборок крупнее, вместо «Пока пусто» */
+.qstart{max-width:430px;margin:34px auto;display:flex;flex-direction:column;gap:13px;text-align:left;}
+.qstart h3{margin:0;font-size:16px;font-weight:600;color:var(--fg);text-align:center;}
+.qstart .qs-sub{font-size:12.5px;color:var(--muted);line-height:1.5;text-align:center;}
+.qstart .qs-manual{background:none;border:none;color:var(--accent);font-size:12.5px;
+  font-family:inherit;cursor:pointer;text-decoration:underline;text-underline-offset:2px;align-self:center;}
 /* порядок проверки обновлений (диалог + настройки) */
 .ord-help{font-size:12.5px;color:var(--muted);line-height:1.45;margin-bottom:9px;}
 .ord-list{display:flex;flex-direction:column;gap:6px;}
@@ -537,6 +560,9 @@ body.busy .toggle.click{pointer-events:none;opacity:.5;}
 .camp-chips .chip-f.on{opacity:1;filter:none;box-shadow:0 0 0 1px var(--accent);}
 /* имя папки рядом с «именем как в игре» (режим nameSeg=module) */
 .row .name .alt-name{margin-left:7px;font-size:11px;color:var(--muted);font-weight:400;opacity:.8;}
+/* мод из поставки игры: приписка к имени + своя подгруппа в паке */
+.row .name .stock-note{margin-left:6px;font-size:11px;color:var(--muted);font-weight:400;white-space:nowrap;cursor:help;}
+.row.group.stock .label{color:var(--muted);font-size:12.5px;}
 /* каскад зависимостей/конфликтов в окне подтверждения toggle */
 .csc{border-radius:8px;padding:9px 12px;font-size:12.5px;margin:8px 0;line-height:1.5;}
 .csc.add{background:rgba(70,201,139,.12);border-left:3px solid var(--ok);}
