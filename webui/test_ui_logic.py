@@ -609,6 +609,50 @@ nodes = {n['label']: n for c in a.get_tree()['camps']
 check('узел мода из комплекта помечен', True, nodes['SR2LoadingScreen']['stock'])
 check('обычный мод не помечен', False, nodes['MyOwnMod']['stock'])
 
+print('\n=== «убрать из профиля» для мода развёрнутой сборки (skip, не снос сборки) ===')
+# жалоба тестера: выделяю несколько модов сборки → диалог «уберётся 1 позиция», а из
+# списка исчезают ВСЕ моды (удалялась сама запись camp, к которой они принадлежат)
+def skip_api():
+    a = fresh_api('redux'); a._repo = lambda: 'x/y'; a._packs_cache = packs_full()
+    a.profile['mods'] = [{'type': 'camp', 'camp': 'redux', 'part': 'mods', 'name': 'ПБ — моды'},
+                         {'type': 'desc', 'id': 'Cat/ModB', 'name': 'ModB'}]
+    a._camp_member_mids = lambda camp: ({'Cat/ModA', 'Cat/ModB', 'Cat/ModC'}
+                                        if camp == 'redux' else set())
+    return a
+
+a = skip_api()
+drop, skip = a._parse_rows(['p0#Cat/ModA', 'p0#Cat/ModC', 'p1'])
+check('строки модов сборки не удаляют её запись', {1}, drop)
+check('они уходят в skip записи сборки', {0: {'Cat/ModA', 'Cat/ModC'}}, skip)
+pv = a.remove_preview(['p0#Cat/ModA', 'p0#Cat/ModC'])
+check('превью: записей к удалению нет', 0, pv['record_count'])
+check('превью: модов к исключению — 2', 2, pv['skip_count'])
+pv2 = a.remove_preview(['p0'])
+check('превью самой сборки: 1 запись', 1, pv2['record_count'])
+check('…и честно сказано, сколько модов исчезнет', 3, pv2['lost_count'])
+
+a = skip_api()
+r = a.remove_rows(['p0#Cat/ModA'])
+check('remove_rows: записи не удалялись', 0, r['removed'])
+check('remove_rows: мод исключён', 1, r['skipped'])
+check('запись сборки на месте', 2, len(a.profile['mods']))
+check('skip записан в запись сборки', ['Cat/ModA'], a.profile['mods'][0]['skip'])
+check('мод выпал из набора сборки', {'Cat/ModA'}, a._camp_skips())
+b = skip_api()
+b.remove_rows(['p0#Cat/ModB'])            # ModB добавлен ещё и отдельной desc-записью
+check('явное добавление мода сильнее skip сборки', set(), b._camp_skips())
+check('restore возвращает исключённые', 1, a.restore_camp_skips()['restored'])
+check('после возврата набор снова полный', set(), a._camp_skips())
+
+# две сборки в профиле: мод убран только из одной → он всё равно приедет из второй
+a = skip_api()
+a.profile['mods'].append({'type': 'camp', 'camp': 'universe', 'part': 'mods'})
+a._camp_member_mids = lambda camp: {'Cat/ModA', 'Cat/ModB', 'Cat/ModC'}
+a.remove_rows(['p0#Cat/ModA'])
+check('исключён в одной сборке из двух → остаётся', set(), a._camp_skips())
+a.remove_rows(['p2#Cat/ModA'])
+check('исключён в обеих → выпадает', {'Cat/ModA'}, a._camp_skips())
+
 print(f'\n===== ИТОГ: PASS={len(PASS)}  FAIL={len(FAIL)} =====')
 if FAIL:
     print('ПРОВАЛЫ:', FAIL); sys.exit(1)

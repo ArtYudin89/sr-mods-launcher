@@ -618,7 +618,7 @@ def reconstruct_unit(repo, camp, unit, mods_dir, token, progress_cb=None,
 
 def reconstruct_camp(repo, camp, units, mods_dir, token, log=print, tmp_dir=None,
                      should_cancel=None, part_cb=None, byte_cb=None, sha_sink=None,
-                     dry_run=False, chunk_cb=None, mod_sources=None):
+                     dry_run=False, chunk_cb=None, mod_sources=None, skip_mods=None):
     """Установить ВЕСЬ лагерь одним идемпотентным проходом (обёртка над reconstruct_multi:
     все юниты одного лагеря camp). См. reconstruct_multi. Прунинг не включаем — лагерь и так
     ставится полным набором, а per-мод сироты чистит install_descriptor."""
@@ -626,13 +626,13 @@ def reconstruct_camp(repo, camp, units, mods_dir, token, log=print, tmp_dir=None
     return reconstruct_multi(repo, umulti, mods_dir, token, log=log, tmp_dir=tmp_dir,
                              should_cancel=should_cancel, part_cb=part_cb, byte_cb=byte_cb,
                              sha_sink=sha_sink, dry_run=dry_run, chunk_cb=chunk_cb,
-                             mod_sources=mod_sources)
+                             mod_sources=mod_sources, skip_mods=skip_mods)
 
 
 def reconstruct_multi(repo, units, mods_dir, token, log=print, tmp_dir=None,
                       should_cancel=None, part_cb=None, byte_cb=None, sha_sink=None,
                       dry_run=False, prune_snap_id=None, snap_dir=None, chunk_cb=None,
-                      mod_sources=None):
+                      mod_sources=None, skip_mods=None):
     """Установить НЕСКОЛЬКО юнитов (возможно из РАЗНЫХ лагерей и с фильтром на один мод)
     одним идемпотентным проходом.
 
@@ -667,7 +667,12 @@ def reconstruct_multi(repo, units, mods_dir, token, log=print, tmp_dir=None,
       сборки его не переопределяют. Без этого мод, который едет и в авторской раздаче, и
       в сборнике-компиляции, всегда доставался из пака с бОльшим load_order — выбор
       версии в карточке ни на что не влиял (DrKlesMod: выбрано 11.11.2025, ставилось
-      07.04.2025 из community_mods)."""
+      07.04.2025 из community_mods).
+    skip_mods: {mod_key, …} — моды, которые игрок убрал из добавленной сборки. Их файлы
+      не участвуют в eff (не ставятся и не докачиваются). Уже лежащее на диске НЕ
+      удаляется: перед прунингом сирот файлы таких модов возвращаются в псевдо-набор из
+      прошлого снимка — иначе «убрал из профиля» молча стирало бы их с диска, хотя UI
+      обещает обратное."""
     mods_dir = Path(mods_dir)
     tmp = Path(tmp_dir or mods_dir.parent)
     tmp.mkdir(parents=True, exist_ok=True)
@@ -687,6 +692,8 @@ def reconstruct_multi(repo, units, mods_dir, token, log=print, tmp_dir=None,
     # из установки вместо того, чтобы приехать хоть откуда-то).
     loaded = []         # [(u, {relpath: (sha, kind)})]
     provided = {}       # mod_key -> {'camp/unit', …}
+    skip = set(skip_mods or ())
+    skipped_mods = set()
     for u in units:
         _check_cancel(should_cancel)
         cu, unit = u['camp'], u['unit']
@@ -702,10 +709,16 @@ def reconstruct_multi(repo, units, mods_dir, token, log=print, tmp_dir=None,
                 mk = mod_key(relpath)
                 if umod is not None and mk != umod:
                     continue
+                if mk in skip:                 # мод убран игроком из этой сборки
+                    skipped_mods.add(mk)
+                    continue
                 provided.setdefault(mk, set()).add(f'{cu}/{unit}')
                 umap[relpath] = (meta['sha256'], kind)
         loaded.append((u, umap))
 
+    if skipped_mods:
+        log(f'Убрано игроком из набора: {len(skipped_mods)} мод(ов) — не ставлю '
+            f'(уже лежащие на диске файлы не трогаю).')
     pins = {}
     for mk, allowed in (mod_sources or {}).items():
         here = provided.get(mk)
@@ -817,6 +830,14 @@ def reconstruct_multi(repo, units, mods_dir, token, log=print, tmp_dir=None,
         for info in eff.values():
             sub = 'code' if info['kind'] == 'code' else 'assets'
             pseudo['files'][sub][info['relpath']] = {'sha256': info['sha']}
+        if skip:
+            # мод, убранный из сборки, выпал из eff — для прунинга он «сирота» и его файлы
+            # были бы стёрты с диска. Возвращаем их из прошлого снимка: «убрать из профиля»
+            # значит «не ставить», а не «удалить установленное».
+            old = load_install_snapshot(mods_dir, prune_snap_id, snap_dir) or {}
+            for rp, sha in (old.get('files') or {}).items():
+                if mod_key(rp) in skip:
+                    pseudo['files']['code'].setdefault(rp, {'sha256': sha})
         prune_orphans_by_snapshot(mods_dir, pseudo, snap_dir, log)
         save_snapshot_from_desc(mods_dir, pseudo, snap_dir)
     log(f'Готово: {stats["code_files"]} код + {stats["asset_files"]} ассетов в {mods_dir}')

@@ -297,6 +297,7 @@ function wireUI() {
   $('moreMerge').onclick = () => { hideMoreMenu(); startMerge(); };
   $('moreCompat').onclick = () => { hideMoreMenu(); checkCompat(); };
   $('campVariantsBtn').onclick = () => { hideMoreMenu(); openCampVariants(); };
+  $('restoreSkipBtn').onclick = () => { hideMoreMenu(); restoreSkips(); };
   window.addEventListener('resize', reflowToolbar);
   $('baseSel').onchange = async () => {
     const v = $('baseSel').value;
@@ -507,7 +508,10 @@ function wireUI() {
     if (!iid) return;
     api().start_merge([iid]).then((r) => { if (!r.ok) toast(r.error, 'err'); });
   };
-  $('ctxRemoveOne').onclick = () => { const p = ctxPidx; hideCtxMenu(); if (p !== null) cancelAdd(p); };
+  $('ctxRemoveOne').onclick = () => {
+    const iid = ctxNode && ctxNode.iid; hideCtxMenu();
+    if (iid) removeRows([iid]);          // строка мода из сборки → исключение, а не снос сборки
+  };
   $('ctxCancelAdd').onclick = () => {
     hideCtxMenu();
     confirmBox('Отменить все добавления?',
@@ -669,6 +673,9 @@ async function refreshTree() {
   buildTagChips();
   const hc = TREE.hidden_count || 0;
   if ($('hiddenCnt')) $('hiddenCnt').textContent = hc ? `(${hc})` : '';
+  const sc = TREE.skipped_count || 0;           // убраны из добавленной сборки — можно вернуть
+  if ($('restoreSkipBtn')) $('restoreSkipBtn').style.display = sc ? '' : 'none';
+  if ($('skipCnt')) $('skipCnt').textContent = sc ? `(${sc})` : '';
   if ($('fShowHidden')) $('fShowHidden').checked = !!TREE.show_hidden;
   renderTree();
   paintRelList();                         // обновить строки-копии в списке связей из свежих узлов
@@ -936,6 +943,10 @@ function leafRow(n, lvl) {
 // оставляем имя мода, чтобы их различать.
 function variantLabel(v, all, full) {
   const camp = (v.camps && v.camps.length === 1) ? v.camps[0] : null;
+  // гибрид (Pol/Shu, где один из вариантов сам раздаётся в нескольких сборках): одной
+  // метки мало — нужны и имя варианта, и сборка, иначе кнопки «ORIG/UNI/REDUX» не
+  // показывают, где Pol, а где Shu
+  if (v.dual && camp) return `${v.name} · ${full ? campLabel(camp) : (CAMP_BADGE[camp] || camp.toUpperCase())}`;
   const dup = camp && all.filter((x) => x.camps && x.camps.length === 1 && x.camps[0] === camp).length > 1;
   if (!camp || dup) return v.name;
   return full ? campLabel(camp) : (CAMP_BADGE[camp] || camp.toUpperCase());
@@ -1374,16 +1385,53 @@ function onDepsConfirm(d) {
     () => api().cancel_deps());
 }
 function removeSelected() {
-  const pidx = selectedPidx();
-  if (!pidx.length) return;
+  removeRows([...selected].filter((i) => /^p\d+/.test(i)));
+}
+// Убрать выделенные СТРОКИ. Мод, развёрнутый из добавленной сборки, своей записи профиля
+// не имеет (iid = 'p{idx}#{mid}'), и раньше он сводился к номеру записи: диалог обещал
+// «1 позиция», а сносил всю сборку со всеми её модами (жалоба тестера). Теперь бэкенд
+// разделяет: свои записи удаляются, моды сборки — заносятся в её список исключений.
+async function removeRows(iids) {
+  if (!iids || !iids.length) return;
+  let r;
+  try { r = await api().remove_preview(iids); } catch (e) { r = null; }
+  if (!r || !r.ok) { toast('Не удалось разобрать выделение', 'err'); return; }
+  if (!r.record_count && !r.skip_count) { toast('Эти строки из профиля не убираются', 'ok'); return; }
+  const parts = [];
+  if (r.skip_count) {
+    const names = (r.skip_names || []).join(', ');
+    parts.push(`Будет убрано модов из добавленной сборки: <b>${r.skip_count}</b>`
+      + (names ? `<div class="sub" style="margin:4px 0 8px">${esc(names)}${r.skip_count > (r.skip_names || []).length ? ' …' : ''}</div>` : '')
+      + `<div class="sub">Сама сборка останется в профиле — эти моды просто не будут ставиться.</div>`);
+  }
+  (r.records || []).forEach((rec) => {
+    parts.push(`Будет убрана запись «<b>${esc(rec.name || 'позиция')}</b>»`
+      + (rec.mods_lost
+        ? `<div class="note">⚠ Это целая сборка: вместе с ней из списка исчезнет модов — <b>${rec.mods_lost}</b>.</div>`
+        : ''));
+  });
   confirmBox('Убрать из профиля?',
-    `Будет убрано из профиля: <b>${pidx.length}</b> позиц.<br>
-     <span style="color:var(--muted)">Файлы на диске не удаляются — снимается только пометка «в профиле».</span>`,
-    () => api().remove_pidx(pidx).then(() => { selected.clear(); refreshTree(); }));
+    parts.join('<br>')
+    + `<br><span style="color:var(--muted)">Файлы на диске не удаляются — они просто перестают ставиться.</span>`,
+    () => api().remove_rows(iids).then((res) => {
+      selected.clear(); refreshTree();
+      if (res && res.ok && res.skipped) toast(`Убрано модов из сборки: ${res.skipped}`, 'ok');
+    }));
 }
 // «Отменить добавление» из контекстного меню: убрать запись профиля (мод/пак/сборка)
 function cancelAdd(pidx) {
   api().remove_pidx([pidx]).then(() => { selected.clear(); refreshTree(); toast('Добавление отменено', 'ok'); });
+}
+// вернуть в набор все моды, убранные из добавленных сборок
+function restoreSkips() {
+  const n = (TREE && TREE.skipped_count) || 0;
+  if (!n) { toast('Исключённых модов нет', 'ok'); return; }
+  confirmBox('Вернуть исключённые моды?',
+    `Моды, убранные из добавленных сборок (<b>${n}</b>), снова появятся в списке и будут ставиться.`,
+    () => api().restore_camp_skips().then((r) => {
+      refreshTree();
+      if (r && r.ok) toast(`Возвращено модов: ${r.restored}`, 'ok');
+    }));
 }
 function handleOpStart(r) { if (!r || !r.ok) toast((r && r.error) || 'Не удалось запустить', 'err'); }
 
@@ -1446,9 +1494,17 @@ async function openCampVariants() {
     $('cvCount').textContent = 'Считаю…';
     const r = await api().set_variants_camp(camp, mids, true);
     if (!$('cvCount')) return;                    // окно успели закрыть
-    $('cvCount').textContent = (!r || !r.ok) ? ((r && r.error) || 'Не удалось посчитать')
-      : (r.count ? `Будет переключено модов: ${r.count}. Их файлы придётся перекачать при установке.`
-        : 'Переключать нечего — все такие моды уже этой сборки.');
+    if (!r || !r.ok) { $('cvCount').textContent = (r && r.error) || 'Не удалось посчитать'; return; }
+    const sk = r.skipped || {};
+    // почему переключилось «не всё» — раньше пропуски были молчаливыми (отзыв тестера)
+    const why = [];
+    if (sk.variant) why.push(`у ${sk.variant} версия этой сборки — под другим вариантом (Pol/Shu), это разные моды: выберите вручную кнопкой в строке`);
+    if (sk.no_version) why.push(`${sk.no_version} в этой сборке нет — останутся как есть`);
+    if (sk.already) why.push(`${sk.already} уже этой сборки`);
+    $('cvCount').innerHTML =
+      (r.count ? `Будет переключено модов: <b>${r.count}</b>. Их файлы придётся перекачать при установке.`
+        : 'Переключать нечего — все такие моды уже этой сборки.')
+      + (why.length ? `<div class="sub" style="margin-top:6px">Не тронуто: ${esc(why.join('; '))}.</div>` : '');
   };
   $('confirmBody').querySelectorAll('.camp-pick').forEach((b) => b.onclick = () => preview(b.dataset.camp));
   if (sel) preview(sel);

@@ -265,11 +265,21 @@ MOCK_DISPATCH = {
              'has_base': True, 'in_profile': True},
         ]},
     # третий аргумент — preview: считаем «сколько бы переключилось»
-    'set_variants_camp': lambda args: ({'ok': True, 'count': 2, 'items': []}
+    'set_variants_camp': lambda args: ({'ok': True, 'count': 2, 'items': [],
+                                        'skipped': {'variant': 1, 'no_version': 3, 'already': 0}}
                                        if (len(args) > 2 and args[2])
-                                       else {'ok': True, 'count': 2, 'redownload': 2}),
+                                       else {'ok': True, 'count': 2, 'redownload': 2,
+                                             'skipped': {'variant': 1, 'no_version': 3,
+                                                         'already': 0}}),
     'add_mod': lambda args: {'ok': True},
     'remove_pidx': lambda args: {'ok': True},
+    # строки модов развёрнутой сборки убираются как исключения, а не сносом записи
+    'remove_preview': lambda args: {'ok': True, 'records': [], 'record_count': 0,
+                                    'skip_count': len(args[0] if args else []),
+                                    'skip_names': ['ModA'], 'lost_count': 0},
+    'remove_rows': lambda args: {'ok': True, 'removed': 0,
+                                 'skipped': len(args[0] if args else [])},
+    'restore_camp_skips': lambda args: {'ok': True, 'restored': 1},
     'clear_queue': lambda args: {'ok': True},
     'toggle_enabled': lambda args: {'ok': True},
     'set_variant': lambda args: {'ok': True},
@@ -1336,9 +1346,26 @@ def scenario_confirm_layer_and_quickstart(page, base_url):
           'Будет переключено модов: 2' in (page.text_content('#cvCount') or ''),
           page.text_content('#cvCount') or '')
     shot(page, '14d_camp_variants')
+    check('пропущенные объяснены, а не проглочены',
+          'под другим вариантом' in (page.text_content('#cvCount') or ''),
+          page.text_content('#cvCount') or '')
     page.locator('#confirmOk').click()
     time.sleep(0.4)
     check('после применения окно закрылось',
+          page.locator('#confirmOverlay').evaluate("e => e.classList.contains('hidden')"))
+
+    # 5) «Убрать из профиля» для мода развёрнутой сборки: диалог говорит про МОДЫ, а не
+    # про «1 позицию» (раньше это сносило всю сборку целиком)
+    page.evaluate("() => removeRows(['p0#Cat/ModA', 'p0#Cat/ModB'])")
+    time.sleep(0.4)
+    body = page.text_content('#confirmBody') or ''
+    check('диалог считает убираемые моды сборки', 'Будет убрано модов из добавленной сборки: 2' in body,
+          body[:160])
+    check('обещание про диск на месте', 'на диске не удаляются' in body, body[:160])
+    shot(page, '14e_remove_from_camp')
+    page.locator('#confirmOk').click()
+    time.sleep(0.3)
+    check('после подтверждения окно закрылось',
           page.locator('#confirmOverlay').evaluate("e => e.classList.contains('hidden')"))
 
 

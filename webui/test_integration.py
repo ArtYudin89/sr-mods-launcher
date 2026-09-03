@@ -367,7 +367,7 @@ try:
     def fake_reconstruct_camp(repo, camp, units, mods_dir_path, token,
                               log=print, tmp_dir=None, should_cancel=None,
                               part_cb=None, byte_cb=None, sha_sink=None, dry_run=False,
-                              chunk_cb=None, mod_sources=None):
+                              chunk_cb=None, mod_sources=None, skip_mods=None):
         """Имитирует reconstruct_camp (единый проход по лагерю): пишет фейковые файлы."""
         mds = Path(mods_dir_path)
         nuke_dir = mds / 'ShusRangers' / 'ShuNukes'
@@ -2102,6 +2102,54 @@ try:
     check('T87: чужой пин не сузил набор', _SOL_DATA, _data.read_bytes())
 finally:
     shutil.rmtree(_w4, ignore_errors=True)
+
+# ═══════════════════════════════════════════════
+#  ГРУППА 24: мод, убранный игроком из добавленной сборки (skip_mods)
+# ═══════════════════════════════════════════════
+print('\n=== ГРУППА 24: skip_mods — «убрать из профиля» для мода развёрнутой сборки ===')
+# Строка такого мода принадлежит записи СБОРКИ (iid 'p{idx}#{mid}'), своей записи у него
+# нет: раньше «убрать» сносило всю сборку. Теперь мод попадает в её skip → не ставится,
+# но уже лежащее на диске не стирается прунингом сирот.
+_w5 = Path(tempfile.mkdtemp(prefix='skip_'))
+try:
+    _mods5 = _w5 / 'Game' / 'Mods'; _tmp5 = _w5 / 'tmp'; _snap5 = _w5 / 'snap'
+    _mods5.mkdir(parents=True); _tmp5.mkdir(); _snap5.mkdir()
+    _d5 = _mods5 / 'HuksShit' / 'Mod_Interface' / 'data.dat'
+
+    def _run_skip(skip=None, log=None):
+        with patch.object(core, 'repo_file_bytes', side_effect=_m_rfb), \
+             patch.object(core, 'download_url', side_effect=_m_dl):
+            return core.reconstruct_multi('repo', [_HUK, _SOL], _mods5, 'tok',
+                                          log=(log.append if log is not None else (lambda *_: None)),
+                                          tmp_dir=_tmp5, prune_snap_id='__bulk__',
+                                          snap_dir=_snap5, skip_mods=skip)
+
+    print('\n--- T88: мод в skip не ставится ---')
+    _logs5 = []
+    _st88 = _run_skip({'HuksShit/Mod_Interface'}, _logs5)
+    check_true('T88: файлы мода не появились', not _d5.exists())
+    check('T88: качать было нечего', 0, _st88['code_files'] + _st88['asset_files'])
+    check_true('T88: об исключении сказано в журнале',
+               any('Убрано игроком из набора' in l for l in _logs5))
+
+    print('\n--- T89: без skip мод ставится (контроль) ---')
+    _run_skip()
+    check('T89: data.dat на диске', _SOL_DATA, _d5.read_bytes())
+
+    print('\n--- T90: skip после установки не стирает файлы с диска ---')
+    _run_skip({'HuksShit/Mod_Interface'})
+    check_true('T90: файл мода остался на диске', _d5.exists())
+    check('T90: содержимое не тронуто', _SOL_DATA, _d5.read_bytes())
+    _snapshot = core.load_install_snapshot(_mods5, '__bulk__', _snap5) or {}
+    check_true('T90: файл остался и в снимке набора (не станет сиротой позже)',
+               any('Mod_Interface' in rp for rp in (_snapshot.get('files') or {})))
+
+    print('\n--- T91: skip чужого мода не мешает установке ---')
+    _d5.unlink()
+    _run_skip({'Other/Mod'})
+    check('T91: мод поставился', _SOL_DATA, _d5.read_bytes())
+finally:
+    shutil.rmtree(_w5, ignore_errors=True)
 
 # ═══════════════════════════════════════════════
 #  Итог

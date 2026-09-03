@@ -11,6 +11,7 @@
 """
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -98,7 +99,7 @@ IS_RWT = bool(EMBEDDED_TOKEN)
 # из репозитория ({version, url?, notes?}). url можно оставить пустым — тогда показ без
 # ссылки на скачивание (просто «доступна новая версия»).
 # ВНИМАНИЕ: при релизе выставить реальный следующий номер (текущий публичный > 0.13.1).
-LAUNCHER_VERSION = '0.26.0'
+LAUNCHER_VERSION = '0.26.1'
 RELEASE_REF = 'state/launcher_release.json'
 # Ссылка на полную справку в репозитории (ИНСТРУКЦИЯ-ПРОСТАЯ.md, имя в percent-encoding —
 # кириллица в пути; так браузер откроет её без ручного кодирования).
@@ -1269,6 +1270,26 @@ class Api:
             self._names[mid] = core._strip_color(nm) if nm else mid.split('/')[-1]
         return self._names[mid]
 
+    def _disk_name(self, mid):
+        """Name из ModuleInfo, прочитанный С ДИСКА; '' если мода на диске нет.
+
+        В отличие от _name_of (фолбэк: каталог → имя папки) годится для вопроса «какой
+        вариант СТОИТ». У Pol/Shu каталожное имя совпадает с именем папки, поэтому фолбэк
+        назначал «установленным» базовый (Shu-)вариант даже на чистой игре: на профиле
+        «Свободной Бухты» мод показывался с меткой и датой original/universe, хотя её
+        redux-версия едет под @Pol-ключом."""
+        cache = getattr(self, '_disk_names', None)
+        if cache is None:
+            cache = self._disk_names = {}
+        if mid not in cache:
+            try:
+                p = self._mi_path(mid)
+                nm = (core.module_card(p) or {}).get('name', '') if p.exists() else ''
+            except Exception:
+                nm = ''
+            cache[mid] = core._strip_color(nm) if nm else ''
+        return cache[mid]
+
     def _mi_path(self, mid):
         return self._mods_dir() / mid.replace('/', os.sep) / 'ModuleInfo.txt'
 
@@ -1316,6 +1337,40 @@ class Api:
             if camp in self._entry_camps(e):
                 out.add(k.split('@', 1)[0])
         return out
+
+    def _camp_skips(self, entries=None):
+        """{mid, …} — моды, УБРАННЫЕ игроком из добавленных сборок (поле 'skip' у записи
+        type='camp').
+
+        Мод из развёрнутой сборки не имеет своей записи профиля: его строка в дереве —
+        это `p{idx}#{mid}` той же записи. Раньше «Убрать из профиля» на такой строке
+        удаляло ВСЮ запись сборки (диалог при этом честно писал «1 позиция», а из списка
+        исчезали все её моды — жалоба тестера). Теперь мод заносится в skip записи.
+
+        Мод выпадает из набора, только если он убран во ВСЕХ добавленных сборках, где он
+        состоит (иначе он всё равно приедет из второй сборки — и строка в дереве
+        осталась бы). Явное добавление мода отдельной записью (desc/unit) сильнее skip."""
+        prof = self.profile.get('mods', [])
+        rows = prof if entries is None else entries
+        camp_rows = [m for m in rows if m.get('type') == 'camp'
+                     and (m.get('part') or PART_ALL) != PART_BASE]
+        want = set()
+        for m in camp_rows:
+            want |= set(m.get('skip') or ())
+        if not want:
+            return set()
+        members, out = {}, set()
+        for mid in want:
+            for m in camp_rows:
+                mem = members.setdefault(m.get('camp'),
+                                         self._camp_member_mids(m.get('camp')))
+                if mid in mem and mid not in set(m.get('skip') or ()):
+                    break                      # эта сборка мод всё равно принесёт
+            else:
+                out.add(mid)
+        explicit = {m.get('id') for m in prof if m.get('type') == 'desc' and m.get('id')}
+        explicit |= {m.get('mod') for m in prof if m.get('type') == 'unit' and m.get('mod')}
+        return out - explicit
 
     def _camp_variant_entry(self, mid, camp):
         """Запись каталога варианта папки mid, релевантного сборке camp: у папки Pol/Shu
@@ -1378,7 +1433,9 @@ class Api:
             return cands[0]
         if not cands:
             return None
-        nm = self._name_of(mid)                      # ModuleInfo Name с диска (кэш)
+        nm = self._disk_name(mid)                    # ТОЛЬКО реально лежащее на диске:
+        if not nm:                                   # иначе имя папки «назначало» вариант
+            return None                              # неустановленному моду
         for k in cands:
             if (cat[k].get('name') or '') == nm:
                 return k
@@ -1400,7 +1457,11 @@ class Api:
         if self._source_variants(mid):
             _, src = self._variant_ref(self._chosen_variant(mid))
             return [src.split('/')[0]] if src and '/' in src else []
-        key = chosen if (chosen and chosen in cat) else self._installed_variant_key(mid)
+        # не выбирал и на диске нет → метка того варианта, который ПОСТАВИТСЯ (вариант
+        # сборки набора), а не объединение всех: игрок с «Свободной Бухтой» видел ORIG/UNI
+        # у мода, чья redux-версия едет под @Pol-ключом
+        key = (chosen if (chosen and chosen in cat)
+               else self._installed_variant_key(mid) or self._active_variant_key(mid))
         if key and key in cat:
             return sorted(self._entry_camps(cat[key]))
         camps = set()
@@ -1409,24 +1470,64 @@ class Api:
         return sorted(camps)
 
     # ───────── выбор варианта Pol/Shu в общей папке ─────────
-    def _source_variants(self, mid):
-        """versions_differ-мод с ОДНИМ каталожным ключом и НЕСКОЛЬКИМИ источниками (один
-        и тот же мод в разных паках с разными билдами, напр. Huk'sShit/Mod_Interface из
-        solyanka/huk/universe): синтетические варианты по ИСТОЧНИКУ. Возвращает
-        [(key, source, subentry)], key = '<base>#<source>'. [] если это не такой случай
-        (обычный мод или Pol/Shu с несколькими @-ключами — там своя схема)."""
+    def _active_variant_key(self, mid):
+        """Активный каталожный (@-)ключ папки mid: явный выбор игрока → установленный на
+        диске (по ModuleInfo Name) → вариант сборки набора → base. Считается БЕЗ
+        _chosen_variant/_installed_variant_key: те сами опираются на источники варианта
+        (_source_variants), и обращение к ним отсюда дало бы рекурсию."""
         cat = self._catalog_cache or {}
         base = mid.split('@', 1)[0]
-        by_base = self._variant_index()[0]
-        if len(by_base.get(base) or []) != 1:        # есть @-сиблинги (Pol/Shu) → не наш случай
-            return []
-        e = cat.get(base)
+        keys = self._variant_keys(mid)
+        if len(keys) < 2:
+            return keys[0] if keys else base
+        ch = (self.profile.get('variants') or {}).get(base)
+        if ch:
+            k = self._variant_ref(ch)[0]
+            if k in keys:
+                return k
+        nm = self._disk_name(mid)                    # что реально лежит на диске
+        for k in keys:
+            if nm and (cat[k].get('name') or '') == nm:
+                return k
+        camp = getattr(self, '_inst_base_camp', None) or self._profile_camp_hint()
+        if camp:
+            for k in keys:
+                if camp in self._entry_camps(cat[k]):
+                    return k
+        return base if base in cat else sorted(keys)[0]
+
+    def _source_variants(self, mid):
+        """versions_differ-мод с НЕСКОЛЬКИМИ источниками (один и тот же мод в разных паках
+        с разными билдами, напр. Huk'sShit/Mod_Interface из solyanka/huk/universe):
+        синтетические варианты по ИСТОЧНИКУ. Возвращает [(key, source, subentry)],
+        key = '<каталожный ключ>#<source>'. [] если у варианта один источник.
+
+        Источники берутся у АКТИВНОГО @-ключа, а не у base. Раньше наличие @-сиблинга
+        (Pol/Shu) выключало эту схему целиком, а таких «гибридов» в каталоге 28 (вся
+        ShusRangers + OtherMods/SR1Equipment): Shu-ключ раздаётся и в original, и в
+        universe, а redux даёт Pol-ключ. Игрок не мог выбрать версию (orig↔uni), дата в
+        списке всегда бралась у default_source (=original), хотя при установке universe
+        на диск ложилась свежая версия, и пин источника для них не работал."""
+        cat = self._catalog_cache or {}
+        akey = self._active_variant_key(mid)
+        e = cat.get(akey)
         if not e or not e.get('versions_differ'):
             return []
         subs = [v for v in (e.get('variants') or []) if v.get('source')]
         if len(subs) < 2:
             return []
-        return [(f'{base}#{v["source"]}', v['source'], v) for v in subs]
+        return [(f'{akey}#{v["source"]}', v['source'], v) for v in subs]
+
+    def _source_variants_key(self, key):
+        """То же, но для КОНКРЕТНОГО каталожного ключа (нужно переключателю: кнопки не
+        должны прыгать при смене активного варианта)."""
+        e = (self._catalog_cache or {}).get(key)
+        if not e or not e.get('versions_differ'):
+            return []
+        subs = [v for v in (e.get('variants') or []) if v.get('source')]
+        if len(subs) < 2:
+            return []
+        return [(f'{key}#{v["source"]}', v['source'], v) for v in subs]
 
     def _fix_children_map(self, packs=None):
         """'camp/parent' -> {'camp/fix', …}: фикс-юниты, свёрнутые агрегатором в
@@ -1529,7 +1630,9 @@ class Api:
             if gk not in groups:
                 groups[gk] = []; order.append(gk)
             groups[gk].append((k, s))
-        ds = ((self._catalog_cache or {}).get(mid.split('@', 1)[0]) or {}).get('default_source')
+        # default_source берём у ТОГО ключа, из которого построены sv (у @-варианта он
+        # свой): mid здесь — папка, а варианты могут принадлежать @-сиблингу.
+        ds = ((self._catalog_cache or {}).get(sv[0][0].rsplit('#', 1)[0]) or {}).get('default_source')
         ver_of = {s: (v or {}).get('version') for _k, s, v in sv}   # источник → хэш-версия
         out, seen_cv = [], {}
         for (camp, fam) in order:
@@ -1572,6 +1675,29 @@ class Api:
         """Список вариантов папки mid для переключателя: [{key,name,camps}]. Пусто, если
         вариант один. Покрывает и Pol/Shu (@-ключи), и versions_differ (по источникам)."""
         cat = self._catalog_cache or {}
+        keys = self._variant_keys(mid)
+        if len(keys) > 1:
+            # Pol/Shu: кнопка на каждый @-ключ, а у ключа, который сам раздаётся в
+            # нескольких сборках (гибрид — вся ShusRangers, SR1Equipment), — кнопка на
+            # каждую его сборку. Иначе выбрать между original- и universe-версией Shu-мода
+            # было нельзя вовсе. Кнопки строятся по КЛЮЧАМ (а не по активному варианту),
+            # чтобы набор не менялся при переключении.
+            out = []
+            for k in sorted(keys):
+                e = cat.get(k) or {}
+                nm = e.get('name') or k.split('/')[-1]
+                groups = self._variant_groups(k, self._source_variants_key(k))
+                if len(groups) > 1:
+                    for g in groups:
+                        out.append({'key': g['key'], 'name': nm, 'camps': [g['camp']],
+                                    'dual': True})    # подпись = имя варианта + сборка
+                else:
+                    out.append({'key': k, 'name': nm,
+                                'camps': sorted(self._entry_camps(e))})
+            if len(out) < 2:
+                return []
+            out.sort(key=lambda v: (v['name'], v['camps']))
+            return out
         sv = self._source_variants(mid)
         if sv:                                        # versions_differ: одна кнопка на ГРУППУ
             groups = self._variant_groups(mid, sv)
@@ -1591,16 +1717,7 @@ class Api:
             # name; при одной группе на сборку — бейдж сборки (variantLabel сам решает)
             out.sort(key=lambda x: (x['camps'][0], x['name']))
             return out
-        keys = self._variant_keys(mid)
-        if len(keys) < 2:
-            return []
-        out = []
-        for k in keys:
-            e = cat.get(k) or {}
-            out.append({'key': k, 'name': e.get('name') or k.split('/')[-1],
-                        'camps': sorted(self._entry_camps(e))})
-        out.sort(key=lambda v: v['name'])
-        return out
+        return []
 
     def _source_info(self, mid):
         """Откуда взялся мод: сборка + пак(и), чьи файлы лежат в его папке. Для карточки
@@ -1690,16 +1807,21 @@ class Api:
         cat = self._catalog_cache or {}
         base = mid.split('@', 1)[0]
         ch = (self.profile.get('variants') or {}).get(base)
-        if ch and ch in cat:
-            return ch
         sv = self._source_variants(mid)
+        if not sv and ch and ch in cat:
+            return ch
         if sv:                                        # versions_differ: одна кнопка на ГРУППУ
             groups = self._variant_groups(mid, sv)
             if not groups:
                 return sv[0][0]
             # активная группа: явный выбор игрока → установленный источник → default_source.
             # Возвращаем канонический key группы, чтобы совпал с одной из кнопок переключателя.
-            g = self._group_of_source(groups, (self._variant_ref(ch)[1] if ch else None) or ch)
+            # Выбором ИСТОЧНИКА считаем только синтетический ключ: у гибрида (@-вариант,
+            # который сам раздаётся в двух сборках) чистый каталожный ключ означает выбор
+            # Pol/Shu, а источник для него ещё надо определить фолбэками ниже.
+            ch_src = ch.rsplit('#', 1)[1] if (ch and '#' in ch
+                                              and ch.rsplit('#', 1)[0] in cat) else None
+            g = self._group_of_source(groups, ch_src)
             if g is None:
                 inst = self._installed_variant_key(mid)
                 g = self._group_of_source(groups, self._variant_ref(inst)[1] if inst else None) if inst else None
@@ -1716,8 +1838,14 @@ class Api:
                 if pc:
                     g = next((x for x in groups if x['camp'] == pc), None)
             if g is None:
-                g = self._group_of_source(groups, (cat.get(base) or {}).get('default_source'))
+                akey = sv[0][0].rsplit('#', 1)[0]     # ds активного @-ключа, не базового
+                g = self._group_of_source(groups, (cat.get(akey) or {}).get('default_source'))
             return (g or groups[0])['key']
+        # Pol/Shu без выбора и без диска: активным считаем вариант СБОРКИ набора — иначе
+        # метка (по _active_variant_key) и дата/карточка (по базовому ключу) расходились:
+        # «REDUX» в строке и дата original-версии рядом
+        if len(self._variant_keys(mid)) > 1:
+            return self._installed_variant_key(mid) or self._active_variant_key(mid) or ''
         return self._installed_variant_key(mid) or ''
 
     def set_variant(self, mid, key):
@@ -1735,20 +1863,27 @@ class Api:
         переключение (set_variants_camp) сохраняло и перерисовывало ОДИН раз."""
         cat = self._catalog_cache or {}
         base = mid.split('@', 1)[0]
+        # допустимы синтетические ключи ЛЮБОГО @-варианта папки: у гибрида кнопка чужого
+        # варианта («ShuDomiks · UNI» при активном PolDomiks) обязана приниматься
         sv_keys = {k for k, _s, _v in self._source_variants(mid)}
+        for vk in self._variant_keys(mid):
+            sv_keys |= {k for k, _s, _v in self._source_variants_key(vk)}
         if key not in cat and key not in sv_keys:
             return {'ok': False, 'error': 'Неизвестный вариант.'}
         self.profile.setdefault('variants', {})[base] = key
         installed = self._installed_variant_key(mid)
         # различаем варианты по ИСТОЧНИКУ (у versions_differ имена совпадают, по имени
         # не отличить); source отсутствует → считаем «другим», т.е. предлагаем перекачку
-        _, want_src = self._variant_ref(key)
-        inst_src = self._variant_ref(installed)[1] if installed else None
-        if self._source_variants(mid):
+        want_k, want_src = self._variant_ref(key)
+        inst_k, inst_src = self._variant_ref(installed) if installed else (None, None)
+        sv_w = self._source_variants_key(want_k)
+        if installed and want_k != inst_k:
+            differ = True                     # другой Pol/Shu-вариант — это другой мод
+        elif sv_w:
             # кнопка = группа (сборка+семейство паков) → перекачка нужна при СМЕНЕ ГРУППЫ:
             # смена сборки ИЛИ смена независимого пака внутри сборки (Huk↔Солянка), но НЕ
             # смена installer↔fixes одной дистрибуции (они в одной группе)
-            groups = self._variant_groups(mid)
+            groups = self._variant_groups(mid, sv_w)
             gw = self._group_of_source(groups, want_src)
             gi = self._group_of_source(groups, inst_src)
             differ = (gw is not None and gw is not gi)
@@ -1769,22 +1904,33 @@ class Api:
         РАЗНЫМИ модами, массово их не переключаем.
 
         preview=True — ничего не менять, вернуть список того, что поменялось бы.
-        Возвращает {ok, items:[{mid,name,from,to}], redownload} — redownload считает моды,
-        которым смена группы даст перекачку (это и показываем в подтверждении)."""
+        Возвращает {ok, items:[{mid,name,from,to}], redownload, skipped} — redownload
+        считает моды, которым смена группы даст перекачку, skipped объясняет НЕтронутые
+        (раньше они молча пропускались: «а чё оно не всё перетыкивает?»)."""
         if not camp:
             return {'ok': False, 'error': 'Не указана сборка.'}
         if self._catalog_cache is None:
             return {'ok': False, 'error': 'Каталог ещё загружается — повторите через секунду.'}
         items, changed = [], []
+        skipped = {'variant': 0, 'no_version': 0, 'already': 0}
         for mid in (mids or []):
             groups = self._variant_groups(mid)
-            if not groups:
-                continue
-            g = next((x for x in groups if x['camp'] == camp), None)
-            if g is None:                      # у мода нет версии этой сборки — не трогаем
+            g = next((x for x in groups if x['camp'] == camp), None) if groups else None
+            if g is None:
+                # версия этой сборки может существовать под ДРУГИМ Pol/Shu-вариантом
+                # (redux-версия Shu-мода едет как @PolX) — массово его не переключаем,
+                # но и молчать нельзя: игрок видит «переключилось не всё».
+                kv = self._camp_variant_entry(mid, camp)
+                if not kv:
+                    skipped['no_version'] += 1
+                elif kv[0] != self._active_variant_key(mid):
+                    skipped['variant'] += 1
+                else:
+                    skipped['already'] += 1
                 continue
             cur = self._chosen_variant(mid)
             if cur == g['key']:
+                skipped['already'] += 1
                 continue
             cur_g = self._group_of_source(groups, self._variant_ref(cur)[1] if cur else None)
             items.append({'mid': mid, 'name': (self._variant_sub(g['key']) or {}).get('name')
@@ -1793,7 +1939,7 @@ class Api:
                           'to': camp})
             changed.append((mid, g['key']))
         if preview:
-            return {'ok': True, 'items': items, 'count': len(items)}
+            return {'ok': True, 'items': items, 'count': len(items), 'skipped': skipped}
         redownload = 0
         for mid, key in changed:
             r = self._set_variant_nosave(mid, key)
@@ -1803,7 +1949,11 @@ class Api:
             self._save_profile()
             self.log(f'Версии модов переведены на сборку «{camp_title(camp)}»: {len(changed)}.')
             self._emit('tree_dirty')
-        return {'ok': True, 'count': len(changed), 'redownload': redownload}
+        if skipped['variant']:
+            self.log(f'Не тронуто модов, у которых версия этой сборки — под другим '
+                     f'вариантом (Pol/Shu): {skipped["variant"]}. Такой выбор только вручную.')
+        return {'ok': True, 'count': len(changed), 'redownload': redownload,
+                'skipped': skipped}
 
     @staticmethod
     def _variant_files(mid, unit_maps, source):
@@ -2324,8 +2474,9 @@ class Api:
         # строкой «➕ добавлен» в своей группе (превью того, что поставится), а не одной
         # строкой «★ вся сборка» вверху. iid='p{idx}#mid' → «отменить добавление»/удаление
         # ведёт к записи сборки (число idx); установка остаётся bulk (тип camp).
+        skipped_mods = self._camp_skips()        # моды, убранные игроком из сборок
         for cid, camp, part in camp_adds:
-            all_members = self._camp_member_mids(camp)
+            all_members = self._camp_member_mids(camp) - skipped_mods
             if not all_members:
                 # каталог не загрузился (нет сети / негодный токен) — показываем факт
                 # добавления строкой-заглушкой, но С ИМЕНЕМ сборки: без него игрок видел
@@ -2423,6 +2574,7 @@ class Api:
             'name_mode': self.config.get('name_mode', 'folder'),
             'all_tags': sorted(all_tags, key=lambda s: s.lower()),
             'hidden_count': hidden_count,
+            'skipped_count': len(skipped_mods),   # убраны из добавленных сборок (можно вернуть)
             'show_hidden': show_hidden,
             'freeze_hidden': bool(self.config.get('freeze_hidden', False)),
             'desc_in_list': desc_in_list,
@@ -2871,6 +3023,76 @@ class Api:
         self._save_profile()
         return True
 
+    def _parse_rows(self, iids):
+        """iid'ы дерева → (записи к удалению, {idx: {mid…}} к исключению из сборки).
+
+        Строка мода, развёрнутого из добавленной сборки, имеет iid 'p{idx}#{mid}' и
+        указывает на ЗАПИСЬ СБОРКИ. Раньше и она, и сама запись сводились к одному
+        числу idx, поэтому «убрать» на одном моде сносило всю сборку."""
+        mods = self.profile.get('mods', [])
+        drop, skip = set(), {}
+        for iid in (iids or []):
+            m = re.match(r'^p(\d+)(?:#(.+))?$', str(iid or ''))
+            if not m:
+                continue                       # 'd:'/'e:'/'b:' — не записи профиля
+            idx, mid = int(m.group(1)), m.group(2)
+            if not (0 <= idx < len(mods)):
+                continue
+            ent = mods[idx]
+            if not mid or ent.get('type') != 'camp':
+                drop.add(idx)                  # сама запись (или строка без мода)
+            else:
+                skip.setdefault(idx, set()).add(mid)
+        return drop, {i: s for i, s in skip.items() if i not in drop}
+
+    def remove_preview(self, iids):
+        """Что именно уберётся: записи профиля + моды, исключаемые из добавленных сборок.
+        Нужно, чтобы подтверждение не врало («1 позиция» вместо всей сборки)."""
+        mods = self.profile.get('mods', [])
+        drop, skip = self._parse_rows(iids)
+        recs = []
+        for i in sorted(drop):
+            m = mods[i]
+            lost = 0
+            if m.get('type') == 'camp' and (m.get('part') or PART_ALL) != PART_BASE:
+                lost = len(self._camp_member_mids(m.get('camp'))
+                           - set(m.get('skip') or ()) - self._camp_skips())
+            recs.append({'name': m.get('name') or m.get('id') or m.get('unit')
+                         or camp_title(m.get('camp') or ''),
+                         'type': m.get('type'), 'mods_lost': lost})
+        names = sorted({mid.split('/')[-1] for s in skip.values() for mid in s})
+        return {'ok': True, 'records': recs, 'record_count': len(recs),
+                'skip_count': sum(len(s) for s in skip.values()), 'skip_names': names[:20],
+                'lost_count': sum(r['mods_lost'] for r in recs)}
+
+    def remove_rows(self, iids):
+        """Убрать из профиля выделенные СТРОКИ: свои записи удаляются, моды развёрнутой
+        сборки заносятся в её skip (сборка остаётся, мод больше не ставится и не
+        показывается). Файлы на диске не трогаем — ни здесь, ни при следующей установке
+        (см. skip_mods в core.reconstruct_multi)."""
+        mods = self.profile.get('mods', [])
+        drop, skip = self._parse_rows(iids)
+        for i, mids in skip.items():
+            ent = mods[i]
+            ent['skip'] = sorted(set(ent.get('skip') or ()) | mids)
+        for i in sorted(drop, reverse=True):
+            mods.pop(i)
+        self._save_profile()
+        self._emit('tree_dirty')
+        return {'ok': True, 'removed': len(drop), 'skipped': sum(len(s) for s in skip.values())}
+
+    def restore_camp_skips(self):
+        """Вернуть в набор все моды, убранные из добавленных сборок."""
+        n = 0
+        for m in self.profile.get('mods', []):
+            if m.get('skip'):
+                n += len(m['skip'])
+                m.pop('skip', None)
+        if n:
+            self._save_profile()
+            self._emit('tree_dirty')
+        return {'ok': True, 'restored': n}
+
     def clear_queue(self):
         """Отменить ВСЕ добавления: очистить очередь сборки (profile['mods']). Файлы на
         диске не трогает — это только неустановленные добавленные записи."""
@@ -3089,7 +3311,8 @@ class Api:
             repo, units, mods_dir, tok, log=self.log, tmp_dir=ROOT,
             should_cancel=self.should_cancel, part_cb=self._part_progress,
             byte_cb=self._byte_progress, prune_snap_id='__bulk_merge__',
-            chunk_cb=self._chunk_progress, mod_sources=self._pinned_sources(packs))
+            chunk_cb=self._chunk_progress, mod_sources=self._pinned_sources(packs),
+            skip_mods=self._camp_skips(entries))
 
     def _install_one(self, m, mods_dir, tok):
         """Установить ОДНУ запись сборки (camp / unit / desc / zip)."""
@@ -3120,7 +3343,8 @@ class Api:
                 log=self.log, tmp_dir=ROOT, should_cancel=self.should_cancel,
                 part_cb=self._part_progress, byte_cb=self._byte_progress,
                 chunk_cb=self._chunk_progress,
-                mod_sources=self._pinned_sources(packs))
+                mod_sources=self._pinned_sources(packs),
+                skip_mods=self._camp_skips([m]))
         elif m.get('type') == 'unit':
             self._pack_ctx = m.get('name', m.get('unit', ''))
             ff, fidx = self._fork_unit_overlay(m['camp'], m['unit'])

@@ -344,5 +344,120 @@ m2 = mass_api(); m2._catalog_cache = None
 check('9 каталог не прогрет → внятная ошибка, а не падение',
       m2.set_variants_camp('universe', ALL, True).get('ok') is False, '')
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 10) ГИБРИД: @-вариант (Pol/Shu), который сам раздаётся в НЕСКОЛЬКИХ сборках.
+# Реальная топология каталога (28 модов: вся ShusRangers + OtherMods/SR1Equipment):
+# ShuDomiks = original + universe (versions_differ), а redux даёт @PolDomiks.
+# Раньше @-сиблинг выключал схему источников целиком: выбрать orig↔uni было нельзя,
+# дата бралась у default_source (=original), пин источника не работал.
+# ─────────────────────────────────────────────────────────────────────────────
+print('\n--- 10: гибрид (Pol/Shu + версии сборок у одного варианта) ---')
+HYB = 'ShusRangers/ShuDomiks'
+POL = 'ShusRangers/ShuDomiks@PolDomiks'
+K_ORIG, K_UNI = f'{HYB}#original/original_installer', f'{HYB}#universe/universe_community'
+
+def hyb_api(camp_in_profile=None):
+    a = fresh()
+    a._catalog_cache = {
+        HYB: {'name': 'ShuDomiks', 'versions_differ': True, 'mtime': 1664140628,
+              'default_source': 'original/original_installer',
+              'variants': [
+                  {'source': 'original/original_installer', 'version': 'o',
+                   'name': 'ShuDomiks', 'mtime': 1664140628, 'depends': [], 'conflicts': []},
+                  {'source': 'universe/universe_community', 'version': 'u',
+                   'name': 'ShuDomiks', 'mtime': 1780136596, 'depends': [], 'conflicts': []}]},
+        POL: {'name': 'PolDomiks', 'default_source': 'redux/redux_base_installer',
+              'mtime': 1781347879,
+              'variants': [{'source': 'redux/redux_base_installer', 'version': 'p',
+                            'name': 'PolDomiks', 'mtime': 1781347879,
+                            'depends': [], 'conflicts': []}]},
+    }
+    a._packs_cache = {
+        'original/original_installer': {'name': 'original_installer',
+                                        'display_name': 'Original', 'tier': 'base'},
+        'universe/universe_community': {'name': 'universe_community',
+                                        'display_name': 'Universe Community', 'tier': 'base'},
+        'redux/redux_base_installer': {'name': 'redux_base_installer',
+                                       'display_name': 'ПБ Свободная Бухта', 'tier': 'base'},
+    }
+    a._fixparent = {}
+    a._camps_idx = None
+    a._get_packs = lambda tok=None: a._packs_cache
+    if camp_in_profile:
+        a.profile['mods'] = [{'type': 'camp', 'camp': camp_in_profile, 'part': 'mods'}]
+    return a
+
+h = hyb_api()
+vs = h._variants_of(HYB)
+check('10 кнопок три: Pol(redux) + Shu(orig) + Shu(uni)', len(vs) == 3, str(vs))
+check('10 у Shu-кнопок метка сборки', {v['camps'][0] for v in vs} == {'redux', 'original', 'universe'},
+      str(vs))
+check('10 Shu-кнопки помечены dual (имя + сборка)',
+      sum(1 for v in vs if v.get('dual')) == 2, str(vs))
+check('10 ключи Shu-кнопок синтетические',
+      {K_ORIG, K_UNI} <= {v['key'] for v in vs}, str([v['key'] for v in vs]))
+
+# набор игрока = universe → и метка, и ДАТА должны быть universe-версии, а не default_source
+hu = hyb_api('universe')
+check('10 вариант по сборке набора = universe', hu._chosen_variant(HYB) == K_UNI,
+      hu._chosen_variant(HYB))
+check('10 дата = universe-билд (а не «дата ориг»)', hu._dev_date(HYB) == 1780136596,
+      str(hu._dev_date(HYB)))
+check('10 метка сборки = universe', hu._camps_of(HYB) == ['universe'], str(hu._camps_of(HYB)))
+
+ho = hyb_api('original')
+check('10 набор original → своя версия и дата', ho._chosen_variant(HYB) == K_ORIG
+      and ho._dev_date(HYB) == 1664140628, f'{ho._chosen_variant(HYB)} {ho._dev_date(HYB)}')
+
+# профиль «Свободной Бухты»: её версия мода едет под @Pol-ключом → и метка, и дата
+# должны быть от него. Раньше имя ПАПКИ выдавалось за «установленный вариант» (Shu), и
+# на redux-профиле мод показывался с меткой ORIG/UNI и датой original-билда.
+hr = hyb_api('redux')
+check('10 профиль redux → метка redux (Pol-вариант)', hr._camps_of(HYB) == ['redux'],
+      str(hr._camps_of(HYB)))
+check('10 …и дата Pol-версии, а не базовой записи', hr._dev_date(HYB) == 1781347879,
+      str(hr._dev_date(HYB)))
+hd = hyb_api('redux')
+hd._disk_name = lambda m: 'ShuDomiks'            # а вот РЕАЛЬНО установленный вариант
+check('10 диск сильнее сборки набора', hd._camps_of(HYB) != ['redux'], str(hd._camps_of(HYB)))
+check('10 неустановленный мод не считается установленным',
+      hyb_api('redux')._installed_variant_key(HYB) is None, '')
+
+# выбор источника внутри Shu-ключа + пин при установке сборки
+hs = hyb_api('universe')
+check('10 выбор orig-версии принят', hs.set_variant(HYB, K_ORIG).get('ok') is True, '')
+check('10 выбор записан в профиль', hs.profile['variants'].get(HYB) == K_ORIG,
+      str(hs.profile.get('variants')))
+check('10 пин источника заработал (был невозможен)',
+      hs._pinned_sources() == {HYB: {'original/original_installer'}}, str(hs._pinned_sources()))
+check('10 после выбора дата следует за выбором', hs._dev_date(HYB) == 1664140628,
+      str(hs._dev_date(HYB)))
+
+# выбор Pol-варианта: другой мод → перекачка, источников у него один → пина нет
+hp = hyb_api('universe')
+hp._installed_variant_key = lambda m: K_UNI
+r = hp._set_variant_nosave(HYB, POL)
+check('10 смена Shu→Pol помечена перекачкой', r.get('differ') is True, str(r))
+check('10 выбор Pol не создаёт пин источника', hp._pinned_sources() == {},
+      str(hp._pinned_sources()))
+check('10 у Pol-варианта переключателя версий нет', hp._source_variants_key(POL) == [], '')
+
+# массовое «версии одной сборкой»
+hm = hyb_api('universe')
+hm.set_variant(HYB, K_ORIG)                     # игрок сидит на original-версии
+pv = hm.set_variants_camp('universe', [HYB], True)
+check('10 массово на universe — гибрид переключается', pv['count'] == 1, str(pv))
+hm.set_variants_camp('universe', [HYB], False)
+check('10 …и выбор реально записан', hm.profile['variants'].get(HYB) == K_UNI,
+      str(hm.profile.get('variants')))
+hm2 = hyb_api('universe')
+pv2 = hm2.set_variants_camp('redux', [HYB], True)
+check('10 массово на redux — не трогаем (это Pol, другой мод)', pv2['count'] == 0, str(pv2))
+check('10 …и причина названа явно', pv2['skipped']['variant'] == 1, str(pv2['skipped']))
+hm3 = hyb_api('original')
+pv3 = hm3.set_variants_camp('original', [HYB], True)
+check('10 уже этой сборки → в «already», а не в тишину',
+      pv3['count'] == 0 and pv3['skipped']['already'] == 1, str(pv3))
+
 print(f'\n===== ИТОГ: PASS={len(PASS)} FAIL={len(FAIL)} =====')
 sys.exit(1 if FAIL else 0)
