@@ -367,7 +367,7 @@ try:
     def fake_reconstruct_camp(repo, camp, units, mods_dir_path, token,
                               log=print, tmp_dir=None, should_cancel=None,
                               part_cb=None, byte_cb=None, sha_sink=None, dry_run=False,
-                              chunk_cb=None, mod_sources=None, skip_mods=None):
+                              chunk_cb=None, mod_sources=None, skip_mods=None, vlog=None):
         """Имитирует reconstruct_camp (единый проход по лагерю): пишет фейковые файлы."""
         mds = Path(mods_dir_path)
         nuke_dir = mds / 'ShusRangers' / 'ShuNukes'
@@ -2095,7 +2095,32 @@ try:
                                tmp_dir=_tmp, mod_sources={_MID_PIN: {'universe/other'}})
     check('T86: мод не выпал — версия по порядку паков', _SOL_DATA, _data.read_bytes())
     check_true('T86: о нерелевантном выборе предупредили',
-               any('не входит в этот набор' in l for l in _logs))
+               any('выбранной вами версии в этом наборе нет' in l for l in _logs))
+
+    print('\n--- T86b: журнал установки — по модам, без «частей» ---')
+    # Просьба игроков и авторов модов: строки «Часть 1530/2800 готова» в журнале
+    # бесполезны (их тысячи), а понять «сколько модов какой сборки уже встало» было
+    # нельзя. Теперь ход работы считается по модам, а имена — в подробном логе.
+    _m86 = _w4 / 'Game2' / 'Mods'; _m86.mkdir(parents=True, exist_ok=True)
+    _lh, _vh = [], []
+    with patch.object(core, 'repo_file_bytes', side_effect=_m_rfb), \
+         patch.object(core, 'download_url', side_effect=_m_dl):
+        core.reconstruct_multi('repo', [_HUK, _SOL], _m86, 'tok',
+                               log=_lh.append, vlog=_vh.append, tmp_dir=_tmp)
+    check_true('T86b: файлы реально приехали',
+               (_m86 / 'HuksShit' / 'Mod_Interface' / 'data.dat').exists())
+    check_true('T86b: строки «Часть N/M» в журнале больше нет',
+               not any('Часть ' in l for l in _lh + _vh))
+    check_true('T86b: сборка названа по-человечески и со счётом модов',
+               any('ПБ «Свободная Бухта»: 1/1 модов установлено' in l for l in _lh))
+    check_true('T86b: имя установленного мода — в подробном логе',
+               any('HuksShit/Mod_Interface' in l for l in _vh))
+    check_true('T86b: в обычном журнале нет слов «код»/«ассетов»',
+               not any('ассет' in l for l in _lh))
+    _tech = ('sha', 'manifest', 'chunk', 'descriptor', 'code +', 'asset',
+             '_base', 'eff', 'blob')
+    _bad = [l for l in _lh + _vh for t in _tech if t in l]
+    check('T86b: даже в подробном логе нет служебных терминов', [], _bad)
 
     print('\n--- T87: выбор одного мода не трогает остальные ---')
     _run_pin([_HUK, _SOL], _mods, _tmp, {'Other/Mod': {'redux/huk_mods'}})
@@ -2130,7 +2155,7 @@ try:
     check_true('T88: файлы мода не появились', not _d5.exists())
     check('T88: качать было нечего', 0, _st88['code_files'] + _st88['asset_files'])
     check_true('T88: об исключении сказано в журнале',
-               any('Убрано игроком из набора' in l for l in _logs5))
+               any('Убрано вами из набора' in l for l in _logs5))
 
     print('\n--- T89: без skip мод ставится (контроль) ---')
     _run_skip()

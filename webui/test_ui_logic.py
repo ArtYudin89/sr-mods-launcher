@@ -653,6 +653,81 @@ check('исключён в одной сборке из двух → остаё�
 a.remove_rows(['p2#Cat/ModA'])
 check('исключён в обеих → выпадает', {'Cat/ModA'}, a._camp_skips())
 
+# ═══════════════════════════════════════════════
+#  Журнал человеческим языком: сводка по сборкам, итог обновления, счёт по модам
+# ═══════════════════════════════════════════════
+def check_true(name, actual):
+    check(name, True, bool(actual))
+
+print('\n--- журнал: сводка «сколько модов какой сборки стоит» ---')
+a = fresh_api()
+_log, _vlog = [], []
+a.log = _log.append; a.vlog = _vlog.append
+_idx = {'mods': {'Cat/ModA': {}, 'Cat/ModB': {}, 'Cat/ModC': {}, 'Cat/Sam': {}}}
+a._log_camp_census(_idx, a._catalog_cache,
+                   {'Cat/ModA': 'redux', 'Cat/ModB': 'universe',
+                    'Cat/ModC': 'universe', 'Cat/Sam': None})
+check_true('сводка: строка по redux со счётом «сколько из скольких»',
+           any('ПБ «Свободная Бухта»: 1/1 модов установлено' in l for l in _log))
+check_true('сводка: universe считает оба своих мода',
+           any('Space Rangers Universe (Community): 2/2 модов установлено' in l for l in _log))
+check_true('сводка: мод не из каталога назван отдельно и без жаргона',
+           any(l.startswith('Не опознано: 1 мод') for l in _log))
+check_true('сводка: имена модов — в подробный лог',
+           any('Cat/ModA' in l for l in _vlog))
+check_true('в обычном логе имён модов нет (они только в подробном)',
+           not any('Cat/ModA' in l for l in _log))
+
+print('\n--- журнал: итог применённых обновлений ---')
+a = fresh_api()
+_log, _vlog = [], []
+a.log = _log.append; a.vlog = _vlog.append
+a._merge_total = 3
+a._merge_applied = {'redux': ['Cat/ModA', 'Cat/ModC']}
+a._log_merge_summary()
+check_true('итог: «обновлено N из M»', any('обновлено 2 из 3' in l for l in _log))
+check_true('итог: строка по сборке',
+           any('ПБ «Свободная Бухта»: обновлено 2 мода' in l for l in _log))
+del _log[:]
+a._log_merge_summary()
+check('итог печатается один раз на серию', [], _log)
+
+print('\n--- журнал: результат обновления мода словами, а не словарём ---')
+_ph = app.Api._stats_phrase({'written': 2, 'merged': 1, 'kept': 17, 'deleted': 0,
+                             'sidecar': 0, 'conflict': 0, 'skipped': 0})
+check_true('в строке нет фигурных скобок словаря', '{' not in _ph)
+check_true('сказано, сколько файлов обновлено', 'обновлено файлов — 2' in _ph)
+check_true('сказано про правки игрока', 'ваши правки' in _ph)
+check_true('нули не упоминаются', 'удалено' not in _ph)
+check('пустой итог объясняется словами', 'менять было нечего', app.Api._stats_phrase({}))
+check('чужой формат не роняет журнал', 'update=1', app.Api._stats_phrase('update=1'))
+_full = app.Api._stats_phrase({'written': 1}, full=True)
+check_true('подробный итог перечисляет и нулевые действия', 'удалено лишних — 0' in _full)
+check_true('и тоже без словаря', '{' not in _full and 'written' not in _full)
+
+print('\n--- журнал: счётчик модов по сборкам (core.ModProgress) ---')
+import launcher_core as core
+_log, _vlog = [], []
+prog = core.ModProgress(_log.append, _vlog.append)
+prog.plan({f'Cat/M{i}': ('redux', 2, 2) for i in range(20)})
+check_true('стартовая строка: 0 из 20',
+           any('ПБ «Свободная Бухта»: 0/20 модов установлено' in l for l in _log))
+for i in range(20):
+    prog.file_written(f'Mods/Cat/M{i}/a.dat')
+    prog.file_written(f'Mods/Cat/M{i}/b.dat')
+prog.finish()
+check_true('финальная строка: 20 из 20',
+           any('ПБ «Свободная Бухта»: 20/20 модов установлено' in l for l in _log))
+check_true('строк счётчика немного (не по файлу на строку)', len(_log) <= 5)
+check('имена всех готовых модов — в подробном логе', 20, len(_vlog))
+_log2, _vlog2 = [], []
+prog2 = core.ModProgress(_log2.append, _vlog2.append)
+prog2.plan({'Cat/A': ('redux', 3, 0), 'Cat/B': ('original', 1, 1)})
+check_true('уже стоящие моды сразу зачтены как готовые',
+           any('ПБ «Свободная Бухта»: 1/1 модов установлено' in l for l in _log2))
+check_true('вторая сборка считается отдельно',
+           any('Original: 0/1 модов установлено' in l for l in _log2))
+
 print(f'\n===== ИТОГ: PASS={len(PASS)}  FAIL={len(FAIL)} =====')
 if FAIL:
     print('ПРОВАЛЫ:', FAIL); sys.exit(1)

@@ -2644,8 +2644,8 @@ function appendLog(data, cls) {
   if (!klass) {
     const s = String(msg);
     if (/ОШИБКА|error/i.test(s)) klass = 'err';
-    else if (/^===|^---|готово/i.test(s)) klass = 'acc';
-    else if (/✓/.test(s)) klass = 'ok';
+    else if (/^===|^---|готово|законче/i.test(s)) klass = 'acc';
+    else if (/[✓✔]/.test(s)) klass = 'ok';
   }
   line.className = (klass ? 'l-' + klass : '') + (verbose ? ' l-v' : '');
   const ts = document.createElement('span');

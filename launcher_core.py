@@ -46,9 +46,116 @@ _adapter = requests.adapters.HTTPAdapter(
 _SESSION.mount('https://', _adapter)
 _SESSION.mount('http://', _adapter)
 
-# Детальность лога: True — показывать построчно загрузку каждой части; False —
-# только итоги по модам. GUI переключает перед операцией.
+# Детальность лога: в GUI подробные записи всегда доходят до фронта (там их прячет
+# галочка «Подробный лог»), а в headless-использовании (тесты, CLI) их печатать или
+# нет решает этот флаг. GUI переключает перед операцией.
 LOG_VERBOSE = True
+
+# Человеческие имена сборок: лог читают не только мы, но и авторы модов, которым
+# игроки пересылают журнал. 'redux'/'universe' им ничего не говорят.
+CAMP_TITLES = {'redux': 'ПБ «Свободная Бухта»',
+               'universe': 'Space Rangers Universe (Community)',
+               'original': 'Original'}
+
+# Псевдо-мод для всего, что лежит ВНЕ папки Mods (см. mod_key): движок, DATA, CFG.
+BASE_MOD = '_base'
+
+# Что за файлы едут в паке — словами, а не тиром агрегатора.
+TIER_TITLES = {'base': 'движок и базовые файлы игры',
+               'mod': 'моды',
+               'assets': 'графика и звук',
+               'fix': 'исправления',
+               'fixes': 'исправления'}
+
+
+def camp_title(camp):
+    return CAMP_TITLES.get(camp, camp or 'сборка')
+
+
+def tier_title(tier):
+    return TIER_TITLES.get(tier, tier or 'файлы мода')
+
+
+def _vlogger(log, vlog=None):
+    """Куда писать технические подробности (пути, хеши, служебные термины).
+    В GUI передают Api.vlog (фронт прячет такие строки под галочкой), в headless —
+    ничего не передают, и подробности идут в обычный log только при LOG_VERBOSE."""
+    if vlog is not None:
+        return vlog
+    return log if LOG_VERBOSE else (lambda *_a, **_k: None)
+
+
+def plural_mods(n):
+    n10, n100 = n % 10, n % 100
+    if n10 == 1 and n100 != 11:
+        return 'мод'
+    if n10 in (2, 3, 4) and n100 not in (12, 13, 14):
+        return 'мода'
+    return 'модов'
+
+
+class ModProgress:
+    """Ход работы в понятных единицах — по МОДАМ, а не по файлам и «частям».
+
+    Лог лаунчера читают авторы модов, когда игрок присылает его со словами «не
+    работает». Строка «Часть 1530/2800 готова» им бесполезна, а «ПБ «Свободная
+    Бухта»: 130/200 модов установлено» — сразу говорит, что и докуда доехало.
+    Имена готовых модов уходят в подробный лог (полный список — на руки автору).
+
+    Счёт ведётся по сборкам: в один набор попадают моды из разных сборок, и общий
+    счётчик скрыл бы, что из «Original» приехало 10 модов, а не 120."""
+
+    def __init__(self, log, vlog=None, verb='установлено'):
+        self.log = log
+        self.vlog = _vlogger(log, vlog)
+        self.verb = verb
+        self._camp = {}        # mod_key -> сборка
+        self._files = {}       # mod_key -> файлов всего
+        self._left = {}        # mod_key -> файлов ещё не записано
+        self.total = {}        # сборка -> модов в наборе
+        self.done = {}         # сборка -> модов готово
+        self._shown = {}       # сборка -> при каком значении печатали строку
+
+    def plan(self, items):
+        """items: {mod_key: (сборка, файлов всего, файлов к скачиванию)}.
+        Моды, у которых качать нечего, сразу считаются готовыми — поэтому первая
+        же строка показывает, сколько из набора уже стоит в игре."""
+        for mk, (camp, total_files, need_files) in items.items():
+            self._camp[mk] = camp
+            self._files[mk] = total_files
+            self._left[mk] = need_files
+            self.total[camp] = self.total.get(camp, 0) + 1
+            if not need_files:
+                self.done[camp] = self.done.get(camp, 0) + 1
+        self.report(final=True)
+
+    def file_written(self, relpath):
+        """Записан очередной файл: когда у мода не остаётся недостающих — он готов."""
+        mk = mod_key(relpath)
+        left = self._left.get(mk)
+        if not left:                       # мод не отслеживается или уже готов
+            return
+        self._left[mk] = left - 1
+        if left == 1:
+            camp = self._camp.get(mk)
+            self.done[camp] = self.done.get(camp, 0) + 1
+            self.vlog(f'✔ {mk} — {self.verb} (файлов у мода: {self._files.get(mk, 0)})')
+            self.report()
+
+    def report(self, final=False):
+        """Строка состояния по каждой сборке. Без final печатается не чаще, чем
+        раз в 10 модов (или 10% набора) — иначе счётчик забьёт весь журнал."""
+        for camp, total in sorted(self.total.items()):
+            d = self.done.get(camp, 0)
+            if d == self._shown.get(camp):
+                continue                   # с прошлой строки ничего не изменилось
+            if not final and d - (self._shown.get(camp) or 0) < max(10, total // 10):
+                continue
+            self._shown[camp] = d
+            self.log(f'{camp_title(camp)}: {d}/{total} модов {self.verb}')
+
+    def finish(self):
+        self.report(final=True)
 
 
 class OperationCancelled(Exception):
@@ -255,13 +362,15 @@ def spawn_self_replace(current_exe, new_exe, log=print):
 
 def _parallel_fetch_extract(need, mods_dir, tmp, resolver, log,
                             should_cancel=None, part_cb=None,
-                            workers=None, byte_cb=None, sha_sink=None, chunk_cb=None):
+                            workers=None, byte_cb=None, sha_sink=None, chunk_cb=None,
+                            written_cb=None):
     """Скачать нужные части ПАРАЛЛЕЛЬНО и извлечь файлы во все целевые пути.
 
     need: {chunk_name: {sha256: [(relpath, kind), ...]}}.
     resolver(chunk, cpath, should_cancel, byte_cb, progress_cb): скачать часть chunk в cpath.
     chunk_cb(chunk, done_bytes, total_bytes) — прогресс ВНУТРИ части (для плавной полосы;
     done==total означает «часть докачана»).
+    written_cb(relpath) — файл записан на диск (счётчик готовых модов для лога).
     Параллелится только СКАЧИВАНИЕ (узкое место — сеть); распаковка/запись идут в
     главном потоке по мере готовности частей → на диске одновременно не больше
     ~workers скачанных частей. Кооперативная отмена и побайтовые ретраи сохранены.
@@ -302,12 +411,15 @@ def _parallel_fetch_extract(need, mods_dir, tmp, resolver, log,
                         target.write_bytes(data)
                         if sha_sink and where == 'mods':   # отпечаток для индекса
                             sha_sink(rel, target, data)
+                        if written_cb:
+                            written_cb(relpath)
             cpath.unlink(missing_ok=True)
             done += 1
             if part_cb:
                 part_cb(done, total)
-            if LOG_VERBOSE:
-                log(f'Часть {done}/{total} готова ({len(shamap)} файлов)')
+            # Построчного «Часть N/M готова» здесь нет намеренно: для читателя лога
+            # (в т.ч. автора мода) это тысячи строк без единого полезного факта —
+            # ход работы показывает ModProgress в понятных единицах, по модам.
     except BaseException:
         for f in futs:                               # отменить ещё не начатые
             f.cancel()
@@ -443,12 +555,12 @@ def install_zip(url, mods_dir, token, progress_cb=None, log=print, tmp_dir=None,
                 should_cancel=None):
     info = resolve_zip(url, token)
     tmp = Path(tmp_dir or mods_dir).parent / '_dl.zip'
-    log('Скачивание zip...')
+    log('Скачиваю архив мода…')
     if info.get('asset'):
         download_asset(info['asset'], token, tmp, progress_cb, should_cancel)
     else:
         download_url(info['download_url'], token, tmp, progress_cb, should_cancel)
-    log('Распаковка...')
+    log('Распаковываю архив в папку модов…')
     _extract_zip_to(tmp, Path(mods_dir))
     tmp.unlink(missing_ok=True)
     return info.get('updated')
@@ -520,7 +632,7 @@ def list_unit_mods(repo, camp, unit, token):
 def reconstruct_unit(repo, camp, unit, mods_dir, token, progress_cb=None,
                      log=print, tmp_dir=None, dry_run=False, mod=None, should_cancel=None,
                      part_cb=None, byte_cb=None, sha_sink=None, skip_present=False,
-                     fork_files=None, fork_index=None, chunk_cb=None):
+                     fork_files=None, fork_index=None, chunk_cb=None, vlog=None):
     """Собрать юнит (или один мод mod=mod_key) из HF: код И ассеты берутся из
     content-addressed чанков asset_index по code.manifest + assets.manifest.
     mod=None -> весь юнит; mod='Кат/Имя' или '_base' -> только этот мод.
@@ -531,6 +643,7 @@ def reconstruct_unit(repo, camp, unit, mods_dir, token, progress_cb=None,
     mods_dir = Path(mods_dir)
     tmp = Path(tmp_dir or mods_dir.parent)
     tmp.mkdir(parents=True, exist_ok=True)
+    vlog = _vlogger(log, vlog)
     stats = {'code_files': 0, 'asset_files': 0, 'chunks': [], 'missing': 0,
              'mod': mod, 'updated': None, 'skipped': 0}
 
@@ -541,7 +654,7 @@ def reconstruct_unit(repo, camp, unit, mods_dir, token, progress_cb=None,
         raise RuntimeError(f'нет манифестов для {camp}/{unit} в {repo}')
 
     if skip_present:
-        log('Проверяю, что уже на диске (сверка хешей, без скачивания)…')
+        log('Смотрю, что уже стоит в игре (сверяю файлы, ничего не качаю)…')
 
     def _on_disk_ok(relpath, sh):
         """Файл уже лежит на диске по своему маршруту с верным sha?"""
@@ -562,12 +675,19 @@ def reconstruct_unit(repo, camp, unit, mods_dir, token, progress_cb=None,
     if fork_files:
         eff = overlay_manifest(eff, fork_files)
         index = merge_chunk_indexes([fork_index, index])   # форки приоритетнее
-        log('Наложение форков на пак включено.')
+        log('Поверх этого пака лягут дополнительные исправления (из репозитория исправлений).')
 
     # Сгруппировать нужные блобы по чанкам. Один sha может вести к нескольким
     # путям (дубли) и из обоих манифестов — храним список (relpath, kind).
+    # Попутно считаем файлы ПО МОДАМ: это единицы, понятные читателю лога.
     need = {}    # chunk -> {sha256: [(relpath, kind), ...]}
+    per_mod = {}                 # mod_key -> [файлов всего, файлов к скачиванию]
     for relpath, (sh, kind) in eff.items():
+        if install_route(relpath)[0] is not None:
+            row = per_mod.setdefault(mod_key(relpath), [0, 0])
+            row[0] += 1
+        else:
+            row = None           # мусор инсталлятора — на диск не ляжет, не считаем
         if skip_present:
             _check_cancel(should_cancel)
             if _on_disk_ok(relpath, sh):
@@ -577,22 +697,36 @@ def reconstruct_unit(repo, camp, unit, mods_dir, token, progress_cb=None,
         if not b:
             stats['missing'] += 1
             continue
+        if row is not None:
+            row[1] += 1
         need.setdefault(b['chunk'], {}).setdefault(sh, []).append((relpath, kind))
 
     if skip_present and stats['skipped']:
-        log(f'Уже на диске и совпадает: {stats["skipped"]} файлов — скачивать не нужно.')
+        log(f'Уже стоит и совпадает: {stats["skipped"]} файлов — их качать не нужно.')
 
     stats['chunks'] = list(need.keys())
     for shamap in need.values():
         for targets in shamap.values():
             for _relpath, kind in targets:
                 stats[f'{kind}_files'] += 1
-    scope = f'мод {mod}' if mod else 'весь пак'
-    log(f'{scope}: {stats["code_files"]} код + {stats["asset_files"]} ассетов '
-        f'в {len(need)} частях'
-        + (f', НЕ найдено файлов: {stats["missing"]}' if stats['missing'] else ''))
+    scope = f'мод {mod}' if mod else f'пак {unit}'
+    dl = stats['code_files'] + stats['asset_files']
+    log(f'{scope}: нужно скачать файлов — {dl}'
+        + (f' (скрипты и настройки — {stats["code_files"]}, '
+           f'графика и звук — {stats["asset_files"]})' if dl else '')
+        + (f'; НЕ найдено на сервере: {stats["missing"]}' if stats['missing'] else ''))
+    if need:
+        vlog(f'Пак {unit} (сборка {camp_title(camp)}): качаю {stats["code_files"]} '
+             f'файлов-скриптов и {stats["asset_files"]} файлов-ресурсов; на сервере они '
+             f'лежат в {len(need)} архивах-частях.')
     if dry_run:
         return stats
+    prog = ModProgress(log, vlog)
+    prog.plan({mk: (camp, tot, nd) for mk, (tot, nd) in per_mod.items()
+               if mk != BASE_MOD})
+    base_row = per_mod.get(BASE_MOD)
+    if base_row and base_row[1]:
+        log(f'Базовые файлы игры (движок): к скачиванию {base_row[1]} файлов.')
 
     # Скачать нужные части ПАРАЛЛЕЛЬНО и извлечь файлы во все целевые пути.
     def resolve(chunk, cpath, sc, bcb, pcb=None):
@@ -611,14 +745,19 @@ def reconstruct_unit(repo, camp, unit, mods_dir, token, progress_cb=None,
 
     _parallel_fetch_extract(need, mods_dir, tmp, resolve, log,
                             should_cancel=should_cancel, part_cb=part_cb, byte_cb=byte_cb,
-                            sha_sink=sha_sink, chunk_cb=chunk_cb)
-    log(f'Готово: {stats["code_files"]} код + {stats["asset_files"]} ассетов в {mods_dir}')
+                            sha_sink=sha_sink, chunk_cb=chunk_cb,
+                            written_cb=prog.file_written)
+    prog.finish()
+    log(f'Готово: скачано файлов — {dl}.' if dl
+        else 'Готово: всё уже стояло как надо, качать ничего не пришлось.')
+    vlog(f'Папка модов: {mods_dir}')
     return stats
 
 
 def reconstruct_camp(repo, camp, units, mods_dir, token, log=print, tmp_dir=None,
                      should_cancel=None, part_cb=None, byte_cb=None, sha_sink=None,
-                     dry_run=False, chunk_cb=None, mod_sources=None, skip_mods=None):
+                     dry_run=False, chunk_cb=None, mod_sources=None, skip_mods=None,
+                     vlog=None):
     """Установить ВЕСЬ лагерь одним идемпотентным проходом (обёртка над reconstruct_multi:
     все юниты одного лагеря camp). См. reconstruct_multi. Прунинг не включаем — лагерь и так
     ставится полным набором, а per-мод сироты чистит install_descriptor."""
@@ -626,13 +765,13 @@ def reconstruct_camp(repo, camp, units, mods_dir, token, log=print, tmp_dir=None
     return reconstruct_multi(repo, umulti, mods_dir, token, log=log, tmp_dir=tmp_dir,
                              should_cancel=should_cancel, part_cb=part_cb, byte_cb=byte_cb,
                              sha_sink=sha_sink, dry_run=dry_run, chunk_cb=chunk_cb,
-                             mod_sources=mod_sources, skip_mods=skip_mods)
+                             mod_sources=mod_sources, skip_mods=skip_mods, vlog=vlog)
 
 
 def reconstruct_multi(repo, units, mods_dir, token, log=print, tmp_dir=None,
                       should_cancel=None, part_cb=None, byte_cb=None, sha_sink=None,
                       dry_run=False, prune_snap_id=None, snap_dir=None, chunk_cb=None,
-                      mod_sources=None, skip_mods=None):
+                      mod_sources=None, skip_mods=None, vlog=None):
     """Установить НЕСКОЛЬКО юнитов (возможно из РАЗНЫХ лагерей и с фильтром на один мод)
     одним идемпотентным проходом.
 
@@ -676,6 +815,7 @@ def reconstruct_multi(repo, units, mods_dir, token, log=print, tmp_dir=None,
     mods_dir = Path(mods_dir)
     tmp = Path(tmp_dir or mods_dir.parent)
     tmp.mkdir(parents=True, exist_ok=True)
+    vlog = _vlogger(log, vlog)
     stats = {'code_files': 0, 'asset_files': 0, 'chunks': [], 'missing': 0, 'skipped': 0}
 
     index = json.loads(repo_file_bytes(repo, 'state/asset_index.json', token))
@@ -701,7 +841,7 @@ def reconstruct_multi(repo, units, mods_dir, token, log=print, tmp_dir=None,
         code_man = _load_manifest(repo, f'mods/{cu}/{unit}/code.manifest.json', token)
         asset_man = _load_manifest(repo, f'mods/{cu}/{unit}/assets.manifest.json', token)
         if not code_man and not asset_man:
-            log(f'⚠ нет манифестов для {cu}/{unit} — пропускаю')
+            log(f'⚠ пак {unit} ({camp_title(cu)}): на сервере нет списка файлов — пропускаю')
             continue
         umap = {}       # relpath -> (sha, kind)
         for kind, man in (('code', code_man), ('asset', asset_man)):
@@ -717,8 +857,9 @@ def reconstruct_multi(repo, units, mods_dir, token, log=print, tmp_dir=None,
         loaded.append((u, umap))
 
     if skipped_mods:
-        log(f'Убрано игроком из набора: {len(skipped_mods)} мод(ов) — не ставлю '
-            f'(уже лежащие на диске файлы не трогаю).')
+        log(f'Убрано вами из набора: {len(skipped_mods)} {plural_mods(len(skipped_mods))} '
+            f'— не ставлю (то, что уже стоит в игре, не трогаю).')
+        vlog('Не ставлю (вы убрали их из набора): ' + ', '.join(sorted(skipped_mods)))
     pins = {}
     for mk, allowed in (mod_sources or {}).items():
         here = provided.get(mk)
@@ -727,8 +868,8 @@ def reconstruct_multi(repo, units, mods_dir, token, log=print, tmp_dir=None,
         if here & set(allowed):
             pins[mk] = set(allowed)
         else:
-            log(f'⚠ {mk}: выбранная версия не входит в этот набор паков — '
-                f'ставлю как в сборке')
+            log(f'⚠ {mk}: выбранной вами версии в этом наборе нет — '
+                f'ставлю ту, что идёт в сборке')
 
     for u, umap in loaded:
         _check_cancel(should_cancel)
@@ -759,25 +900,29 @@ def reconstruct_multi(repo, units, mods_dir, token, log=print, tmp_dir=None,
                 overridden += 1                # этот юнит переопределяет предыдущий
             else:
                 added += 1
-            eff[key] = {'sha': sh, 'kind': kind, 'relpath': relpath}
+            eff[key] = {'sha': sh, 'kind': kind, 'relpath': relpath, 'camp': cu}
         conflicts += overridden
-        log(f'--- {unit} ({u.get("tier", "?")}) — +{added} файлов'
-            + (f', переопределяет {overridden}' if overridden else '')
-            + (f', пропущено {pinned_skipped} (версия выбрана в другом паке)'
+        log(f'--- Пак {unit} ({tier_title(u.get("tier"))}): файлов {added}'
+            + (f', ещё {overridden} заменяют файлы предыдущих паков' if overridden else '')
+            + (f', пропущено {pinned_skipped} (вы выбрали эти файлы из другого пака)'
                if pinned_skipped else '') + ' ---')
 
     if fork_indexes:                            # форки приоритетнее основного индекса;
         # высший приоритет первым: юниты шли низший→высший → развернуть, затем базовый.
         index = merge_chunk_indexes(list(reversed(fork_indexes)) + [index])
-        log('Наложение форков на лагерь включено.')
+        log('Поверх сборки лягут дополнительные исправления (из репозитория исправлений).')
 
     # 2) Одна сверка хешей на диске + сбор недостающего/изменённого.
-    log('Проверяю, что уже на диске (сверка хешей, без скачивания)…')
+    log('Смотрю, что уже стоит в игре (сверяю файлы, ничего не качаю)…')
 
     need = {}           # chunk -> {sha: [(relpath, kind), ...]}
+    per_mod = {}        # mod_key -> [сборка, файлов всего, файлов к скачиванию]
     for info in eff.values():
         _check_cancel(should_cancel)
         sh, kind, relpath = info['sha'], info['kind'], info['relpath']
+        # счёт по модам — единицы, понятные читателю лога (см. ModProgress)
+        row = per_mod.setdefault(mod_key(relpath), [info.get('camp'), 0, 0])
+        row[1] += 1
         # сверяем по фактическому пути победителя (relpath)
         wr, real_rel = install_route(relpath)
         tgt = (mods_dir if wr == 'mods' else mods_dir.parent) / real_rel
@@ -788,22 +933,34 @@ def reconstruct_multi(repo, units, mods_dir, token, log=print, tmp_dir=None,
         if not b:
             stats['missing'] += 1
             continue
+        row[2] += 1
         need.setdefault(b['chunk'], {}).setdefault(sh, []).append((relpath, kind))
 
     if stats['skipped']:
-        log(f'Уже на диске и совпадает: {stats["skipped"]} файлов — скачивать не нужно.')
+        log(f'Уже стоит и совпадает: {stats["skipped"]} файлов — их качать не нужно.')
     stats['chunks'] = list(need.keys())
     for shamap in need.values():
         for targets in shamap.values():
             for _relpath, kind in targets:
                 stats[f'{kind}_files'] += 1
-    scope = 'Набор' if prune_snap_id else 'Лагерь ' + (units[0]['camp'] if units else '?')
-    log(f'{scope}: {stats["code_files"]} код + {stats["asset_files"]} ассетов '
-        f'в {len(need)} частях'
-        + (f' (конфликтов путей разрешено по приоритету: {conflicts})' if conflicts else '')
-        + (f', НЕ найдено файлов: {stats["missing"]}' if stats['missing'] else ''))
+    dl = stats['code_files'] + stats['asset_files']
+    log(f'Нужно скачать файлов: {dl}'
+        + (f' (скрипты и настройки — {stats["code_files"]}, '
+           f'графика и звук — {stats["asset_files"]})' if dl else '')
+        + (f'; НЕ найдено на сервере: {stats["missing"]}' if stats['missing'] else ''))
+    if need:
+        vlog(f'На сервере эти файлы лежат в {len(need)} архивах-частях.')
+    if conflicts:
+        vlog(f'Один и тот же файл предлагали разные паки {conflicts} раз — оставил файл '
+             f'того пака, который в сборке идёт позже (он главнее).')
     if dry_run:
         return stats
+    prog = ModProgress(log, vlog)
+    prog.plan({mk: (camp, tot, nd) for mk, (camp, tot, nd) in per_mod.items()
+               if mk != BASE_MOD})
+    base_row = per_mod.get(BASE_MOD)
+    if base_row and base_row[2]:
+        log(f'Базовые файлы игры (движок): к скачиванию {base_row[2]} файлов.')
 
     def resolve(chunk, cpath, sc, bcb, pcb=None):
         meta = index['chunks'].get(chunk, {})
@@ -821,7 +978,9 @@ def reconstruct_multi(repo, units, mods_dir, token, log=print, tmp_dir=None,
 
     _parallel_fetch_extract(need, mods_dir, tmp, resolve, log,
                             should_cancel=should_cancel, part_cb=part_cb, byte_cb=byte_cb,
-                            sha_sink=sha_sink, chunk_cb=chunk_cb)
+                            sha_sink=sha_sink, chunk_cb=chunk_cb,
+                            written_cb=prog.file_written)
+    prog.finish()
     # прунинг сирот слитого набора (п.10): файлы прошлого снимка набора, которых нет в
     # новом eff, — только модовые и только если disk-sha == снимку (правки игрока целы).
     # Псевдо-дескриптор из eff переиспользует prune_orphans_by_snapshot/снимок набора.
@@ -840,7 +999,9 @@ def reconstruct_multi(repo, units, mods_dir, token, log=print, tmp_dir=None,
                     pseudo['files']['code'].setdefault(rp, {'sha256': sha})
         prune_orphans_by_snapshot(mods_dir, pseudo, snap_dir, log)
         save_snapshot_from_desc(mods_dir, pseudo, snap_dir)
-    log(f'Готово: {stats["code_files"]} код + {stats["asset_files"]} ассетов в {mods_dir}')
+    log(f'Готово: скачано файлов — {dl}.' if dl
+        else 'Готово: всё уже стояло как надо, качать ничего не пришлось.')
+    vlog(f'Папка модов: {mods_dir}')
     return stats
 
 
@@ -1104,7 +1265,7 @@ def pick_disk_variant(catalog, mod_id, mods_dir, repo=None, token=None, prefer_c
             raise
         except Exception as e:
             load_errors += 1
-            log(f'[warn] вариант {v["source"]}: не удалось загрузить дескриптор ({e})')
+            log(f'⚠ версия из пака {v["source"]}: не удалось загрузить описание ({e})')
             continue
         flat = desc_files_flat(desc)
         cover = match = 0
@@ -1806,9 +1967,10 @@ def load_chunk_index(desc=None, url=None, repo=None, token=None):
 def install_descriptor(desc, mods_dir, index, token=None, progress_cb=None,
                        log=print, tmp_dir=None, dry_run=False, snap_dir=None,
                        should_cancel=None, part_cb=None, byte_cb=None, sha_sink=None,
-                       chunk_cb=None):
+                       chunk_cb=None, vlog=None):
     """Установить мод из дескриптора: блобы (code+assets) резолвятся по sha через index
     -> чанки -> извлечение -> запись в mods_dir/install_relpath(relpath)."""
+    vlog = _vlogger(log, vlog)
     mods_dir = Path(mods_dir)
     tmp = Path(tmp_dir or mods_dir.parent)
     tmp.mkdir(parents=True, exist_ok=True)
@@ -1829,9 +1991,13 @@ def install_descriptor(desc, mods_dir, index, token=None, progress_cb=None,
         for targets in shamap.values():
             for _rel, kind in targets:
                 stats[('code_files' if kind == 'code' else 'asset_files')] += 1
-    log(f'{desc.get("id")}: {stats["code_files"]} код + {stats["asset_files"]} ассетов '
-        f'в {len(need)} частях'
-        + (f', НЕ найдено файлов: {stats["missing"]}' if stats['missing'] else ''))
+    dl = stats['code_files'] + stats['asset_files']
+    log(f'{desc.get("id")}: нужно скачать файлов — {dl}'
+        + (f' (скрипты и настройки — {stats["code_files"]}, '
+           f'графика и звук — {stats["asset_files"]})' if dl else '')
+        + (f'; НЕ найдено на сервере: {stats["missing"]}' if stats['missing'] else ''))
+    vlog(f'{desc.get("id")}: версия {desc.get("version")}'
+         + (f'; на сервере файлы лежат в {len(need)} архивах-частях.' if need else '.'))
     if dry_run:
         return stats
     def resolve(chunk, cpath, sc, bcb, pcb=None):
@@ -1847,21 +2013,24 @@ def install_descriptor(desc, mods_dir, index, token=None, progress_cb=None,
     prune_orphans_by_snapshot(mods_dir, desc, snap_dir, log)
     # снимок установки -> база для будущего 3-way merge при обновлении (Фаза 4)
     save_snapshot_from_desc(mods_dir, desc, snap_dir)
-    log(f'Готово: {desc.get("id")} -> {mods_dir}')
+    log(f'✔ Мод установлен: {desc.get("id")}')
     return stats
 
 
 def install_set(plan, mods_dir, index, token=None, log=print, tmp_dir=None, dry_run=False,
-                should_cancel=None, part_cb=None, byte_cb=None, sha_sink=None, chunk_cb=None):
+                should_cancel=None, part_cb=None, byte_cb=None, sha_sink=None, chunk_cb=None,
+                vlog=None):
     """Установить весь разрешённый набор (resolve_set -> план). Ставит все mods плана."""
     results = {}
-    for mid in plan['order']:
+    total = len(plan['order'])
+    for n, mid in enumerate(plan['order'], 1):
         _check_cancel(should_cancel)
+        log(f'[{n}/{total}] Ставлю мод: {mid}')
         results[mid] = install_descriptor(plan['mods'][mid], mods_dir, index,
                                           token=token, log=log, tmp_dir=tmp_dir,
                                           dry_run=dry_run, should_cancel=should_cancel,
                                           part_cb=part_cb, byte_cb=byte_cb, sha_sink=sha_sink,
-                                          chunk_cb=chunk_cb)
+                                          chunk_cb=chunk_cb, vlog=vlog)
     return results
 
 
@@ -2017,7 +2186,8 @@ def prune_orphans_by_snapshot(mods_dir, desc, snap_dir=None, log=print):
         except Exception:
             pass
     if removed:
-        log(f'  убрано устаревших файлов мода «{desc.get("id")}»: {removed}')
+        log(f'  убрано устаревших файлов мода «{desc.get("id")}»: {removed} '
+            f'(их нет в новой версии; ваши правки не трогаю)')
     return removed
 
 
@@ -2036,7 +2206,7 @@ def fetch_blobs(index, shas, token, tmp, log=print, progress_cb=None, should_can
     chunks = [c for c in need if index['chunks'].get(c, {}).get('url')]
     for c in need:                                # части без ссылки — пропустить с логом
         if c not in chunks:
-            log(f'[!] для части пропущено {len(need[c])} файлов (нет ссылки)')
+            log(f'⚠ пропущено {len(need[c])} файлов: их пока нет на сервере раздачи')
     if not chunks:
         return out
 
@@ -2064,7 +2234,7 @@ def fetch_blobs(index, shas, token, tmp, log=print, progress_cb=None, should_can
                     try:
                         out[sh] = z.read(sh)
                     except KeyError:
-                        log(f'[!] файл {sh[:12]} не найден в части')
+                        log(f'⚠ файл с отпечатком {sh[:12]}… не нашёлся в архиве-части — пропускаю')
             cpath.unlink(missing_ok=True)
             done += 1
             if part_cb:

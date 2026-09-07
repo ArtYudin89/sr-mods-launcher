@@ -99,7 +99,7 @@ IS_RWT = bool(EMBEDDED_TOKEN)
 # из репозитория ({version, url?, notes?}). url можно оставить пустым — тогда показ без
 # ссылки на скачивание (просто «доступна новая версия»).
 # ВНИМАНИЕ: при релизе выставить реальный следующий номер (текущий публичный > 0.13.1).
-LAUNCHER_VERSION = '0.26.1'
+LAUNCHER_VERSION = '0.27.0'
 RELEASE_REF = 'state/launcher_release.json'
 # Ссылка на полную справку в репозитории (ИНСТРУКЦИЯ-ПРОСТАЯ.md, имя в percent-encoding —
 # кириллица в пути; так браузер откроет её без ручного кодирования).
@@ -182,13 +182,10 @@ def _plF(n):
 ALL_CAMP = '★ вся сборка'
 ALL_PACK = '★ весь пак'
 CAMP_KEYS = ('universe', 'redux', 'original')     # известные сборки (порядок = дефолтный)
-CAMP_TITLES = {'redux': 'ПБ «Свободная Бухта»',   # человеческие имена сборок (как в UI)
-               'universe': 'Space Rangers Universe (Community)',
-               'original': 'Original'}
-
-
-def camp_title(camp):
-    return CAMP_TITLES.get(camp, camp or 'сборка')
+# Человеческие имена сборок (как в UI). Живут в core: их пишет и движок, когда
+# рассказывает в журнале, сколько модов какой сборки уже установлено.
+CAMP_TITLES = core.CAMP_TITLES
+camp_title = core.camp_title
 
 
 # Части сборки. Раньше был один пункт «вся сборка», который склеивал две разные
@@ -205,7 +202,7 @@ PART_TITLES = {PART_BASE: 'Базовые файлы игры (движок + ф
 # '_base') — Rangers.exe, DATA/, CFG/, matrix/, *.dll. Эти файлы приезжают только с
 # base-паком/сборкой целиком; набранные поштучно моды их НЕ несут. В UI показываем
 # человеческим именем, а не служебным ключом.
-BASE_MOD = '_base'
+BASE_MOD = core.BASE_MOD
 BASE_MOD_SHORT = 'Базовые файлы игры'             # короткий ярлык (строка дерева)
 BASE_MOD_LABEL = 'Базовые файлы игры (Rangers.exe, DATA, CFG)'
 BASE_MOD_DESC = ('Движок и общие файлы этой сборки — всё, что лежит вне папки Mods. '
@@ -376,7 +373,7 @@ class Api:
                 self._cat_by_repo[repo] = core.load_catalog(
                     'descriptors/catalog.json', repo, token) or {}
             except Exception as e:
-                self.log(f'⚠ форк {repo}: каталог не загружен ({e})')
+                self.log(f'⚠ репозиторий исправлений {repo}: каталог не загрузился ({e})')
                 self._cat_by_repo[repo] = {}
         return self._cat_by_repo[repo]
 
@@ -408,7 +405,7 @@ class Api:
             try:
                 d = core.descriptor_for(sel, cat, repo, tok)
             except Exception as e:
-                self.log(f'⚠ {repo}: дескриптор {mod_id} не загружен ({e})')
+                self.log(f'⚠ {repo}: описание мода {mod_id} не загрузилось ({e})')
                 d = None
             if not d:
                 continue
@@ -416,7 +413,7 @@ class Api:
             try:
                 indexes.append(self._index_for(repo, tok, desc=d))
             except Exception as e:
-                self.log(f'⚠ {repo}: индекс частей не загружен ({e})')
+                self.log(f'⚠ {repo}: список файлов на сервере раздачи не загрузился ({e})')
         if not descs:
             return None, None
         return core.merge_descriptors(descs), core.merge_chunk_indexes(indexes)
@@ -471,7 +468,8 @@ class Api:
             try:
                 d = core.descriptor_for({'id': fkey}, cat, repo, tok)
             except Exception as e:
-                self.log(f'⚠ форк {repo}: дескриптор {fkey} не загружен ({e})'); d = None
+                self.log(f'⚠ репозиторий исправлений {repo}: описание мода {fkey} '
+                         f'не загрузилось ({e})'); d = None
             if not d:
                 continue
             fork_descs.append(d); fork_repos.append(repo)
@@ -482,7 +480,8 @@ class Api:
             try:
                 fork_indexes.append(self._index_for(repo, tok, desc=d))
             except Exception as e:
-                self.log(f'⚠ форк {repo}: индекс частей не загружен ({e})')
+                self.log(f'⚠ репозиторий исправлений {repo}: список файлов на сервере '
+                         f'раздачи не загрузился ({e})')
         if not fork_descs:
             return desc, main_index
         # НАЛОЖЕНИЕ ПО install-rel, а НЕ по RAW-пути дескриптора. Форк и основной дескриптор
@@ -563,7 +562,8 @@ class Api:
             try:
                 indexes.append(self._index_for(repo, tok))
             except Exception as e:
-                self.log(f'⚠ форк {repo}: индекс частей не загружен ({e})')
+                self.log(f'⚠ репозиторий исправлений {repo}: список файлов на сервере '
+                         f'раздачи не загрузился ({e})')
         if not merged:
             return None, None
         return merged, core.merge_chunk_indexes(indexes)
@@ -728,8 +728,9 @@ class Api:
         try:
             mods_dir = self._mods_dir()
             cat = self._catalog_for(self._repo(), self._token())
-            self.log('Проверяю установленные моды…')
-            self.vlog('Хеширую файлы на диске (инкрементально)…')
+            self.log('Смотрю, какие моды стоят в игре…')
+            self.vlog('Считаю отпечатки файлов в папке модов — по ним видно, что '
+                      'изменилось. Заново считаю только новые и тронутые файлы.')
             idx = core.index_disk_mods(mods_dir, cat, prev_index=self._disk_index,
                                        log=self.log, progress_cb=self._progress,
                                        should_cancel=self.should_cancel)
@@ -755,9 +756,11 @@ class Api:
             # ПЕРВОЙ сборке списка, где он есть, и только один раз (дедуп за один проход).
             order = self._update_order()
             if not order:
-                self.log('Не удалось определить основной набор модов — сравнивать не с чем.')
+                self.log('Не удалось понять, из какой сборки моды, — сравнивать не с чем.')
                 self._finish_check(); return
-            self.vlog(f'Порядок проверки обновлений: {" → ".join(order)}')
+            self.vlog('Сборки смотрю в таком порядке: '
+                      + ' → '.join(camp_title(c) for c in order)
+                      + '. Мод сверяю с первой сборкой списка, где он есть.')
             # источники по логическому id + его Pol/Shu-сиблингам (id@<Name>): дисковая
             # папка ShusRangers/X может нести genuine X ИЛИ X@PolX (redux_base кладёт
             # Pol-контент под тем же путём) — кандидаты ОБЯЗАНЫ включать сиблингов, иначе
@@ -774,7 +777,8 @@ class Api:
                 cidx = core.load_chunk_index(repo=self._repo(), token=self._token())
                 avail |= set(cidx.get('blobs', {}))
             except Exception as e:
-                self.vlog(f'⚠ индекс частей не загружен ({e})')
+                self.vlog(f'⚠ не удалось получить список файлов, лежащих на сервере '
+                          f'раздачи ({e}) — часть обновлений могу не увидеть')
             # блобы форк-хотфиксов: файл с таким целевым sha — намеренный фикс, а не
             # дрейф перепаковки → авторитетен даже без снимка (пробивает косметику Lang.dat)
             fork_blobs = set()
@@ -784,6 +788,7 @@ class Api:
             ups = {}
             frozen_n = 0
             unavail = 0
+            mid_camp = {}                        # мод с диска -> сборка (для сводки в журнале)
             umap = dict(unit_maps)                  # source -> {rel:sha}, для слияния стека
             # фикс-дети по источнику-родителю: 'camp/parent' -> {'camp/fix', …}. Агрегатор
             # сворачивает файлы фикс-юнита (fix_parent) в дескриптор родителя
@@ -799,6 +804,8 @@ class Api:
                     raise core.OperationCancelled()
                 if self._is_frozen(mid):       # 🔒 «не обновлять» — даже не сверяем
                     frozen_n += 1
+                    # в сводке «сколько модов сборки стоит» он всё равно должен быть
+                    mid_camp[mid] = self._camp_of_disk_mod(mid, cat, src_by_base, order)
                     continue
                 disk = {rel: f['sha'] for rel, f in (m.get('files') or {}).items()}
                 allowed = src_by_base.get(mid)
@@ -822,6 +829,7 @@ class Api:
                     tcamp = self._target_camp(order, allowed)
                     if not tcamp:
                         continue                   # мод не входит ни в одну сборку списка
+                mid_camp[mid] = tcamp
                 # целевой набор = слитый стек сборки tcamp (base+fixes), как на пути
                 # обновления (_full_variant_descriptor) — иначе детект целится в до-фикс
                 # версию из base-installer и вечно видит ложное «⬆ обновление».
@@ -854,26 +862,79 @@ class Api:
                 if n:
                     ups[mid] = {'n': n, 'camp': tcamp}
             self._updates = ups
+            self._log_camp_census(idx, cat, mid_camp)
             if frozen_n:
-                self.log(f'Пропущено модов «не обновлять» (🔒): {frozen_n}.')
+                self.log(f'Не проверял {frozen_n} {core.plural_mods(frozen_n)} '
+                         f'с пометкой 🔒 «не обновлять».')
             if unavail:
-                self.vlog(f'(на сервере пока нет {unavail} файлов — они не учитываются)')
+                self.vlog(f'На сервере раздачи пока нет {unavail} файлов — скачать их '
+                          f'нельзя, поэтому в обновления они не идут.')
             for pm in self.profile.get('mods', []):
                 if pm.get('type') == 'desc':
                     pm['update_available'] = bool(pm.get('id') in ups)
             if ups:
-                self.log(f'Проверка завершена. Обновления доступны для модов: {len(ups)}.')
-                self.vlog('С обновлением: ' + ', '.join(sorted(ups)))
+                self.log(f'Проверка закончена: обновить можно {len(ups)} '
+                         f'{core.plural_mods(len(ups))}.')
+                # по сборкам: «сколько из установленных модов этой сборки ждут обновления»
+                inst_by_camp = {}
+                for mid, c in mid_camp.items():
+                    if c:
+                        inst_by_camp[c] = inst_by_camp.get(c, 0) + 1
+                up_by_camp = {}
+                for mid, u in ups.items():
+                    c = u.get('camp')
+                    up_by_camp.setdefault(c, []).append(mid)
+                for c in sorted(up_by_camp):
+                    lst = sorted(up_by_camp[c])
+                    self.log(f'{camp_title(c)}: {len(lst)}/{inst_by_camp.get(c, len(lst))} '
+                             f'установленных модов ждут обновления')
+                    self.vlog(f'{camp_title(c)} — обновить: ' + ', '.join(lst))
             else:
-                self.log('Проверка завершена. Все моды актуальны — обновлять нечего.')
+                self.log('Проверка закончена: все моды свежие, обновлять нечего.')
             self._emit('tree_dirty')
         except core.OperationCancelled:
             self.log('Проверка обновлений отменена.')
         except Exception as e:
             self.log('Не удалось проверить обновления. Проверьте подключение к интернету '
                      'и попробуйте ещё раз.')
-            self.vlog(f'Техническая ошибка проверки обновлений: {e}')
+            self.vlog(f'Что именно сломалось (это строка для разработчика): {e}')
         self._finish_check()
+
+    def _camp_of_disk_mod(self, mid, cat, src_by_base, order):
+        """Какой сборке принадлежит мод, лежащий в игре. ТОЛЬКО для сводки в журнале
+        (для 🔒-модов, которые проверка обновлений пропускает) — на детект не влияет."""
+        allowed = src_by_base.get(mid)
+        if not allowed:                            # фолбэк по короткому имени
+            leaf = mid.split('/')[-1]
+            cands = [k for k in cat if k.split('/')[-1] == leaf]
+            if len(cands) == 1:
+                allowed = src_by_base.get(cands[0].split('@', 1)[0])
+        return self._target_camp(order, allowed) if allowed else None
+
+    def _log_camp_census(self, idx, cat, mid_camp):
+        """«Сколько модов какой сборки стоит в игре» — строка, ради которой авторы
+        модов вообще открывают журнал: сразу видно, что у игрока за набор.
+        Знаменатель — сколько модов эта сборка раздаёт всего."""
+        total = {}                                 # сборка -> {базовые id модов сборки}
+        for k, e in cat.items():
+            bid = k.split('@', 1)[0]
+            for v in e.get('variants', []):
+                c = (v.get('source') or '').split('/')[0]
+                if c:
+                    total.setdefault(c, set()).add(bid)
+        by_camp = {}
+        for mid in idx.get('mods', {}):
+            by_camp.setdefault(mid_camp.get(mid), []).append(mid)
+        for c in sorted(k for k in by_camp if k):
+            mods = sorted(by_camp[c])
+            self.log(f'{camp_title(c)}: {len(mods)}/{len(total.get(c, ()))} '
+                     f'модов установлено')
+            self.vlog(f'{camp_title(c)} — установлены: ' + ', '.join(mods))
+        other = by_camp.get(None) or []
+        if other:
+            self.log(f'Не опознано: {len(other)} {core.plural_mods(len(other))} '
+                     f'— их нет в каталоге сборок (поставлены вручную или сняты с раздачи).')
+            self.vlog('Не опознаны: ' + ', '.join(sorted(other)))
 
     def _finish_check(self):
         self.busy = False
@@ -973,7 +1034,7 @@ class Api:
         try:
             mods_dir = self._mods_dir()
             cat = self._catalog_for(self._repo(), self._token())
-            self.log('Определяю базу по файлам в Mods (sha base-паков)…')
+            self.log('Определяю, какая сборка стоит в игре, — по её файлам…')
             idx = core.index_disk_mods(mods_dir, cat, prev_index=self._disk_index,
                                        log=self.log, progress_cb=self._progress,
                                        should_cancel=self.should_cancel)
@@ -987,14 +1048,14 @@ class Api:
             if camp:
                 self.profile['base'] = camp
                 self._save_profile()
-                self.log(f'✅ База определена: {camp}')
+                self.log(f'✅ Сборка определена: {camp_title(camp)}')
             else:
-                self.log('Не удалось определить базу — на диске нет узнаваемого base-пака.')
+                self.log('Не понял, какая сборка стоит: знакомых файлов сборки в игре нет.')
             self._emit('tree_dirty')
         except core.OperationCancelled:
-            self.log('Определение базы отменено.')
+            self.log('Определение сборки отменено.')
         except Exception as e:
-            self.log(f'ОШИБКА определения базы: {e}')
+            self.log(f'ОШИБКА определения сборки: {e}')
         self.busy = False
         self._emit('op_end', {'status': 'Готово'})
 
@@ -1198,7 +1259,7 @@ class Api:
             tag = ver if ver.startswith('v') else 'v' + ver
             repo = self._launcher_repo(info)
             want = 'SRModsLauncher-RWT.exe' if IS_RWT else 'SRModsLauncher.exe'
-            self.log(f'Загружаю сведения о релизе {tag} ({repo}) …')
+            self.log(f'Смотрю, что за новая версия лаунчера ({tag}) …')
             rel = core.release_by_tag(repo, tag, self._token())
             assets = rel.get('assets', [])
             asset = next((a for a in assets if a['name'].lower() == want.lower()), None) \
@@ -1950,8 +2011,9 @@ class Api:
             self.log(f'Версии модов переведены на сборку «{camp_title(camp)}»: {len(changed)}.')
             self._emit('tree_dirty')
         if skipped['variant']:
-            self.log(f'Не тронуто модов, у которых версия этой сборки — под другим '
-                     f'вариантом (Pol/Shu): {skipped["variant"]}. Такой выбор только вручную.')
+            self.log(f'Не тронул {skipped["variant"]} '
+                     f'{core.plural_mods(skipped["variant"])}: у них версия этой сборки '
+                     f'идёт под другим именем (Pol/Shu) — такое переключаете только вы сами.')
         return {'ok': True, 'count': len(changed), 'redownload': redownload,
                 'skipped': skipped}
 
@@ -2854,7 +2916,8 @@ class Api:
         self.profile['enabled'] = mods
         self._save_profile()
         self.log(f'Считано из игры: сейчас подключено модов — {len(mods)}.')
-        self.vlog(f'ModCFG прочитан: {len(mods)} записей.')
+        self.vlog(f'Прочитан файл игры ModCFG.txt (в нём игра хранит список '
+                  f'подключённых модов): записей — {len(mods)}.')
         return {'ok': True, 'count': len(mods)}
 
     def profile_to_modcfg(self):
@@ -2876,8 +2939,8 @@ class Api:
             return {'ok': False, 'error': str(e)}
         self.log(f'Записано в игру: подключено модов — {len(en)}.'
                  + (f' Из них не найдено на диске: {len(missing)}.' if missing else ''))
-        self.vlog('ModCFG записан.'
-                  + (f' Отсутствуют на диске: {", ".join(missing)}' if missing else ''))
+        self.vlog('Записан файл игры ModCFG.txt (список подключённых модов).'
+                  + (f' Нет в папке модов: {", ".join(missing)}' if missing else ''))
         return {'ok': True, 'count': len(en), 'missing': missing}
 
     def disable_all_mods(self):
@@ -3221,7 +3284,7 @@ class Api:
     def _install_worker(self, indices):
         tok = self._token()
         mods_dir = self._mods_dir()
-        self.vlog(f'Папка установки: {mods_dir}')
+        self.vlog(f'Ставлю в папку: {mods_dir}')
         self._dl_bytes = 0
         done = []
         try:
@@ -3241,7 +3304,7 @@ class Api:
                     raise
                 except Exception as e:
                     self.log(f'ОШИБКА {m.get("name", "?")}: {e}')
-            self.log('Готово')
+            self.log(f'Установка закончена. Обработано пунктов набора: {len(done)}.')
             self._finish_install(done, 'Готово')
         except core.OperationCancelled:
             self.log('Установка отменена.')
@@ -3308,7 +3371,7 @@ class Api:
         units = [{k: v for k, v in d.items() if not k.startswith('_')} for d in order]
         self._pack_ctx = 'объединённые паки'
         core.reconstruct_multi(
-            repo, units, mods_dir, tok, log=self.log, tmp_dir=ROOT,
+            repo, units, mods_dir, tok, log=self.log, vlog=self.vlog, tmp_dir=ROOT,
             should_cancel=self.should_cancel, part_cb=self._part_progress,
             byte_cb=self._byte_progress, prune_snap_id='__bulk_merge__',
             chunk_cb=self._chunk_progress, mod_sources=self._pinned_sources(packs),
@@ -3323,7 +3386,8 @@ class Api:
                            key=lambda p: (self._unit_install_rank(p, packs),
                                           p.get('load_order', 999)))
             if not units:
-                self.log(f'В сборке {m["camp"]} нет паков для этой части — пропускаю.')
+                self.log(f'В сборке {camp_title(m["camp"])} для этой части ничего нет '
+                         f'— пропускаю.')
                 return
             # Единый идемпотентный проход по всему сборке: манифесты юнитов сливаются в
             # ОДИН эффективный набор с приоритетом (порядок = низший→высший, кто позже —
@@ -3340,7 +3404,7 @@ class Api:
             self._pack_ctx = f'сборка {m["camp"]}'
             core.reconstruct_camp(
                 m['repo'], m['camp'], ulist, mods_dir, tok,
-                log=self.log, tmp_dir=ROOT, should_cancel=self.should_cancel,
+                log=self.log, vlog=self.vlog, tmp_dir=ROOT, should_cancel=self.should_cancel,
                 part_cb=self._part_progress, byte_cb=self._byte_progress,
                 chunk_cb=self._chunk_progress,
                 mod_sources=self._pinned_sources(packs),
@@ -3353,7 +3417,7 @@ class Api:
                 self._progress, self.log, tmp_dir=ROOT, mod=m.get('mod') or None,
                 should_cancel=self.should_cancel,
                 part_cb=self._part_progress, byte_cb=self._byte_progress,
-                chunk_cb=self._chunk_progress,
+                chunk_cb=self._chunk_progress, vlog=self.vlog,
                 skip_present=True,             # «починка»: сверка хешей, качаем только отличия
                 fork_files=ff, fork_index=fidx)
         elif m.get('type') == 'desc':
@@ -3365,14 +3429,14 @@ class Api:
                 desc, idx = self._overlay(m['id'], m.get('source'))
             if desc:
                 if desc.get('overlaid'):
-                    self.log('  (с наложением форков)')
+                    self.log('  (с дополнительными исправлениями от лаунчера)')
                 core.install_descriptor(
                     desc, mods_dir, idx, tok, self._progress, self.log,
                     tmp_dir=ROOT, should_cancel=self.should_cancel,
                     part_cb=self._part_progress, byte_cb=self._byte_progress,
-                    chunk_cb=self._chunk_progress)
+                    chunk_cb=self._chunk_progress, vlog=self.vlog)
             else:
-                self.log('  дескриптор не найден в каталоге')
+                self.log('  этого мода нет в каталоге — ставить нечего')
         else:
             core.install_zip(m['url'], mods_dir, tok, self._progress, self.log,
                              tmp_dir=ROOT, should_cancel=self.should_cancel)
@@ -3414,20 +3478,23 @@ class Api:
                 bulk.append(m)                    # сборка / весь пак / zip
         plan = None
         if sels:
-            self.log('Разрешаю зависимости модов…')
+            self.log('Проверяю, каких ещё модов не хватает для работы выбранных…')
             try:
                 cat = core.load_catalog('descriptors/catalog.json', repo, tok)
                 plan = core.resolve_set(sels, cat, repo, tok)
             except core.OperationCancelled:
                 self.log('Отменено.'); self._finish_set('Отменено'); return
             except Exception as e:
-                self.log(f'ОШИБКА резолва зависимостей: {e}'); self._finish_set('Ошибка'); return
+                self.log(f'ОШИБКА: не удалось составить список нужных модов ({e})')
+                self._finish_set('Ошибка'); return
             if plan['added_deps']:
-                self.log('➕ зависимости (Dependence): ' + ', '.join(plan['added_deps']))
+                self.log('➕ доставлю моды, без которых выбранные не заработают: '
+                         + ', '.join(plan['added_deps']))
             if plan['missing_deps']:
-                self.log('⚠ зависимости не в каталоге: ' + ', '.join(plan['missing_deps']))
+                self.log('⚠ этих нужных модов в каталоге нет, поставить их лаунчер не может: '
+                         + ', '.join(plan['missing_deps']))
             for a, b in plan['conflicts']:
-                self.log(f'⚠ КОНФЛИКТ: {a} ⟷ {b}')
+                self.log(f'⚠ КОНФЛИКТ: моды «{a}» и «{b}» вместе не работают')
         self._pending_set = {'plan': plan, 'bulk': bulk, 'repo': repo, 'tok': tok}
         order = (plan or {}).get('order', [])
         # bulk-записи (целые сборки/паки/архивы) — считать в них моды поштучно не выходит
@@ -3461,7 +3528,7 @@ class Api:
     def _install_set_worker(self, ps):
         repo, tok = ps['repo'], ps['tok']
         mods_dir = self._mods_dir()
-        self.vlog(f'Папка установки: {mods_dir}')
+        self.vlog(f'Ставлю в папку: {mods_dir}')
         self._dl_bytes = 0
         plan, bulk = ps['plan'], ps['bulk']
         done = []
@@ -3490,7 +3557,7 @@ class Api:
                 except core.OperationCancelled:
                     raise
                 except Exception as e:
-                    self.log(f'ОШИБКА объединённой установки паков: {e}')
+                    self.log(f'ОШИБКА: не удалось поставить несколько паков разом ({e})')
                 bulk = [m for m in bulk if m not in man_bulk]
             for m in bulk:                        # zip / одиночная запись — обычной логикой
                 if self.should_cancel():
@@ -3517,6 +3584,7 @@ class Api:
                     index = core.load_chunk_index(url=idx_url, repo=repo, token=tok)
                 self._pack_ctx = 'набор модов'
                 core.install_set(plan, mods_dir, index, token=tok, log=self.log,
+                                 vlog=self.vlog,
                                  tmp_dir=ROOT, should_cancel=self.should_cancel,
                                  part_cb=self._part_progress, byte_cb=self._byte_progress)
                 now = datetime.now().isoformat()
@@ -3527,8 +3595,9 @@ class Api:
                         m['last_downloaded'] = now
                         m['update_available'] = False
                         done.append(m)
-                self.log(f'Набор установлен: {len(plan["order"])} мод(ов) (с зависимостями).')
-            self.log('Готово')
+                self.log(f'Моды набора установлены: {len(plan["order"])} '
+                         f'{core.plural_mods(len(plan["order"]))} (вместе с нужными им).')
+            self.log('Установка закончена.')
             self._finish_set('Готово', done)
         except core.OperationCancelled:
             self.log('Установка отменена.')
@@ -3735,7 +3804,7 @@ class Api:
         if dropped:
             self.profile['mods'] = kept
             nm = BASE_MOD_LABEL if base == BASE_MOD else base.split('/')[-1]
-            self.log(f'Заменён вариант мода «{nm}» в наборе.')
+            self.log(f'Версия мода «{nm}» в наборе заменена.')
 
     # ───────── обновление с сохранением правок (Фаза 4) ─────────
     def _desc_sel(self, m):
@@ -3779,12 +3848,17 @@ class Api:
         self._merge_remember = {}          # запомненные решения конфликтов (status -> code)
         self._merge_remember_on = False    # «больше не спрашивать» до конца серии
         self._silent_updates = []          # тихо применённые моды (для итогового тоста)
+        self._merge_total = len(targets)   # для итоговой строки журнала
+        self._merge_applied = {}           # сборка -> [обновлённые моды]
         self._begin_op()
         self._emit('op_begin', {'name': 'Обновление'})
+        self.log(f'Обновляю моды: выбрано {len(targets)} '
+                 f'{core.plural_mods(len(targets))}.')
         if skipped:
-            self.log(f'Пропущено {skipped} (паки/сборки — через «Установить»).')
+            self.log(f'Пропускаю {skipped}: это паки и сборки целиком — они ставятся '
+                     f'кнопкой «Установить».')
         if frozen:
-            self.log(f'Пропущено {frozen} с пометкой 🔒 «не обновлять».')
+            self.log(f'Пропускаю {frozen} с пометкой 🔒 «не обновлять».')
         threading.Thread(target=self._merge_next, daemon=True).start()
         return {'ok': True}
 
@@ -3792,6 +3866,7 @@ class Api:
         if self.should_cancel():
             self._merge_queue = []
         if not getattr(self, '_merge_queue', None):
+            self._log_merge_summary()      # итог в журнале: сколько модов какой сборки
             self._emit_silent_summary()    # тост-итог по тихо применённым модам
             self.busy = False
             self._emit('op_end', {'status': 'Готово'})
@@ -3809,7 +3884,8 @@ class Api:
                           ('add', 'update', 'automerge', 'deleted_clean'))
                       + s.get('conflicts', 0))
         if actionable == 0:
-            self.log(f'{plan.get("id")}: обновлять нечего (всё актуально / только ваши правки).')
+            self.log(f'{plan.get("id")}: обновлять нечего — в игре уже свежая версия '
+                     f'(отличия только в ваших правках).')
             # согласованность с детектом: раз обновлять нечего — снять бейдж «обновление»
             upd_mid = target[1] if target[0] == 'disk' else (desc.get('id') if desc else None)
             if upd_mid:
@@ -3823,7 +3899,8 @@ class Api:
         # диалога, чтобы не спрашивать по каждому моду.
         auto = self._remembered_decisions(plan)
         if auto is not None:
-            self.log(f'{plan.get("id")}: применяю запомненные решения конфликтов.')
+            self.log(f'{plan.get("id")}: спорные файлы решаю так же, как вы решили раньше '
+                     f'в этом обновлении.')
             pm = self._pending_merge
             self._pending_merge = None
             threading.Thread(target=self._apply_merge_worker, args=(pm, auto),
@@ -3839,11 +3916,30 @@ class Api:
                                          'version_new': plan.get('version_new')})
             pm = self._pending_merge
             self._pending_merge = None
-            self.log(f'{plan.get("id")}: обновление применяется автоматически (нет конфликтов).')
+            self.log(f'{plan.get("id")}: спорных файлов нет — обновляю сразу, '
+                     f'ничего не спрашивая.')
             threading.Thread(target=self._apply_merge_worker, args=(pm, {}),
                              daemon=True).start()
             return
         self._emit('merge_plan', self._serialize_plan(plan))
+
+    def _log_merge_summary(self):
+        """Итог серии обновлений в журнале — по сборкам, с именами модов в подробном.
+        Строка «сколько из скольких» нужна и игроку, и автору мода, которому этот
+        журнал перешлют: сразу видно, дошло ли обновление до всех выбранных модов."""
+        applied = getattr(self, '_merge_applied', None)
+        total = getattr(self, '_merge_total', 0)
+        if not total:
+            return
+        self._merge_total = 0                      # итог печатаем один раз на серию
+        n = sum(len(v) for v in (applied or {}).values())
+        self.log(f'Обновление закончено: обновлено {n} из {total} '
+                 f'{core.plural_mods(total)}.')
+        for camp in sorted(applied or {}, key=lambda c: c or ''):
+            mods = sorted(applied[camp])
+            self.log(f'{camp_title(camp)}: обновлено {len(mods)} '
+                     f'{core.plural_mods(len(mods))}')
+            self.vlog(f'{camp_title(camp)} — обновлены: ' + ', '.join(mods))
 
     def _emit_silent_summary(self):
         """Тост-итог по модам, применённым в тихом режиме (в конце очереди)."""
@@ -3917,11 +4013,12 @@ class Api:
             cat = core.load_catalog(m.get('catalog', 'descriptors/catalog.json'), repo, tok)
         desc = core.descriptor_for(self._desc_sel(m), cat, repo, tok)
         if not desc:
-            self.log('Не удалось получить дескриптор мода (нет в каталоге?).')
+            self.log('Не удалось получить описание мода — похоже, его нет в каталоге.')
             return None
         snap = core.load_install_snapshot(mods_dir, desc.get('id'))
         if snap is None:
-            self.log('Нет снимка прошлой установки — сначала установите мод лаунчером один раз.')
+            self.log('Лаунчер этот мод не ставил, поэтому не знает, что в нём ваше, а что '
+                     'авторское. Установите его лаунчером один раз — дальше будет обновляться.')
             return None
         desc, index = self._overlay_theirs(desc, desc.get('source'), allow=not m.get('url'))
         plan = core.plan_update_merge(desc, mods_dir, index, token=tok, log=self.log,
@@ -3932,13 +4029,14 @@ class Api:
 
     def _plan_merge_profile(self, i):
         m = self.profile['mods'][i]
-        self.log(f'=== Обновление: {m.get("name", m.get("id", "?"))} ===')
+        self.log(f'=== Обновляю мод: {m.get("name", m.get("id", "?"))} ===')
         try:
             res = self._resolve_profile_update(i)
         except core.OperationCancelled:
-            self.log('Планирование отменено.'); self._merge_next(); return
+            self.log('Подготовка обновления отменена.'); self._merge_next(); return
         except Exception as e:
-            self.log(f'ОШИБКА планирования: {e}'); self._merge_next(); return
+            self.log(f'ОШИБКА при подготовке обновления: {e}')
+            self._merge_next(); return
         if res is None:
             self._merge_next(); return
         desc, plan, index = res
@@ -4018,13 +4116,17 @@ class Api:
                 base_k, src = self._variant_ref(choice)   # реальный ключ или '<base>#<source>'
                 if src and base_k in cat:
                     nm = self._variant_sub(choice).get('name') or base_k.split('/')[-1]
-                    self.log(f'Выбранный вариант: {nm} ({src}).')
+                    self.log(f'Беру выбранную вами версию «{nm}» — из сборки '
+                             f'{camp_title(src.split("/")[0])}, пак {src.split("/")[-1]}.')
+                    self.vlog(f'Файлы беру из пака {src}; в каталоге эта версия '
+                              f'записана как {base_k}.')
                     d = self._full_variant_descriptor(base_k, cat, repo, tok, source=src)
                     if d:
                         d = dict(d); d['id'] = base_k
                         desc, info = d, {'source': src}
                     else:
-                        self.log('Дескриптор выбранного варианта не найден — подбираю по диску.')
+                        self.log('Описания выбранной версии на сервере нет — '
+                                 'подбираю по файлам, которые уже стоят в игре.')
             if not desc and tcamp:
                 # целевая сборка известен из порядка проверки — берём его вариант (полный
                 # набор base+fixes сборки), а не подбор по лучшему совпадению среди всех
@@ -4038,9 +4140,12 @@ class Api:
                     if d and d.get('files'):
                         d = dict(d); d['id'] = key
                         desc, info = d, {'source': src}
-                        self.log(f'Целевая сборка по порядку проверки: {tcamp} ({src}).')
+                        self.log(f'Обновляю до версии из сборки {camp_title(tcamp)} '
+                                 f'(пак {str(src).split("/")[-1]}).')
+                        self.vlog(f'Сборку выбрал не я, а порядок проверки: {camp_title(tcamp)}. '
+                                  f'Файлы беру из пака {src}.')
             if not desc:
-                self.log('Подбираю вариант мода по файлам на диске…')
+                self.log('Смотрю, какая это версия мода, по файлам в игре…')
                 desc, info = core.pick_disk_variant(cat, mid, mods_dir, repo, tok,
                                                     prefer_camp=prefer, log=self.log,
                                                     should_cancel=self.should_cancel)
@@ -4052,14 +4157,19 @@ class Api:
                     if full and full.get('files'):
                         full = dict(full); full['id'] = desc.get('id')
                         desc = full
+                    src = str(info['source'])
                     note = ''
-                    if prefer and not str(info["source"]).startswith(prefer + '/'):
-                        note = (f' — выбран по совпадению файлов на диске, не по базе ({prefer}); '
-                                f'это нормально: один мод может совпадать с версией из другого источника')
-                    self.log(f'Вариант: {info["source"]} (совпало {info["match"]}/{info["cover"]} '
-                             f'из {info["total"]}){note}')
+                    if prefer and not src.startswith(prefer + '/'):
+                        note = (f' Версия не из вашей сборки ({camp_title(prefer)}), и это '
+                                f'нормально: один и тот же мод раздаётся в нескольких сборках.')
+                    self.log(f'Похоже на версию из сборки {camp_title(src.split("/")[0])} '
+                             f'(пак {src.split("/")[-1]}): совпало файлов '
+                             f'{info["match"]} из {info["cover"]}.{note}')
+                    self.vlog(f'Как подбирал: у пака {src} совпало {info["match"]} файлов '
+                              f'из {info["cover"]} проверенных (всего в моде '
+                              f'{info["total"]}). Побеждает пак с наибольшим совпадением.')
             if not desc:
-                self.log(f'Мод {mid} не найден в каталоге — обновить нечем.')
+                self.log(f'Мода {mid} нет в каталоге — обновлять его лаунчеру нечем.')
                 return None
             snap = core.load_install_snapshot(mods_dir, mid)
             # Наложение форков — по КАТАЛОЖНОМУ ключу варианта (desc['id'], напр.
@@ -4079,13 +4189,14 @@ class Api:
         return desc, plan, index
 
     def _plan_merge_disk(self, mid):
-        self.log(f'=== Обновление дискового мода: {mid} ===')
+        self.log(f'=== Обновляю мод: {mid} ===')
         try:
             res = self._resolve_disk_update(mid)
         except core.OperationCancelled:
-            self.log('Планирование отменено.'); self._merge_next(); return
+            self.log('Подготовка обновления отменена.'); self._merge_next(); return
         except Exception as e:
-            self.log(f'ОШИБКА планирования: {e}'); self._merge_next(); return
+            self.log(f'ОШИБКА при подготовке обновления: {e}')
+            self._merge_next(); return
         if res is None:
             self._merge_next(); return
         desc, plan, index = res
@@ -4296,6 +4407,26 @@ class Api:
         self._merge_next()
         return {'ok': True}
 
+    @staticmethod
+    def _stats_phrase(stats, full=False):
+        """Итог применения обновления словами. Раньше в журнал уходил сырой словарь
+        ({'written': 1, 'merged': 0, 'kept': 17, …}) — автору мода, которому игрок
+        пересылает журнал, он ничего не говорит.
+        full=True — для подробного лога: перечисляются все виды действий, включая
+        нулевые (видно, что лаунчер их проверял, а не забыл)."""
+        if not isinstance(stats, dict):
+            return str(stats)                  # неожиданный формат — лучше как есть
+        rows = [('written', 'обновлено файлов'),
+                ('merged', 'ваши правки вписаны в новую версию'),
+                ('kept', 'оставлено как у вас'),
+                ('deleted', 'удалено лишних'),
+                ('sidecar', 'новая версия положена рядом (файлы .srnew)'),
+                ('conflict', 'спорных файлов (решали вы)'),
+                ('skipped', 'пропущено — файла нет на сервере раздачи')]
+        parts = [f'{title} — {stats.get(key, 0)}' for key, title in rows
+                 if full or stats.get(key)]
+        return '; '.join(parts) if parts else 'менять было нечего'
+
     def _apply_merge_worker(self, pm, decisions):
         mods_dir = self._mods_dir()
         desc, plan, index, target = pm['desc'], pm['plan'], pm['index'], pm['target']
@@ -4309,10 +4440,16 @@ class Api:
                                            byte_cb=self._byte_progress,
                                            part_cb=self._part_progress,
                                            chunk_cb=self._chunk_progress)
-            self.log(f'Применено: {stats}')
+            mid_now = (desc or {}).get('id') or ''
+            self.log(f'✔ {mid_now}: {self._stats_phrase(stats)}')
+            self.vlog(f'{mid_now} — по файлам: {self._stats_phrase(stats, full=True)}.')
             # мод обновлён → снять пометку «⬆ обновление» (строка станет «✅ установлен»)
             upd_mid = target[1] if target[0] == 'disk' else (desc.get('id') if desc else None)
             if upd_mid:
+                camp = (self._updates.get(upd_mid) or {}).get('camp')
+                if getattr(self, '_merge_applied', None) is None:
+                    self._merge_applied = {}
+                self._merge_applied.setdefault(camp, []).append(upd_mid)
                 self._updates.pop(upd_mid, None)
             if target[0] == 'profile':
                 m = self.profile['mods'][target[1]]
@@ -4345,7 +4482,7 @@ class Api:
         try:
             cat = self._catalog_cache
             if not cat:
-                self.log('Загрузка каталога для классификации…')
+                self.log('Загружаю каталог модов…')
                 try:
                     cat = core.load_catalog('descriptors/catalog.json', self._repo(),
                                             self._token()) or {}
@@ -4353,9 +4490,9 @@ class Api:
                 except core.OperationCancelled:
                     raise
                 except Exception as e:
-                    self.log(f'[!] каталог не загружен ({e}) — моды будут «не в каталоге»')
+                    self.log(f'⚠ каталог не загрузился ({e}) — все моды покажу как незнакомые')
                     cat = {}
-            self.log('Индексирую моды на диске…')
+            self.log('Смотрю, какие моды лежат в папке игры…')
             idx = core.index_disk_mods(mods_dir, cat, prev_index=self._disk_index,
                                        log=self.log, progress_cb=self._progress,
                                        should_cancel=self.should_cancel)
@@ -4364,18 +4501,18 @@ class Api:
             self.config['skip_index_offer'] = True
             self._save_config()
             base = idx.get('base') or {}
-            self.log(f'Индексация готова: всего {idx["count"]}, знакомых каталогу '
-                     f'{idx["known"]}, не в каталоге {idx["unknown"]}. '
-                     f'База: {base.get("camp", "?")}.')
+            self.log(f'Готово: в игре {idx["count"]} модов — из каталога {idx["known"]}, '
+                     f'незнакомых {idx["unknown"]}. '
+                     f'Сборка: {camp_title(base.get("camp"))}.')
             self.busy = False
             self._emit('op_end', {'status': 'Индексация готова'})
             self._emit('tree_dirty')
         except core.OperationCancelled:
-            self.log('Индексация отменена.')
+            self.log('Осмотр папки модов отменён.')
             self.busy = False
             self._emit('op_end', {'status': 'Отменено'})
         except Exception as e:
-            self.log(f'ОШИБКА индексации: {e}')
+            self.log(f'ОШИБКА при осмотре папки модов: {e}')
             self.busy = False
             self._emit('op_end', {'status': 'Ошибка'})
 
@@ -4405,7 +4542,7 @@ class Api:
             return {'ok': False, 'error': err}
         d = self._mods_dir()
         self.log('🧹 Очищаю папку модов…')
-        self.vlog(f'Папка Mods: {d}')
+        self.vlog(f'Папка модов: {d}')
         if not d.exists():
             self.log('Папки с модами нет — очищать нечего.')
             return {'ok': True, 'removed': 0, 'kept': 0}
@@ -4470,7 +4607,7 @@ class Api:
                                                 extra_base=extra_base) or {}
         except Exception as e:
             rep = {}
-            self.log(f'Совместимость: ошибка проверки паков ({e})')
+            self.log(f'Не удалось проверить, уживутся ли выбранные паки вместе ({e})')
         # проверка набора «в сборке» по зависимостям/конфликтам (Name-aware)
         enabled = set(self.profile.get('enabled', []))
         try:
@@ -4482,7 +4619,7 @@ class Api:
                                                self._mods_dir(), name_of=self._name_of) or {}
         except Exception as e:
             setrep = {}
-            self.log(f'Совместимость: ошибка проверки набора ({e})')
+            self.log(f'Не удалось проверить, уживутся ли подключённые моды вместе ({e})')
         items = []
         nm = lambda u: (packs.get(u) or {}).get('name', u)
         mn = lambda m: (self._name_of(m) if m else m)   # имя мода как в игре
@@ -4530,7 +4667,7 @@ class Api:
                 items.append({'level': 'warn',
                               'text': f'Конфликт подключённых в игре: «{a}» и «{b}» несовместимы — оставьте один.'})
         except Exception as e:
-            self.log(f'Совместимость: ошибка проверки зависимостей на диске ({e})')
+            self.log(f'Не удалось проверить, всё ли нужное для этих модов стоит ({e})')
         if not items:
             items.append({'level': 'ok', 'text': 'Проблем не найдено.'})
         return {'ok': True, 'items': items, 'base': base_name}
