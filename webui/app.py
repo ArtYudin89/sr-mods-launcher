@@ -281,6 +281,7 @@ class Api:
         self._fork_man_cache = {}          # (repo,camp,unit,which) -> манифест форка
         self._pub_cache = {}               # camp -> {install_rel: sha} (опубликованные файлы)
         self._pub_cache_all = None         # [(source, {install_rel: sha})] по ВСЕМ сборкам
+        self._pub_mtimes_all = {}          # source -> {install_rel: dev-дата} (те же карты)
         self._warming_labels = False       # идёт фоновый прогрев карт файлов для меток
         self._warm_labels_tries = 0        # попыток прогрева меток при запуске (ограничено)
         self._updates = {}                 # mid -> {changed, added} (найденные обновления)
@@ -610,6 +611,7 @@ class Api:
         repo, tok = self._repo(), self._token()
         packs = self._get_packs(tok)
         out = []
+        mtimes = {}                              # source -> {install_rel: dev-дата}
         for p in packs.values():
             if self.should_cancel():
                 raise core.OperationCancelled()
@@ -623,9 +625,11 @@ class Api:
             except Exception:
                 am = {}
             ff, _fidx = self._fork_unit_overlay(c, u)
-            fmap = core.published_files(cm, am, ff)
-            if fmap:
-                out.append((f'{c}/{u}', fmap))
+            pmeta = core.published_meta(cm, am, ff)
+            if pmeta:
+                out.append((f'{c}/{u}', {rel: sha for rel, (sha, _mt) in pmeta.items()}))
+                mtimes[f'{c}/{u}'] = {rel: mt for rel, (_sha, mt) in pmeta.items()}
+        self._pub_mtimes_all = mtimes
         self._pub_cache_all = out
         return out
 
@@ -692,20 +696,145 @@ class Api:
         ложное «⬆ обновление» (хотел откатить фиксы к базе), а обновление, целясь в слитый
         набор, находило «обновлять нечего» — бейдж возвращался на каждой проверке.
         Слияние здесь = слияние там → детект и апдейт целятся в ОДИН набор.
+        Порядок — как у установки сборки (core.reconstruct_multi): база и паки модов, затем
+        паки исправлений, каждый по (ранг, load_order); исправление не ложится поверх более
+        нового файла чужого пака (core.fix_overrides). До 13.10.2026 порядок был только по
+        load_order, и reflection_fixes (140) уступал community_mods (150) — после установки
+        сборки RefGeorgia и RefLandingCost вечно звали «обновить» назад, без исправлений.
         sources — множество 'camp/unit' (логические источники одной сборки для mid).
         umap — {source: {install_rel: sha}}. -> {rel:sha}; {} если мода нет ни в одном."""
         packs = self._get_packs(self._token())
-        ordered = sorted(sources,
-                         key=lambda s: (packs.get(s) or {}).get('load_order', 999))
-        merged = {}
-        for s in ordered:                       # возрастание load_order → поздние перекрывают
-            fmap = umap.get(s)
-            if not fmap:
-                continue
-            for r, sha in fmap.items():
+        mtimes = getattr(self, '_pub_mtimes_all', None) or {}
+
+        def order(s):
+            p = packs.get(s) or {}
+            rank = self._unit_install_rank(p, packs) if p else 1
+            return (rank, p.get('load_order', 999))
+
+        def is_fix(s):
+            return core.is_fix_tier((packs.get(s) or {}).get('tier'))
+
+        merged, owner = {}, {}                  # rel -> sha; rel -> (источник, dev-дата)
+        for s in sorted((s for s in sources if not is_fix(s)), key=order):
+            smt = mtimes.get(s) or {}
+            for r, sha in (umap.get(s) or {}).items():
                 if r == mid or r.startswith(mid + '/'):
                     merged[r] = sha
+                    owner[r] = (s, smt.get(r))
+        for s in sorted((s for s in sources if is_fix(s)), key=order):
+            p = packs.get(s) or {}
+            parent = f"{p.get('camp')}/{p['fix_parent']}" if p.get('fix_parent') else None
+            smt = mtimes.get(s) or {}
+            for r, sha in (umap.get(s) or {}).items():
+                if not (r == mid or r.startswith(mid + '/')):
+                    continue
+                old = owner.get(r)
+                if old and not core.fix_overrides(parent, smt.get(r), old[0], old[1]):
+                    continue                    # исправление старше файла другого пака
+                merged[r] = sha
+                owner[r] = (s, smt.get(r))
         return merged
+
+    def _camp_fix_sources(self, camp, mid, umap, only=None):
+        """Паки исправлений сборки camp, у которых есть файлы в папке мода mid. Пак
+        исправлений чинит по пути и моды ЧУЖИХ паков (redux_fixes — AskForWarriorsOnPlanets
+        из community_mods), установка сборки такие файлы ставит — значит, их видит и цель
+        проверки обновлений. only — явный выбор версии игрока (_pinned_sources): установка
+        сборки берёт файлы такого мода только из выбранного, и здесь так же."""
+        packs = self._get_packs(self._token())
+        out = set()
+        for key, p in packs.items():
+            if p.get('camp') != camp or not core.is_fix_tier(p.get('tier')):
+                continue
+            if only is not None and key not in only:
+                continue
+            if any(r == mid or r.startswith(mid + '/') for r in (umap.get(key) or {})):
+                out.add(key)
+        return out
+
+    def _unit_raw_files(self, key):
+        """{relpath: meta + kind} пака 'сборка/пак' из его описей, с форками поверх (как у
+        установки сборки) и по одной копии на место на диске (core.best_copies)."""
+        c, u = key.split('/', 1)
+        repo, tok = self._repo(), self._token()
+        metas, main = {}, {}
+        for kind in ('code', 'assets'):
+            for rp, meta in core._load_manifest(repo, f'mods/{c}/{u}/{kind}.manifest.json',
+                                                tok).items():
+                metas[rp] = dict(meta, kind=kind)
+                main[rp] = (meta['sha256'], kind)
+        ff, _fidx = self._fork_unit_overlay(c, u)
+        forked = set()
+        if ff:
+            for rp, (sha, kind) in core.overlay_manifest(main, ff).items():
+                if rp in ff:
+                    metas[rp] = {'sha256': sha, 'kind': 'assets' if kind == 'asset' else kind}
+                    forked.add(rp)
+        return core.best_copies(metas, forked)
+
+    def _camp_fix_layers(self, camp, mid, only=None):
+        """[(источник, его fix_parent 'сборка/пак', {relpath: meta})] — паки исправлений
+        сборки camp с файлами в папке мода mid, в порядке установки сборки (ранг,
+        load_order). Для core.overlay_fix_layers. Описи паков — кэш на сессию."""
+        packs = self._get_packs(self._token())
+        cache = self.__dict__.setdefault('_fix_files_cache', {})
+        keys = [k for k, p in packs.items()
+                if p.get('camp') == camp and core.is_fix_tier(p.get('tier'))
+                and (only is None or k in only)]
+        keys.sort(key=lambda k: (self._unit_install_rank(packs[k], packs),
+                                 packs[k].get('load_order', 999)))
+        low = mid.lower()
+        layers = []
+        for key in keys:
+            if key not in cache:
+                cache[key] = self._unit_raw_files(key)
+            mine = {}
+            for rp, meta in cache[key].items():
+                where, rel = core.install_route(rp)
+                rl = (rel or '').replace('\\', '/').lower()
+                if where == 'mods' and (rl == low or rl.startswith(low + '/')):
+                    mine[rp] = meta
+            if mine:
+                fp = packs[key].get('fix_parent')
+                layers.append((key, f'{camp}/{fp}' if fp else None, mine))
+        return layers
+
+    def _with_camp_fixes(self, desc, source=None, owners=None):
+        """Дескриптор мода + паки исправлений его сборки, которые кладут файлы в папку мода,
+        — как при установке сборки целиком (core.overlay_fix_layers). Без этого установка по
+        одному моду и обновление ставили файлы без исправлений сборки, а проверка обновлений
+        после установки сборки звала их «обновить» назад (сверка sr-lab 12–13.10.2026).
+        source — 'сборка/пак' варианта (по умолчанию desc['source']); owners —
+        {relpath: источник} слитого дескриптора. -> (дескриптор, {relpath: источник})."""
+        owners = dict(owners or {})
+        if not desc or not desc.get('files'):
+            return desc, owners
+        src = source or desc.get('source') or ''
+        camp = src.split('/')[0]
+        mid = (desc.get('id') or '').split('@', 1)[0]
+        if not camp or not mid:
+            return desc, owners
+        try:
+            packs = self._get_packs(self._token())
+            layers = self._camp_fix_layers(camp, mid, only=self._pinned_sources(packs).get(mid))
+        except core.OperationCancelled:
+            raise
+        except Exception as e:
+            self.vlog(f'⚠ Не получилось прочитать паки исправлений сборки ({e}) — мод {mid} '
+                      f'беру без них.')
+            return desc, owners
+        if not layers:
+            return desc, owners
+        out, owners = core.overlay_fix_layers(desc, layers, owners)
+        if out is not desc:
+            fixes = {key for key, _parent, _files in layers}
+            used = sorted({owners[rp] for rp in core.desc_files_flat(out)
+                           if owners.get(rp) in fixes})
+            if used:
+                self.vlog(f'{mid}: поверх ложатся исправления из '
+                          + ', '.join(f'пака {s.split("/")[-1]}' for s in used)
+                          + ' — так же, как при установке сборки целиком.')
+        return out, owners
 
     def check_updates(self, extra=None):
         """Проверить обновления ПОФАЙЛОВОЙ сверкой: хеши файлов на диске (из индекса)
@@ -844,6 +973,10 @@ class Api:
                         camp_srcs.add(csrc)        # выбранный источник обязан участвовать
                 for s in list(camp_srcs):          # + свёрнутые фикс-юниты (overlaid_fixes)
                     camp_srcs |= fix_children.get(s, set())
+                # + паки исправлений сборки с файлами в папке мода по пути (чинят и моды
+                # чужих паков) — установка сборки их ставит, и цель обязана их видеть
+                camp_srcs |= self._camp_fix_sources(tcamp, mid, umap,
+                                                    only=pinned.get(mid))
                 theirs = self._merged_camp_files(mid, umap, camp_srcs)
                 if not theirs:
                     continue                       # ни один логический вариант не лёг на диск
@@ -3346,6 +3479,7 @@ class Api:
                 return
             ff, fidx = self._fork_unit_overlay(c, u)
             d = {'camp': c, 'unit': u, 'tier': p.get('tier', tier),
+                 'fix_parent': p.get('fix_parent'),
                  'fork_files': ff, 'fork_index': fidx,
                  '_rank': self._unit_install_rank(p, packs) if rank is None else rank,
                  '_lo': p.get('load_order', 999) if lo is None else lo}
@@ -3398,6 +3532,7 @@ class Api:
             for p in units:
                 ff, fidx = self._fork_unit_overlay(p['camp'], p['name'])
                 ulist.append({'unit': p['name'], 'tier': p.get('tier'),
+                              'fix_parent': p.get('fix_parent'),
                               'fork_files': ff, 'fork_index': fidx})
                 if p.get('tier') == 'base':
                     self._mark_base_installed(p['camp'], p['name'])
@@ -3427,6 +3562,8 @@ class Api:
                                            self._repo(), tok)
             else:                          # наложение форков поверх основного (по файлам)
                 desc, idx = self._overlay(m['id'], m.get('source'))
+                # + паки исправлений сборки по пути — как при установке сборки целиком
+                desc, _owners = self._with_camp_fixes(desc, m.get('source'))
             if desc:
                 if desc.get('overlaid'):
                     self.log('  (с дополнительными исправлениями от лаунчера)')
@@ -3582,6 +3719,9 @@ class Api:
                     idx_url = next((d.get('chunk_index_url') for d in plan['mods'].values()
                                     if d.get('chunk_index_url')), None)
                     index = core.load_chunk_index(url=idx_url, repo=repo, token=tok)
+                # + паки исправлений сборки по пути — как при установке сборки целиком
+                for mid, d in list(plan['mods'].items()):
+                    plan['mods'][mid], _owners = self._with_camp_fixes(d, d.get('source'))
                 self._pack_ctx = 'набор модов'
                 core.install_set(plan, mods_dir, index, token=tok, log=self.log,
                                  vlog=self.vlog,
@@ -4015,6 +4155,8 @@ class Api:
         if not desc:
             self.log('Не удалось получить описание мода — похоже, его нет в каталоге.')
             return None
+        if not m.get('url'):           # + паки исправлений сборки, как при установке сборки
+            desc, _owners = self._with_camp_fixes(desc, desc.get('source'))
         snap = core.load_install_snapshot(mods_dir, desc.get('id'))
         if snap is None:
             self.log('Лаунчер этот мод не ставил, поэтому не знает, что в нём ваше, а что '
@@ -4057,7 +4199,9 @@ class Api:
         if len(srcs) <= 1:                       # один источник — сливать нечего
             one = src or (srcs[0] if srcs else None)
             d = core.descriptor_for({'id': key, 'source': one}, cat, repo, tok)
-            self._last_variant_sources = {rp: one for rp in core.desc_files_flat(d)} if d else {}
+            own = {rp: one for rp in core.desc_files_flat(d)} if d else {}
+            # + паки исправлений сборки по пути — как при установке сборки целиком
+            d, self._last_variant_sources = self._with_camp_fixes(d, one, own)
             return d
         try:
             packs = self._get_packs(tok)
@@ -4080,6 +4224,10 @@ class Api:
         merged = core.merge_descriptors([d for _, d in pairs])   # fixes-первым → перекрывает base
         if merged is not None and src:
             merged = dict(merged); merged['source'] = src
+        # + паки исправлений сборки на своём ранге: свёрнутое агрегатором исправление
+        # живёт в дескрипторе родителя (reflection_installer, 130) и проигрывало копии мода
+        # из community_mods (150), а установка сборки кладёт его поверх (RefGeorgia)
+        merged, self._last_variant_sources = self._with_camp_fixes(merged, src, fsrc)
         return merged
 
     def _resolve_disk_update(self, mid):

@@ -2177,6 +2177,248 @@ finally:
     shutil.rmtree(_w5, ignore_errors=True)
 
 # ═══════════════════════════════════════════════
+#  ГРУППА 25: сборка, мод по одному и проверка обновлений берут одни файлы
+#  (сверка sr-lab 12–13.10.2026: у 9 модов «по одному» ≠ «сборкой»)
+# ═══════════════════════════════════════════════
+print('\n=== ГРУППА 25: одни правила слияния паков для сборки, мода и проверки ===')
+
+_OLD, _NEW, _FIXB, _MIB = b'old-copy', b'new-copy', b'fixed-by-fix-pack', b'MI'
+_S_OLD, _S_NEW, _S_FIXB, _S_MIB = map(_sha, (_OLD, _NEW, _FIXB, _MIB))
+_D2022_09, _D2022_12 = 1662336000, 1671062400          # 05.09.2022, 15.12.2022
+_D2023, _D2024, _D2025, _D2026 = 1673913600, 1704067200, 1741824000, 1790203521
+_G_IDX = {'blobs': {s: {'chunk': 'c1'} for s in (_S_OLD, _S_NEW, _S_FIXB, _S_MIB)},
+          'chunks': {'c1': {'url': 'http://fake/c1', 'store': 'hf'}}}
+
+
+def _g_dl(url, token, dest, progress_cb=None, should_cancel=None, byte_cb=None):
+    with _zip.ZipFile(dest, 'w') as z:
+        for s, b in ((_S_OLD, _OLD), (_S_NEW, _NEW), (_S_FIXB, _FIXB), (_S_MIB, _MIB)):
+            z.writestr(s, b)
+
+
+def _run_group25(units, mans, mods, tmp):
+    def rfb(repo, path, token, should_cancel=None, branch=None):
+        if path == 'state/asset_index.json':
+            return json.dumps(_G_IDX).encode()
+        if path in mans:
+            return json.dumps(mans[path]).encode()
+        if path.endswith('.manifest.json'):
+            return json.dumps(_EMPTY_MAN).encode()
+        import requests
+        raise requests.HTTPError(f'404 {path}')
+    with patch.object(core, 'repo_file_bytes', side_effect=rfb), \
+         patch.object(core, 'download_url', side_effect=_g_dl):
+        return core.reconstruct_multi('repo', units, mods, 'tok', log=lambda *_: None,
+                                      tmp_dir=tmp)
+
+
+_w6 = Path(tempfile.mkdtemp(prefix='group25_'))
+try:
+    print('\n--- T92: две копии файла в одном паке → более новая, где бы ни стояла в описи ---')
+    # Mod_ExpTCPlus в huk_mods: внешняя копия 15.12.2022 и вложенная 05.09.2022; вложенная
+    # стоит в описи позже — раньше сборка брала её, а дескриптор агрегатора — новую
+    _mods6 = _w6 / 'm92' / 'Mods'; _mods6.mkdir(parents=True)
+    _man92 = {'files': {
+        'Mods/Expansion/Mod_ExpTCPlus/CFG/Main.dat':
+            {'sha256': _S_NEW, 'size': len(_NEW), 'mtime': _D2022_12},
+        'huk_unpacked/Mods/Expansion/Mod_ExpTCPlus/CFG/Main.dat':
+            {'sha256': _S_OLD, 'size': len(_OLD), 'mtime': _D2022_09}}}
+    _run_group25([{'camp': 'redux', 'unit': 'huk_mods', 'tier': 'mod'}],
+                 {'mods/redux/huk_mods/code.manifest.json': _man92}, _mods6, _w6 / 't92')
+    check('T92: на диске новая копия', _NEW,
+          (_mods6 / 'Expansion' / 'Mod_ExpTCPlus' / 'CFG' / 'Main.dat').read_bytes())
+    check('T92: карта пака для проверки обновлений — та же копия',
+          {'Expansion/Mod_ExpTCPlus/CFG/Main.dat': _S_NEW},
+          core.published_files(_man92['files'], {}))
+
+    print('\n--- T93: исправление не ложится поверх более нового файла чужого пака ---')
+    # denmods_fix (2023, родитель denmods) поверх ModuleInfo.txt EvoFreeInflation 2025 из
+    # universe_community — не ставится; поверх файла своего родителя — ставится, даже старше
+    _mods7 = _w6 / 'm93' / 'Mods'; _mods7.mkdir(parents=True)
+    _run_group25(
+        [{'camp': 'universe', 'unit': 'universe_community', 'tier': 'base'},
+         {'camp': 'universe', 'unit': 'denmods', 'tier': 'mod'},
+         {'camp': 'universe', 'unit': 'denmods_fix', 'tier': 'fix', 'fix_parent': 'denmods'}],
+        {'mods/universe/universe_community/code.manifest.json': {'files': {
+            '{app}/Mods/Evolution/EvoFreeInflation/ModuleInfo.txt':
+                {'sha256': _S_NEW, 'size': len(_NEW), 'mtime': _D2025}}},
+         'mods/universe/denmods/code.manifest.json': {'files': {
+             'Mods/Den/DenDynamicBG/ModuleInfo.txt':
+                 {'sha256': _S_NEW, 'size': len(_NEW), 'mtime': _D2024}}},
+         'mods/universe/denmods_fix/code.manifest.json': {'files': {
+             'Mods/Evolution/EvoFreeInflation/ModuleInfo.txt':
+                 {'sha256': _S_OLD, 'size': len(_OLD), 'mtime': _D2023},
+             'Mods/Den/DenDynamicBG/ModuleInfo.txt':
+                 {'sha256': _S_FIXB, 'size': len(_FIXB), 'mtime': _D2023}}}},
+        _mods7, _w6 / 't93')
+    check('T93: EvoFreeInflation — файл 2025 из universe_community', _NEW,
+          (_mods7 / 'Evolution' / 'EvoFreeInflation' / 'ModuleInfo.txt').read_bytes())
+    check('T93: свой родитель (denmods) — исправление легло, хоть и старше', _FIXB,
+          (_mods7 / 'Den' / 'DenDynamicBG' / 'ModuleInfo.txt').read_bytes())
+
+    print('\n--- T94: исправление по пути ложится и в описание мода из чужого пака ---')
+    _desc94 = {'id': 'OtherMods/AskForWarriorsOnPlanets', 'source': 'redux/community_mods',
+               'version': 'v0', 'files': {'code': {
+                   'Community Mods_unpacked/Mods/OtherMods/AskForWarriorsOnPlanets/x.scr':
+                       {'sha256': _S_OLD, 'mtime': _D2025}}, 'assets': {}}}
+    _fix94 = ('redux/redux_fixes', 'redux/redux_base_installer', {
+        'Universe Redux Fixes_unpacked/Mods/OtherMods/AskForWarriorsOnPlanets/x.scr':
+            {'sha256': _S_FIXB, 'mtime': _D2026, 'kind': 'code'},
+        'Universe Redux Fixes_unpacked/Mods/OtherMods/AskForWarriorsOnPlanets/new.txt':
+            {'sha256': _S_NEW, 'mtime': _D2026, 'kind': 'code'}})
+    _o94, _own94 = core.overlay_fix_layers(_desc94, [_fix94])
+    _c94 = _o94['files']['code']
+    check('T94: файл заменён под прежним relpath', _S_FIXB,
+          _c94['Community Mods_unpacked/Mods/OtherMods/AskForWarriorsOnPlanets/x.scr']['sha256'])
+    check_true('T94: новый файл исправления добавлен',
+               'Universe Redux Fixes_unpacked/Mods/OtherMods/AskForWarriorsOnPlanets/new.txt'
+               in _c94)
+    check_true('T94: версия пересчитана', _o94['version'] != 'v0')
+    check('T94: исходный дескриптор не тронут', _S_OLD, _desc94['files']['code'][
+        'Community Mods_unpacked/Mods/OtherMods/AskForWarriorsOnPlanets/x.scr']['sha256'])
+    _old94 = ('redux/redux_fixes', 'redux/redux_base_installer', {
+        'Universe Redux Fixes_unpacked/Mods/OtherMods/AskForWarriorsOnPlanets/x.scr':
+            {'sha256': _S_FIXB, 'mtime': _D2023, 'kind': 'code'}})
+    check_true('T94: исправление старше файла чужого пака — дескриптор прежний',
+               core.overlay_fix_layers(_desc94, [_old94])[0] is _desc94)
+    _par94 = ('redux/community_fix', 'redux/community_mods', _old94[2])
+    check('T94: старше, но для своего родителя — легло', _S_FIXB,
+          core.overlay_fix_layers(_desc94, [_par94])[0]['files']['code'][
+              'Community Mods_unpacked/Mods/OtherMods/AskForWarriorsOnPlanets/x.scr']['sha256'])
+
+    print('\n--- T95: слитый дескриптор, две копии одного места — исправление получают обе ---')
+    _desc95 = {'id': 'Reflection/RefGeorgia', 'source': 'redux/community_mods',
+               'files': {'code': {
+                   '{app}/Mods/Reflection/RefGeorgia/x.scr': {'sha256': _S_FIXB, 'mtime': _D2026},
+                   'Community Mods_unpacked/Mods/Reflection/RefGeorgia/x.scr':
+                       {'sha256': _S_OLD, 'mtime': _D2025}}, 'assets': {}}}
+    _o95, _ = core.overlay_fix_layers(
+        _desc95, [('redux/reflection_fixes', 'redux/reflection_installer', {
+            'Reflection Fixes_unpacked/Mods/Reflection/RefGeorgia/x.scr':
+                {'sha256': _S_FIXB, 'mtime': _D2026, 'kind': 'code'}})],
+        owners={'{app}/Mods/Reflection/RefGeorgia/x.scr': 'redux/reflection_installer',
+                'Community Mods_unpacked/Mods/Reflection/RefGeorgia/x.scr':
+                    'redux/community_mods'})
+    check('T95: обе копии несут исправление', {_S_FIXB},
+          {m['sha256'] for m in _o95['files']['code'].values()})
+finally:
+    shutil.rmtree(_w6, ignore_errors=True)
+
+
+def _detect_case(name, camp, packs, catalog, unit_maps, mtimes, disk, mid):
+    """Проверка обновлений на подставных картах паков: True — мод в «обновить»."""
+    g = TempGame()
+    try:
+        a = g.fresh_api(base=camp, packs=packs, catalog=catalog)
+        a._pub_cache_all = unit_maps
+        a._pub_mtimes_all = mtimes
+
+        def fake_index(mods_dir, catalog, **kw):
+            return {'mods': {mid: {'files': {r: {'sha': s} for r, s in disk.items()},
+                                   'status': 'known'}},
+                    'count': 1, 'known': 1, 'unknown': 0}
+        blobs = {s: {} for fm in unit_maps for s in fm[1].values()}
+        with patch.object(core, 'index_disk_mods', side_effect=fake_index), \
+             patch.object(core, 'save_disk_index', return_value=None), \
+             patch.object(core, 'load_chunk_index', return_value={'blobs': blobs}):
+            a.check_updates(); wait_idle(a, timeout=8)
+        return mid in a._updates
+    finally:
+        g.cleanup()
+
+
+_P_REDUX = {
+    'redux/redux_base_installer': {'camp': 'redux', 'name': 'redux_base_installer',
+                                   'tier': 'base', 'load_order': 10},
+    'redux/redux_fixes': {'camp': 'redux', 'name': 'redux_fixes', 'tier': 'fix',
+                          'load_order': 20, 'fix_parent': 'redux_base_installer'},
+    'redux/reflection_installer': {'camp': 'redux', 'name': 'reflection_installer',
+                                   'tier': 'mod', 'load_order': 130},
+    'redux/reflection_fixes': {'camp': 'redux', 'name': 'reflection_fixes', 'tier': 'fix',
+                               'load_order': 140, 'fix_parent': 'reflection_installer'},
+    'redux/community_mods': {'camp': 'redux', 'name': 'community_mods', 'tier': 'mod',
+                             'load_order': 150},
+}
+_ASK = 'OtherMods/AskForWarriorsOnPlanets'
+_ASK_MAPS = [
+    ('redux/redux_base_installer', {'Other/Base/ModuleInfo.txt': _S_MIB}),
+    ('redux/redux_fixes', {_ASK + '/x.scr': _S_FIXB}),
+    ('redux/community_mods', {_ASK + '/x.scr': _S_OLD, _ASK + '/ModuleInfo.txt': _S_MIB}),
+]
+_ASK_MT = {'redux/redux_fixes': {_ASK + '/x.scr': _D2026},
+           'redux/community_mods': {_ASK + '/x.scr': _D2025, _ASK + '/ModuleInfo.txt': _D2025}}
+_ASK_CAT = {_ASK: {'name': 'AskForWarriorsOnPlanets', 'default_source': 'redux/community_mods',
+                   'variants': [{'source': 'redux/community_mods', 'path': 'a.json',
+                                 'depends': [], 'conflicts': []}]}}
+
+print('\n--- T96: проверка обновлений видит пак исправлений, чинящий мод чужого пака ---')
+check_false('T96: после установки сборки (исправление на диске) — НЕ обновление',
+            _detect_case('T96', 'redux', _P_REDUX, _ASK_CAT, _ASK_MAPS, _ASK_MT,
+                         {_ASK + '/x.scr': _S_FIXB, _ASK + '/ModuleInfo.txt': _S_MIB}, _ASK))
+check_true('T96: файл без исправления — обновление до исправленного',
+           _detect_case('T96', 'redux', _P_REDUX, _ASK_CAT, _ASK_MAPS, _ASK_MT,
+                        {_ASK + '/x.scr': _S_OLD, _ASK + '/ModuleInfo.txt': _S_MIB}, _ASK))
+
+print('\n--- T97: исправление ложится на своём ранге, а не по load_order (RefGeorgia) ---')
+_GEO = 'Reflection/RefGeorgia'
+_GEO_MAPS = [
+    ('redux/reflection_installer', {_GEO + '/x.scr': _S_OLD, _GEO + '/ModuleInfo.txt': _S_MIB}),
+    ('redux/reflection_fixes', {_GEO + '/x.scr': _S_FIXB}),
+    ('redux/community_mods', {_GEO + '/x.scr': _S_NEW, _GEO + '/ModuleInfo.txt': _S_MIB}),
+]
+_GEO_MT = {'redux/reflection_installer': {_GEO + '/x.scr': _D2024},
+           'redux/reflection_fixes': {_GEO + '/x.scr': _D2026},
+           'redux/community_mods': {_GEO + '/x.scr': _D2025}}
+_GEO_CAT = {_GEO: {'name': 'RefGeorgia', 'default_source': 'redux/community_mods',
+                   'variants': [{'source': 'redux/reflection_installer', 'path': 'a.json',
+                                 'depends': [], 'conflicts': []},
+                                {'source': 'redux/community_mods', 'path': 'b.json',
+                                 'depends': [], 'conflicts': []}]}}
+check_false('T97: исправление reflection_fixes на диске — НЕ обновление',
+            _detect_case('T97', 'redux', _P_REDUX, _GEO_CAT, _GEO_MAPS, _GEO_MT,
+                         {_GEO + '/x.scr': _S_FIXB, _GEO + '/ModuleInfo.txt': _S_MIB}, _GEO))
+
+print('\n--- T98: старое исправление чужого пака проверка обновлений не ждёт ---')
+_P_UNI = {
+    'universe/universe_community': {'camp': 'universe', 'name': 'universe_community',
+                                    'tier': 'base', 'load_order': 10},
+    'universe/denmods': {'camp': 'universe', 'name': 'denmods', 'tier': 'mod', 'load_order': 70},
+    'universe/denmods_fix': {'camp': 'universe', 'name': 'denmods_fix', 'tier': 'fix',
+                             'load_order': 80, 'fix_parent': 'denmods'},
+}
+_EVO = 'Evolution/EvoFreeInflation'
+_EVO_MAPS = [('universe/universe_community', {_EVO + '/ModuleInfo.txt': _S_NEW}),
+             ('universe/denmods', {'Den/DenDynamicBG/ModuleInfo.txt': _S_MIB}),
+             ('universe/denmods_fix', {_EVO + '/ModuleInfo.txt': _S_OLD})]
+_EVO_MT = {'universe/universe_community': {_EVO + '/ModuleInfo.txt': _D2025},
+           'universe/denmods_fix': {_EVO + '/ModuleInfo.txt': _D2023}}
+_EVO_CAT = {_EVO: {'name': 'EvoFreeInflation', 'default_source': 'universe/universe_community',
+                   'variants': [{'source': 'universe/universe_community', 'path': 'a.json',
+                                 'depends': [], 'conflicts': []}]}}
+check_false('T98: файл 2025 на диске — НЕ обновление к исправлению 2023',
+            _detect_case('T98', 'universe', _P_UNI, _EVO_CAT, _EVO_MAPS, _EVO_MT,
+                         {_EVO + '/ModuleInfo.txt': _S_NEW}, _EVO))
+
+print('\n--- T99: установка мода по одному получает исправления сборки (_with_camp_fixes) ---')
+g = TempGame()
+try:
+    a = g.fresh_api(base='redux', packs=_P_REDUX, catalog=_ASK_CAT)
+    a._unit_raw_files = lambda key: {
+        'redux/redux_fixes': dict(_fix94[2]),
+        'redux/reflection_fixes': {}}.get(key, {})
+    d99, own99 = a._with_camp_fixes(_desc94)
+    check('T99: файл мода — из redux_fixes', _S_FIXB, d99['files']['code'][
+        'Community Mods_unpacked/Mods/OtherMods/AskForWarriorsOnPlanets/x.scr']['sha256'])
+    check('T99: источник файла — redux_fixes', 'redux/redux_fixes', own99[
+        'Community Mods_unpacked/Mods/OtherMods/AskForWarriorsOnPlanets/x.scr'])
+    a.profile['variants'] = {_ASK: _ASK + '#redux/community_mods'}
+    d99b, _ = a._with_camp_fixes(_desc94)
+    check_true('T99: игрок выбрал версию из community_mods — исправления чужого пака не лезут',
+               d99b is _desc94)
+finally:
+    g.cleanup()
+
+# ═══════════════════════════════════════════════
 #  Итог
 # ═══════════════════════════════════════════════
 print(f'\n{"="*50}')

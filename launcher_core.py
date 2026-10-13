@@ -844,6 +844,7 @@ def reconstruct_multi(repo, units, mods_dir, token, log=print, tmp_dir=None,
             log(f'⚠ пак {unit} ({camp_title(cu)}): на сервере нет списка файлов — пропускаю')
             continue
         umap = {}       # relpath -> (sha, kind)
+        umtime = {}     # relpath -> dev-дата из описи (copy_rank, fix_overrides)
         for kind, man in (('code', code_man), ('asset', asset_man)):
             for relpath, meta in man.items():
                 mk = mod_key(relpath)
@@ -854,7 +855,8 @@ def reconstruct_multi(repo, units, mods_dir, token, log=print, tmp_dir=None,
                     continue
                 provided.setdefault(mk, set()).add(f'{cu}/{unit}')
                 umap[relpath] = (meta['sha256'], kind)
-        loaded.append((u, umap))
+                umtime[relpath] = meta.get('mtime')
+        loaded.append((u, umap, umtime))
 
     if skipped_mods:
         log(f'Убрано вами из набора: {len(skipped_mods)} {plural_mods(len(skipped_mods))} '
@@ -871,7 +873,7 @@ def reconstruct_multi(repo, units, mods_dir, token, log=print, tmp_dir=None,
             log(f'⚠ {mk}: выбранной вами версии в этом наборе нет — '
                 f'ставлю ту, что идёт в сборке')
 
-    for u, umap in loaded:
+    for u, umap, umtime in loaded:
         _check_cancel(should_cancel)
         cu, unit = u['camp'], u['unit']
         label = f'{cu}/{unit}'
@@ -886,26 +888,48 @@ def reconstruct_multi(repo, units, mods_dir, token, log=print, tmp_dir=None,
                 keep[relpath] = val
             umap = keep
         ff = u.get('fork_files')
+        forked = set()
         if ff:
             umap = overlay_manifest(umap, ff)
+            forked = set(ff)
             if u.get('fork_index'):
                 fork_indexes.append(u['fork_index'])
-        added = overridden = 0
+        # две копии одного места на диске внутри пака — по copy_rank (как дескриптор
+        # агрегатора); файл форка — всегда он
+        mine = {}       # (where, rel_lower) -> (relpath, sha, kind, mtime)
         for relpath, (sh, kind) in umap.items():
             where, rel = install_route(relpath)
             if where is None:
                 continue                       # мусор инсталлятора — никуда не пишется
             key = (where, rel.lower())
-            if key in eff:
+            fork = relpath in forked
+            mt = None if fork else umtime.get(relpath)
+            cur = mine.get(key)
+            if cur is None or (copy_rank(relpath, float('inf') if fork else mt)
+                               > copy_rank(cur[0], float('inf') if cur[0] in forked
+                                           else cur[3])):
+                mine[key] = (relpath, sh, kind, mt)
+        fix = is_fix_tier(u.get('tier'))
+        parent = f"{cu}/{u['fix_parent']}" if fix and u.get('fix_parent') else None
+        added = overridden = older = 0
+        for key, (relpath, sh, kind, mt) in mine.items():
+            old = eff.get(key)
+            if old is not None:
+                if fix and not fix_overrides(parent, mt, old.get('source'), old.get('mtime')):
+                    older += 1                 # исправление старше файла другого пака
+                    continue
                 overridden += 1                # этот юнит переопределяет предыдущий
             else:
                 added += 1
-            eff[key] = {'sha': sh, 'kind': kind, 'relpath': relpath, 'camp': cu}
+            eff[key] = {'sha': sh, 'kind': kind, 'relpath': relpath, 'camp': cu,
+                        'source': label, 'mtime': mt}
         conflicts += overridden
         log(f'--- Пак {unit} ({tier_title(u.get("tier"))}): файлов {added}'
             + (f', ещё {overridden} заменяют файлы предыдущих паков' if overridden else '')
             + (f', пропущено {pinned_skipped} (вы выбрали эти файлы из другого пака)'
-               if pinned_skipped else '') + ' ---')
+               if pinned_skipped else '')
+            + (f', не ставлю {older}: в других паках эти файлы новее' if older else '')
+            + ' ---')
 
     if fork_indexes:                            # форки приоритетнее основного индекса;
         # высший приоритет первым: юниты шли низший→высший → развернуть, затем базовый.
@@ -1179,22 +1203,154 @@ def overlay_manifest(main_map, fork_files):
     return eff
 
 
+def copy_rank(relpath, mtime):
+    """Какая копия файла ложится в игру, когда в ОДНОМ паке две записи описи уходят в одно
+    место на диске (прямая ветка `Mods/X/…` и вложенная обёртка `…_unpacked/Mods/X/…`):
+    больше — лучше. Новее dev-дата → меньше вложенность → путь. Это правило `_dedup_key`
+    агрегатора, по нему он собирает дескриптор мода, — поэтому установка сборки, установка
+    по одному моду и проверка обновлений берут одну и ту же копию. До 13.10.2026 сборка
+    брала копию, стоящую в описи позже, и Mod_ExpTCPlus, NoSou_PBase, NoSou_PBRebalance
+    ставились старыми (сверка sr-lab 12–13.10.2026)."""
+    depth = len([p for p in relpath.replace('\\', '/').split('/') if p])
+    return (mtime if mtime is not None else float('-inf'), -depth, relpath)
+
+
+def is_fix_tier(tier):
+    """Пак исправлений. Агрегатор пишет tier='fix', старые данные — 'fixes'."""
+    return tier in ('fix', 'fixes')
+
+
+def best_copies(files, forked=()):
+    """{relpath: meta} → по одной записи на место на диске: лучшая по copy_rank, файл
+    форка (relpath из forked) — всегда он. Записи вне Mods и корня игры отбрасываются."""
+    best = {}           # (where, rel_lower) -> (relpath, ранг)
+    for rp, meta in files.items():
+        where, rel = install_route(rp)
+        if where is None:
+            continue
+        key = (where, rel.replace('\\', '/').lower())
+        rank = copy_rank(rp, float('inf') if rp in forked else (meta or {}).get('mtime'))
+        cur = best.get(key)
+        if cur is None or rank > cur[1]:
+            best[key] = (rp, rank)
+    return {rp: files[rp] for rp, _rank in best.values()}
+
+
+def fix_overrides(fix_parent, fix_mtime, owner, owner_mtime):
+    """Ложится ли файл пака исправлений поверх файла, который уже занял это место.
+
+    fix_parent и owner — источники 'сборка/пак'. Файл своего родителя (fix_parent)
+    исправление перекрывает всегда: пак для него и собран. Файл ДРУГОГО пака (пак
+    исправлений чинит по пути и моды чужих паков) — только если исправление не старше:
+    старый пак поверх более нового файла мода откатил бы правки автора (denmods_fix 2023
+    поверх ModuleInfo.txt 2025 у EvoFreeInflation и EvoNoInflation). Нет даты у одной из
+    сторон — перекрывает, как раньше."""
+    if owner is None or owner == fix_parent:
+        return True
+    if fix_mtime is None or owner_mtime is None:
+        return True
+    return fix_mtime >= owner_mtime
+
+
+def published_meta(code_man, asset_man, fork_files=None):
+    """{install_rel: (sha256, mtime)} файлов пака, которые ложатся в Mods. Форки
+    накладываются (overlay_manifest), у файла форка даты нет (None), и из двух копий
+    одного места на диске он выигрывает всегда; прочие копии — по copy_rank."""
+    main_map, mtimes = {}, {}
+    for kind, man in (('code', code_man or {}), ('asset', asset_man or {})):
+        for rp, meta in man.items():
+            main_map[rp] = (meta['sha256'], kind)
+            mtimes[rp] = meta.get('mtime')
+    eff = overlay_manifest(main_map, fork_files) if fork_files else main_map
+    forked = set(fork_files or ())
+    best = {}           # install_rel.lower() -> (install_rel, sha, mtime, ранг копии)
+    for rp, (sha, _kind) in eff.items():
+        where, rel = install_route(rp)
+        if where != 'mods':
+            continue
+        rel = rel.replace('\\', '/')
+        fork = rp in forked
+        mtime = None if fork else mtimes.get(rp)
+        rank = copy_rank(rp, float('inf') if fork else mtime)
+        cur = best.get(rel.lower())
+        if cur is None or rank > cur[3]:
+            best[rel.lower()] = (rel, sha, mtime, rank)
+    return {rel: (sha, mtime) for rel, sha, mtime, _rank in best.values()}
+
+
 def published_files(code_man, asset_man, fork_files=None):
     """Карта опубликованных файлов пака {install_rel: sha256} (только то, что ложится
     в Mods) — для пофайловой сверки обновлений с диском. Форки накладываются
     (overlay_manifest). install_rel — путь относительно Mods (как ключи дискового
-    индекса), root/игровые файлы пропускаются (их нет в индексе модов)."""
-    main_map = {}
-    for kind, man in (('code', code_man or {}), ('asset', asset_man or {})):
-        for rp, meta in man.items():
-            main_map[rp] = (meta['sha256'], kind)
-    eff = overlay_manifest(main_map, fork_files) if fork_files else main_map
-    out = {}
-    for rp, (sha, _kind) in eff.items():
-        where, rel = install_route(rp)
-        if where == 'mods':
-            out[rel.replace('\\', '/')] = sha
-    return out
+    индекса), root/игровые файлы пропускаются (их нет в индексе модов). Две копии
+    одного места на диске — как при установке сборки (copy_rank)."""
+    return {rel: sha for rel, (sha, _mt)
+            in published_meta(code_man, asset_man, fork_files).items()}
+
+
+def overlay_fix_layers(desc, layers, owners=None):
+    """Наложить паки исправлений сборки на дескриптор мода — так же, как они ложатся при
+    установке сборки целиком.
+
+    Агрегатор сворачивает в дескриптор только паки исправлений родителя мода (fix_parent),
+    а пак исправлений чинит по пути и моды других паков сборки (redux_fixes —
+    AskForWarriorsOnPlanets из community_mods; reflection_fixes — RefGeorgia, у которой
+    в сборке есть копия поновее в community_mods). Сборка такие файлы ставит, установка по
+    одному моду — нет, и проверка обновлений после установки сборки звала «обновить» назад,
+    к файлам без исправлений (сверка sr-lab 12–13.10.2026).
+
+    layers: [(источник пака исправлений, его fix_parent 'сборка/пак', {relpath: meta}), …]
+    в порядке установки сборки (ранг, load_order); meta — как в описи (sha256, size, mtime,
+    kind 'code'|'assets'). owners: {relpath дескриптора: источник} — чей файл сейчас в
+    дескрипторе (по умолчанию desc['source']). Файл с тем же местом на диске заменяется
+    под прежним relpath (как делает свёртка агрегатора), новый — добавляется. Если в
+    слитом дескрипторе одно место занимают несколько relpath (копии мода из разных паков),
+    исправление получают все — иначе на диск могла бы лечь любая из них. Возвращает
+    (новый дескриптор или прежний, если ничего не изменилось; {relpath: источник})."""
+    if not desc:
+        return desc, dict(owners or {})
+    files = {k: dict(desc.get('files', {}).get(k) or {}) for k in ('code', 'assets')}
+    src = desc.get('source')
+    owners = dict(owners or {})
+    place = {}                                  # место на диске (lower) -> [(kind, relpath)]
+    for kind in ('code', 'assets'):
+        for rp in files[kind]:
+            place.setdefault(install_relpath(rp).lower(), []).append((kind, rp))
+            owners.setdefault(rp, src)
+    changed = 0
+    for fsrc, parent, fmap in layers:
+        for rp, meta in fmap.items():
+            low = install_relpath(rp).lower()
+            nm = {'sha256': meta['sha256'], 'size': meta.get('size')}
+            if meta.get('mtime') is not None:
+                nm['mtime'] = meta['mtime']
+            cur = place.get(low)
+            if not cur:
+                kind = 'assets' if meta.get('kind') in ('asset', 'assets') else 'code'
+                files[kind][rp] = nm
+                place[low] = [(kind, rp)]
+                owners[rp] = fsrc
+                changed += 1
+                continue
+            # копию своего родителя перекрываем всегда; иначе исправление не старше
+            # самой новой из лежащих на этом месте копий
+            own = any(owners.get(crp) == parent for _k, crp in cur)
+            dates = [files[k][crp].get('mtime') for k, crp in cur]
+            newest = max((d for d in dates if d is not None), default=None)
+            if not own and not fix_overrides(parent, meta.get('mtime'), owners.get(cur[0][1]),
+                                             newest):
+                continue
+            for kind, crp in cur:
+                owners[crp] = fsrc
+                if files[kind][crp].get('sha256') != meta['sha256']:
+                    files[kind][crp] = nm
+                    changed += 1
+    if not changed:
+        return desc, owners
+    out = dict(desc)
+    out['files'] = files
+    out['version'] = _fileset_version(files)
+    return out, owners
 
 
 def plan_actionable_sha(theirs, base, disk, force_rels=None):
