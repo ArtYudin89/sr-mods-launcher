@@ -2554,6 +2554,115 @@ finally:
     _g26.cleanup()
     shutil.rmtree(_tmp26, ignore_errors=True)
 
+# ═══════════════════════════════════════════════
+#  ГРУППА 27: мод — папка с ModuleInfo.txt (подпапки мода не отрываются)
+# ═══════════════════════════════════════════════
+print('\n=== ГРУППА 27: подпапки мода — его же (один мод из пака, версия, «убрать») ===')
+
+# mod_key режет путь только на DATA/CFG, и подпапки Native (DLL SolUtilities), Matrix
+# (PBEngine), Music (MusicRevolt) считались отдельными «модами»: мод из пака ставился без
+# них, выбранная версия на них не действовала, «убрать из сборки» их не убирало.
+_SU_MI, _SU_CFG, _SU_DLL, _SZ = b'su-mi', b'su-cfg', b'su-dll', b'sz-mi'
+_MR_MI, _MR_OGG = b'mr-mi', b'mr-ogg'
+_PB_MI, _PB_MAT_A, _PB_MAT_B, _UFP_MI, _UFP_SRC = (b'pb-mi', b'pb-matrix-base',
+                                                     b'pb-matrix-other', b'ufp-mi', b'ufp-src')
+_B27 = {_sha(b): b for b in (_SU_MI, _SU_CFG, _SU_DLL, _SZ, _MR_MI, _MR_OGG, _PB_MI,
+                             _PB_MAT_A, _PB_MAT_B, _UFP_MI, _UFP_SRC)}
+_M27 = {
+    'mods/shared/solar/code.manifest.json': _man26({
+        'Mods/Solar/SolUtilities/ModuleInfo.txt': _SU_MI,
+        'Mods/Solar/SolUtilities/CFG/Main.dat': _SU_CFG,
+        'Mods/Solar/SolMapZoom/ModuleInfo.txt': _SZ}),
+    'mods/shared/solar/assets.manifest.json': _man26({
+        'Mods/Solar/SolUtilities/Native/SolEngine.XenoPlugin.dll': _SU_DLL}),
+    'mods/redux/community_mods/code.manifest.json': _man26({
+        'Mods/OtherMods/MusicRevolt/ModuleInfo.txt': _MR_MI}),
+    'mods/redux/community_mods/assets.manifest.json': _man26({
+        'Mods/OtherMods/MusicRevolt/Music/Fly/a.ogg': _MR_OGG}),
+    'mods/redux/redux_base_installer/code.manifest.json': _man26({
+        'Mods/PlanetaryBattles/PBEngine/ModuleInfo.txt': _PB_MI,
+        'Mods/Tweaks/UFP/ModuleInfo.txt': _UFP_MI}),
+    'mods/redux/redux_base_installer/assets.manifest.json': _man26({
+        'Mods/PlanetaryBattles/PBEngine/Matrix/a.dds': _PB_MAT_A}),
+    'mods/redux/pb_other/code.manifest.json': _man26({
+        'Mods/PlanetaryBattles/PBEngine/ModuleInfo.txt': _PB_MI}),
+    'mods/redux/pb_other/assets.manifest.json': _man26({
+        'Mods/PlanetaryBattles/PBEngine/Matrix/a.dds': _PB_MAT_B}),
+    # пак исправлений без своего ModuleInfo: его файл — мода из основного пака
+    'mods/redux/redux_fixes/code.manifest.json': _man26({
+        'Mods/Tweaks/UFP/Source/x.txt': _UFP_SRC}),
+}
+_IDX27 = {'blobs': {s: {'chunk': 'c27'} for s in _B27},
+          'chunks': {'c27': {'url': 'http://fake/c27', 'store': 'hf'}}}
+
+
+def _rfb27(repo, path, token, should_cancel=None, branch=None):
+    if path == 'state/asset_index.json':
+        return json.dumps(_IDX27).encode()
+    if path in _M27:
+        return json.dumps(_M27[path]).encode()
+    if path.endswith('.manifest.json'):
+        return json.dumps(_EMPTY_MAN).encode()
+    import requests
+    raise requests.HTTPError(f'404 {path}')
+
+
+def _dl27(url, token, dest, progress_cb=None, should_cancel=None, byte_cb=None):
+    with _zip.ZipFile(dest, 'w') as z:
+        for s, b in _B27.items():
+            z.writestr(s, b)
+
+
+_w27 = Path(tempfile.mkdtemp(prefix='g27_'))
+try:
+    with patch.object(core, 'repo_file_bytes', side_effect=_rfb27), \
+            patch.object(core, 'download_url', side_effect=_dl27):
+        print('\n--- T105: один мод из пака — SolUtilities вместе с Native (DLL) ---')
+        _m105 = _w27 / 'g105' / 'Mods'; _m105.mkdir(parents=True)
+        core.reconstruct_unit('repo', 'shared', 'solar', _m105, 'tok', tmp_dir=_w27 / 't105',
+                              log=lambda *_: None, mod='Solar/SolUtilities')
+        check('T105: DLL из Native на месте', _SU_DLL,
+              (_m105 / 'Solar' / 'SolUtilities' / 'Native' / 'SolEngine.XenoPlugin.dll')
+              .read_bytes())
+        check('T105: CFG мода на месте', _SU_CFG,
+              (_m105 / 'Solar' / 'SolUtilities' / 'CFG' / 'Main.dat').read_bytes())
+        check_false('T105: чужой мод пака не поставлен', (_m105 / 'Solar' / 'SolMapZoom').exists())
+
+        print('\n--- T106: список модов пака — без «модов»-подпапок ---')
+        check('T106: только моды с ModuleInfo', ['Solar/SolMapZoom', 'Solar/SolUtilities'],
+              core.list_unit_mods('repo', 'shared', 'solar', 'tok'))
+
+        print('\n--- T107: «убрать из сборки» убирает мод вместе с подпапкой Music ---')
+        _m107 = _w27 / 'g107' / 'Mods'; _m107.mkdir(parents=True)
+        core.reconstruct_multi('repo', [{'camp': 'redux', 'unit': 'community_mods',
+                                         'tier': 'mod'}], _m107, 'tok', tmp_dir=_w27 / 't107',
+                               log=lambda *_: None, skip_mods={'OtherMods/MusicRevolt'})
+        check_false('T107: музыка убранного мода не ставится',
+                    (_m107 / 'OtherMods' / 'MusicRevolt' / 'Music').exists())
+
+        print('\n--- T108: выбранная версия мода действует и на его Matrix ---')
+        _m108 = _w27 / 'g108' / 'Mods'; _m108.mkdir(parents=True)
+        core.reconstruct_multi(
+            'repo', [{'camp': 'redux', 'unit': 'redux_base_installer', 'tier': 'base'},
+                     {'camp': 'redux', 'unit': 'pb_other', 'tier': 'mod'}],
+            _m108, 'tok', tmp_dir=_w27 / 't108', log=lambda *_: None,
+            mod_sources={'PlanetaryBattles/PBEngine': {'redux/redux_base_installer'}})
+        check('T108: Matrix — из выбранного пака, а не из того, что идёт позже', _PB_MAT_A,
+              (_m108 / 'PlanetaryBattles' / 'PBEngine' / 'Matrix' / 'a.dds').read_bytes())
+
+        print('\n--- T109: файл пака исправлений без своего ModuleInfo — мода основного пака ---')
+        _m109 = _w27 / 'g109' / 'Mods'; _m109.mkdir(parents=True)
+        core.reconstruct_multi(
+            'repo', [{'camp': 'redux', 'unit': 'redux_base_installer', 'tier': 'base'},
+                     {'camp': 'redux', 'unit': 'redux_fixes', 'tier': 'fix',
+                      'fix_parent': 'redux_base_installer'}],
+            _m109, 'tok', tmp_dir=_w27 / 't109', log=lambda *_: None,
+            skip_mods={'Tweaks/UFP'})
+        check_false('T109: убранный мод не получает и файлы исправлений',
+                    (_m109 / 'Tweaks' / 'UFP' / 'Source' / 'x.txt').exists())
+finally:
+    shutil.rmtree(_w27, ignore_errors=True)
+
 #  Итог
 # ═══════════════════════════════════════════════
 print(f'\n{"="*50}')

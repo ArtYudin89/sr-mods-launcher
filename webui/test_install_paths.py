@@ -72,6 +72,25 @@ check('загрузчик — файлы игры пака, не мод', '_base
 check('цель загрузчика — папка игры', MODS.parent / 'XenoNative' / 'Plugins' / 'x.ini',
       core.install_target('XenoNative/Plugins/x.ini', MODS))
 
+# ── Мод — папка с ModuleInfo.txt: подпапки мода (не только DATA/CFG) — его же ─────
+_mk = core.mod_keyer(['Mods/Solar/SolUtilities/ModuleInfo.txt',
+                      'Mods/Solar/SolUtilities/Native/SolEngine.XenoPlugin.dll',
+                      'X_unpacked/Mods/PB/PBEngine/ModuleInfo.txt',
+                      'Mods/A/B/ModuleInfo.txt', 'Mods/A/B/C/ModuleInfo.txt',
+                      'Rangers.exe'])
+check('Native с DLL — часть SolUtilities', 'Solar/SolUtilities',
+      _mk('Mods/Solar/SolUtilities/Native/SolEngine.XenoPlugin.dll'))
+check('DATA мода — как раньше', 'Solar/SolUtilities',
+      _mk('Mods/Solar/SolUtilities/DATA/x.gi'))
+check('подпапка под DATA в глубине — тоже мод', 'PB/PBEngine',
+      _mk('Mods/PB/PBEngine/Matrix/Textures/Billboard/a.dds'))
+check('вложенный мод со своим ModuleInfo — отдельный', 'A/B/C', _mk('Mods/A/B/C/x.dat'))
+check('а соседняя подпапка внешнего мода — внешний', 'A/B', _mk('Mods/A/B/Sounds/s.ogg'))
+check('файлы игры — как раньше', '_base', _mk('Rangers.exe'))
+check('мод без ModuleInfo в описи — прежнее правило', 'Other/X/Music',
+      _mk('Mods/Other/X/Music/a.ogg'))
+check('опись без ModuleInfo — сам mod_key', core.mod_key, core.mod_keyer(['Mods/A/f.dat']))
+
 # ── Русские имена не задеты ───────────────────────────────────────────────────
 check('кириллица в пути мода', ('mods', 'Мод/Файл.txt'),
       core.install_route('Mods/Мод/Файл.txt'))

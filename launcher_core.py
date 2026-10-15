@@ -105,10 +105,11 @@ class ModProgress:
     Счёт ведётся по сборкам: в один набор попадают моды из разных сборок, и общий
     счётчик скрыл бы, что из «Original» приехало 10 модов, а не 120."""
 
-    def __init__(self, log, vlog=None, verb='установлено'):
+    def __init__(self, log, vlog=None, verb='установлено', key=None):
         self.log = log
         self.vlog = _vlogger(log, vlog)
         self.verb = verb
+        self._key = key or mod_key   # relpath -> мод (тот же, что строил план, см. mod_keyer)
         self._camp = {}        # mod_key -> сборка
         self._files = {}       # mod_key -> файлов всего
         self._left = {}        # mod_key -> файлов ещё не записано
@@ -131,7 +132,7 @@ class ModProgress:
 
     def file_written(self, relpath):
         """Записан очередной файл: когда у мода не остаётся недостающих — он готов."""
-        mk = mod_key(relpath)
+        mk = self._key(relpath)
         left = self._left.get(mk)
         if not left:                       # мод не отслеживается или уже готов
             return
@@ -612,6 +613,35 @@ def mod_key(relpath):
     return '/'.join(key) if key else '_base'
 
 
+def mod_keyer(relpaths):
+    """relpath -> мод с учётом корней модов. Мод — папка с ModuleInfo.txt (так его видит
+    каталог агрегатора), а mod_key режет путь только на DATA/CFG: файлы в прочих
+    подпапках мода (Native с DLL у SolUtilities, Matrix у PBEngine, Music у MusicRevolt)
+    он считал отдельными «модами». Тогда установка одного мода из пака, выбранная версия
+    мода и «убрать из сборки» отрывали эти файлы от их мода. Корни — по ModuleInfo.txt
+    среди relpaths; файл вне всех корней (или опись без ModuleInfo) — прежний mod_key."""
+    roots = {}
+    for rp in relpaths:
+        if rp.replace('\\', '/').rsplit('/', 1)[-1].lower() == 'moduleinfo.txt':
+            mk = mod_key(rp)
+            if mk != BASE_MOD:
+                roots.setdefault(mk.lower(), mk)
+    if not roots:
+        return mod_key
+
+    def mod_of(relpath):
+        mk = mod_key(relpath)
+        if mk == BASE_MOD:
+            return mk
+        parts = mk.split('/')
+        for n in range(len(parts), 0, -1):      # ближайший корень вверх по пути
+            hit = roots.get('/'.join(parts[:n]).lower())
+            if hit:
+                return hit
+        return mk
+    return mod_of
+
+
 def _load_manifest(repo, path, token):
     """Манифест {files:{relpath:{sha256,size}}} из репо; {} если файла нет."""
     try:
@@ -623,11 +653,11 @@ def _load_manifest(repo, path, token):
 def list_unit_mods(repo, camp, unit, token):
     """Список mod_key, доступных в юните (по code+asset манифестам), для выбора в GUI.
     '_base' (общие файлы игры) идёт первым, если есть."""
-    mods = set()
+    rels = []
     for kind in ('code', 'assets'):
-        man = _load_manifest(repo, f'mods/{camp}/{unit}/{kind}.manifest.json', token)
-        for relpath in man:
-            mods.add(mod_key(relpath))
+        rels += list(_load_manifest(repo, f'mods/{camp}/{unit}/{kind}.manifest.json', token))
+    mod_of = mod_keyer(rels)
+    mods = {mod_of(relpath) for relpath in rels}
     base = ['_base'] if '_base' in mods else []
     return base + sorted(m for m in mods if m != '_base')
 
@@ -669,10 +699,11 @@ def reconstruct_unit(repo, camp, unit, mods_dir, token, progress_cb=None,
 
     # Эффективный набор файлов пака: основной + наложение форков (переопределение
     # существующих путей и добавление файлов форка к модам этого пака).
+    mod_of = mod_keyer(list(code_man) + list(asset_man))
     eff = {}    # relpath -> (sha256, kind)
     for kind, man in (('code', code_man), ('asset', asset_man)):
         for relpath, meta in man.items():
-            if mod is not None and mod_key(relpath) != mod:
+            if mod is not None and mod_of(relpath) != mod:
                 continue
             eff[relpath] = (meta['sha256'], kind)
     if fork_files:
@@ -687,7 +718,7 @@ def reconstruct_unit(repo, camp, unit, mods_dir, token, progress_cb=None,
     per_mod = {}                 # mod_key -> [файлов всего, файлов к скачиванию]
     for relpath, (sh, kind) in eff.items():
         if install_route(relpath)[0] is not None:
-            row = per_mod.setdefault(mod_key(relpath), [0, 0])
+            row = per_mod.setdefault(mod_of(relpath), [0, 0])
             row[0] += 1
         else:
             row = None           # мусор инсталлятора — на диск не ляжет, не считаем
@@ -724,7 +755,7 @@ def reconstruct_unit(repo, camp, unit, mods_dir, token, progress_cb=None,
              f'лежат в {len(need)} архивах-частях.')
     if dry_run:
         return stats
-    prog = ModProgress(log, vlog)
+    prog = ModProgress(log, vlog, key=mod_of)
     prog.plan({mk: (camp, tot, nd) for mk, (tot, nd) in per_mod.items()
                if mk != BASE_MOD})
     base_row = per_mod.get(BASE_MOD)
@@ -833,24 +864,32 @@ def reconstruct_multi(repo, units, mods_dir, token, log=print, tmp_dir=None,
     # Манифесты читаем ДО слияния: нужно знать, какие юниты вообще несут мод, чтобы
     # не «запинить» его в юнит, которого нет в этом наборе (иначе мод молча выпал бы
     # из установки вместо того, чтобы приехать хоть откуда-то).
-    loaded = []         # [(u, {relpath: (sha, kind)})]
-    provided = {}       # mod_key -> {'camp/unit', …}
-    skip = set(skip_mods or ())
-    skipped_mods = set()
+    raw = []            # [(u, code_man, asset_man)]
     for u in units:
         _check_cancel(should_cancel)
         cu, unit = u['camp'], u['unit']
-        umod = u.get('mod')                    # фильтр на один мод (mod_key), None = весь юнит
         code_man = _load_manifest(repo, f'mods/{cu}/{unit}/code.manifest.json', token)
         asset_man = _load_manifest(repo, f'mods/{cu}/{unit}/assets.manifest.json', token)
         if not code_man and not asset_man:
             log(f'⚠ пак {unit} ({camp_title(cu)}): на сервере нет списка файлов — пропускаю')
             continue
+        raw.append((u, code_man, asset_man))
+    # корни модов — по ModuleInfo.txt всех паков набора: у пака исправлений своего
+    # ModuleInfo обычно нет, а его файлы принадлежат моду из основного пака
+    mod_of = mod_keyer([rp for _u, cm, am in raw for rp in list(cm) + list(am)])
+
+    loaded = []         # [(u, {relpath: (sha, kind)})]
+    provided = {}       # мод -> {'camp/unit', …}
+    skip = set(skip_mods or ())
+    skipped_mods = set()
+    for u, code_man, asset_man in raw:
+        cu, unit = u['camp'], u['unit']
+        umod = u.get('mod')                    # фильтр на один мод, None = весь юнит
         umap = {}       # relpath -> (sha, kind)
         umtime = {}     # relpath -> dev-дата из описи (copy_rank, fix_overrides)
         for kind, man in (('code', code_man), ('asset', asset_man)):
             for relpath, meta in man.items():
-                mk = mod_key(relpath)
+                mk = mod_of(relpath)
                 if umod is not None and mk != umod:
                     continue
                 if mk in skip:                 # мод убран игроком из этой сборки
@@ -884,7 +923,7 @@ def reconstruct_multi(repo, units, mods_dir, token, log=print, tmp_dir=None,
         if pins:
             keep = {}
             for relpath, val in umap.items():
-                allowed = pins.get(mod_key(relpath))
+                allowed = pins.get(mod_of(relpath))
                 if allowed is not None and label not in allowed:
                     pinned_skipped += 1        # версия этого мода выбрана в другом паке
                     continue
@@ -948,7 +987,7 @@ def reconstruct_multi(repo, units, mods_dir, token, log=print, tmp_dir=None,
         _check_cancel(should_cancel)
         sh, kind, relpath = info['sha'], info['kind'], info['relpath']
         # счёт по модам — единицы, понятные читателю лога (см. ModProgress)
-        row = per_mod.setdefault(mod_key(relpath), [info.get('camp'), 0, 0])
+        row = per_mod.setdefault(mod_of(relpath), [info.get('camp'), 0, 0])
         row[1] += 1
         # сверяем по фактическому пути победителя (relpath)
         wr, real_rel = install_route(relpath)
@@ -982,7 +1021,7 @@ def reconstruct_multi(repo, units, mods_dir, token, log=print, tmp_dir=None,
              f'того пака, который в сборке идёт позже (он главнее).')
     if dry_run:
         return stats
-    prog = ModProgress(log, vlog)
+    prog = ModProgress(log, vlog, key=mod_of)
     prog.plan({mk: (camp, tot, nd) for mk, (camp, tot, nd) in per_mod.items()
                if mk != BASE_MOD})
     base_row = per_mod.get(BASE_MOD)
@@ -1022,7 +1061,7 @@ def reconstruct_multi(repo, units, mods_dir, token, log=print, tmp_dir=None,
             # значит «не ставить», а не «удалить установленное».
             old = load_install_snapshot(mods_dir, prune_snap_id, snap_dir) or {}
             for rp, sha in (old.get('files') or {}).items():
-                if mod_key(rp) in skip:
+                if mod_of(rp) in skip:
                     pseudo['files']['code'].setdefault(rp, {'sha256': sha})
         prune_orphans_by_snapshot(mods_dir, pseudo, snap_dir, log)
         save_snapshot_from_desc(mods_dir, pseudo, snap_dir)
