@@ -1095,6 +1095,74 @@ try:
     check_true('T31b: merge_silent emitted (тост-итог)', 'merge_silent' in names2)
     check('T31b: файл обновлён до v2 без окна', NUKE_V2, nuke_path.read_bytes())
 
+    # T31c–f: тихий режим не врёт об успехе (аудит 15.10.2026, находка L5): при сбое сети,
+    # отмене или пропущенном файле — ни «обновлён», ни «Готово», а «⬆» остаётся
+    def _silent_case(apply_fx):
+        nuke_path.write_bytes(NUKE_V1)
+        a._updates = {'ShusRangers/ShuNukes': {'camp': 'redux', 'n': 1}}
+        ev = []
+        a._emit = lambda e, pl=None: ev.append((e, pl))
+        ps = [patch.object(core, 'load_catalog', return_value=dict(FAKE_CATALOG)),
+              patch.object(core, 'detect_installed_base', return_value=None),
+              patch.object(core, 'descriptor_for', return_value=V2_DESC),
+              patch.object(core, 'load_install_snapshot', return_value=None),
+              patch.object(core, 'plan_update_merge', return_value=fake_plan_e2e),
+              patch.object(core, 'load_chunk_index', return_value=FAKE_IDX),
+              patch.object(core, 'apply_update_plan', side_effect=apply_fx)]
+        for p in ps:
+            p.start()
+        try:
+            a.start_merge(['d:ShusRangers/ShuNukes'])
+            wait_idle(a, timeout=8)
+        finally:
+            for p in ps:
+                p.stop()
+        ends = [pl.get('status') for e, pl in ev if e == 'op_end']
+        return ([e for e, _ in ev], ends[-1] if ends else None,
+                'ShusRangers/ShuNukes' in a._updates)
+
+    def _apply_net_fail(*x, **k):
+        import requests
+        raise requests.ConnectionError('связь с сервером раздачи оборвалась')
+
+    def _apply_cancel(*x, **k):
+        raise core.OperationCancelled()
+
+    def _apply_skipped(*x, **k):
+        return {'written': 0, 'merged': 0, 'kept': 0, 'deleted': 0, 'sidecar': 0,
+                'conflict': 0, 'skipped': 1}
+
+    def _apply_ok(desc, plan, decisions, mods_dir, index, **kw):
+        (Path(mods_dir) / 'ShusRangers' / 'ShuNukes' / 'ModuleInfo.txt').write_bytes(NUKE_V2)
+        return {'written': 1, 'merged': 0, 'kept': 0, 'deleted': 0, 'sidecar': 0,
+                'conflict': 0, 'skipped': 0}
+
+    print('\n--- T31c: тихий режим, сеть оборвалась → «Ошибка», «⬆» остаётся ---')
+    n3, end3, up3 = _silent_case(_apply_net_fail)
+    check_false('T31c: тоста «обновлён» нет', 'merge_silent' in n3)
+    check('T31c: итог — «Ошибка»', 'Ошибка', end3)
+    check_true('T31c: отметка «⬆ обновление» осталась', up3)
+    check('T31c: файл прежний', NUKE_V1, nuke_path.read_bytes())
+
+    print('\n--- T31d: тихий режим, игрок нажал «Отмена» → «Отменено» ---')
+    n4, end4, up4 = _silent_case(_apply_cancel)
+    check_false('T31d: тоста «обновлён» нет', 'merge_silent' in n4)
+    check('T31d: итог — «Отменено»', 'Отменено', end4)
+    check_true('T31d: отметка «⬆ обновление» осталась', up4)
+
+    print('\n--- T31e: тихий режим, файла нет на сервере раздачи → не «обновлён» ---')
+    n5, end5, up5 = _silent_case(_apply_skipped)
+    check_false('T31e: тоста «обновлён» нет', 'merge_silent' in n5)
+    check('T31e: итог — «Ошибка»', 'Ошибка', end5)
+    check_true('T31e: отметка «⬆ обновление» осталась', up5)
+
+    print('\n--- T31f: контроль — удачное тихое обновление по-прежнему «Готово» ---')
+    n6, end6, up6 = _silent_case(_apply_ok)
+    check_true('T31f: тост «обновлён» есть', 'merge_silent' in n6)
+    check('T31f: итог — «Готово»', 'Готово', end6)
+    check_false('T31f: отметка «⬆ обновление» снята', up6)
+    check('T31f: файл обновлён', NUKE_V2, nuke_path.read_bytes())
+
     print('\n--- T32: E2E удалить мод с диска → mods_info = 0 → reinstall → mods_info > 0 ---')
     g2 = TempGame()
     g2.put_mod('ShusRangers/ShuNukes', NUKE_V1)

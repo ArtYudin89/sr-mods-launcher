@@ -4134,6 +4134,8 @@ class Api:
         self._silent_updates = []          # тихо применённые моды (для итогового тоста)
         self._merge_total = len(targets)   # для итоговой строки журнала
         self._merge_applied = {}           # сборка -> [обновлённые моды]
+        self._merge_failed = []            # моды, которые не обновились (или не до конца)
+        self._merge_cancelled = False      # игрок нажал «Отмена»
         self._begin_op()
         self._emit('op_begin', {'name': 'Обновление'})
         self.log(f'Обновляю моды: выбрано {len(targets)} '
@@ -4149,11 +4151,24 @@ class Api:
     def _merge_next(self):
         if self.should_cancel():
             self._merge_queue = []
+            self._merge_cancelled = True
         if not getattr(self, '_merge_queue', None):
             self._log_merge_summary()      # итог в журнале: сколько модов какой сборки
             self._emit_silent_summary()    # тост-итог по тихо применённым модам
+            # итог серии — честный: до 0.28.0 здесь всегда было «Готово», даже если
+            # обновление упало или было отменено (аудит 15.10.2026, находка L5)
+            failed = getattr(self, '_merge_failed', None) or []
+            if getattr(self, '_merge_cancelled', False):
+                status = 'Отменено'
+            elif failed:
+                status = 'Ошибка'
+                self.log(f'Не обновились: {", ".join(failed)} — причина выше в журнале; '
+                         f'отметка «⬆ обновление» у них осталась.')
+            else:
+                status = 'Готово'
+            self._merge_failed, self._merge_cancelled = [], False
             self.busy = False
-            self._emit('op_end', {'status': 'Готово'})
+            self._emit('op_end', {'status': status})
             self._emit('tree_dirty')
             return
         kind, ref = self._merge_queue.pop(0)
@@ -4194,15 +4209,12 @@ class Api:
         # действия автоматические и безопасные, спрашивать нечего. Окно всплывает только
         # при конфликтах, либо если игрок включил «всегда показывать план».
         if s.get('conflicts', 0) == 0 and not self.config.get('always_show_plan', False):
-            if not hasattr(self, '_silent_updates'):
-                self._silent_updates = []
-            self._silent_updates.append({'id': plan.get('id'), 'summary': s,
-                                         'version_new': plan.get('version_new')})
             pm = self._pending_merge
             self._pending_merge = None
             self.log(f'{plan.get("id")}: спорных файлов нет — обновляю сразу, '
                      f'ничего не спрашивая.')
-            threading.Thread(target=self._apply_merge_worker, args=(pm, {}),
+            # в итоговый тост «обновлён» мод попадёт только после удачного применения
+            threading.Thread(target=self._apply_merge_worker, args=(pm, {}, True),
                              daemon=True).start()
             return
         self._emit('merge_plan', self._serialize_plan(plan))
@@ -4319,9 +4331,12 @@ class Api:
         try:
             res = self._resolve_profile_update(i)
         except core.OperationCancelled:
-            self.log('Подготовка обновления отменена.'); self._merge_next(); return
+            self.log('Подготовка обновления отменена.')
+            self._merge_cancelled = True
+            self._merge_next(); return
         except Exception as e:
             self.log(f'ОШИБКА при подготовке обновления: {e}')
+            self._merge_failed_add(m.get('id') or m.get('name'))
             self._merge_next(); return
         if res is None:
             self._merge_next(); return
@@ -4485,9 +4500,12 @@ class Api:
         try:
             res = self._resolve_disk_update(mid)
         except core.OperationCancelled:
-            self.log('Подготовка обновления отменена.'); self._merge_next(); return
+            self.log('Подготовка обновления отменена.')
+            self._merge_cancelled = True
+            self._merge_next(); return
         except Exception as e:
             self.log(f'ОШИБКА при подготовке обновления: {e}')
+            self._merge_failed_add(mid)
             self._merge_next(); return
         if res is None:
             self._merge_next(); return
@@ -4719,10 +4737,20 @@ class Api:
                  if full or stats.get(key)]
         return '; '.join(parts) if parts else 'менять было нечего'
 
-    def _apply_merge_worker(self, pm, decisions):
+    def _merge_failed_add(self, mid):
+        if getattr(self, '_merge_failed', None) is None:
+            self._merge_failed = []
+        self._merge_failed.append(mid or '?')
+
+    def _apply_merge_worker(self, pm, decisions, silent=False):
+        """Применить план обновления одного мода. Мод считается обновлённым (снимается
+        «⬆», в тихом режиме — тост «обновлён») только если применение прошло без ошибки и
+        ни один файл не пропущен; иначе он остаётся в обновлениях, а итог серии — «Ошибка»
+        или «Отменено» (_merge_next)."""
         mods_dir = self._mods_dir()
         desc, plan, index, target = pm['desc'], pm['plan'], pm['index'], pm['target']
-        self._pack_ctx = f'обновление: {(desc or {}).get("id", "")}'
+        mid_now = (desc or {}).get('id') or plan.get('id') or ''
+        self._pack_ctx = f'обновление: {mid_now}'
         self._dl_bytes = 0
         try:
             stats = core.apply_update_plan(desc, plan, decisions, mods_dir, index,
@@ -4732,27 +4760,47 @@ class Api:
                                            byte_cb=self._byte_progress,
                                            part_cb=self._part_progress,
                                            chunk_cb=self._chunk_progress)
-            mid_now = (desc or {}).get('id') or ''
-            self.log(f'✔ {mid_now}: {self._stats_phrase(stats)}')
-            self.vlog(f'{mid_now} — по файлам: {self._stats_phrase(stats, full=True)}.')
-            # мод обновлён → снять пометку «⬆ обновление» (строка станет «✅ установлен»)
-            upd_mid = target[1] if target[0] == 'disk' else (desc.get('id') if desc else None)
-            if upd_mid:
-                camp = (self._updates.get(upd_mid) or {}).get('camp')
-                if getattr(self, '_merge_applied', None) is None:
-                    self._merge_applied = {}
-                self._merge_applied.setdefault(camp, []).append(upd_mid)
-                self._updates.pop(upd_mid, None)
-            if target[0] == 'profile':
-                m = self.profile['mods'][target[1]]
-                m['installed_version'] = plan.get('version_new')
-                m['update_available'] = False
-                self._save_profile()
-            self._emit('tree_dirty')
         except core.OperationCancelled:
             self.log('Применение отменено (часть файлов могла записаться).')
+            self._merge_cancelled = True
+            self._merge_next()
+            return
         except Exception as e:
             self.log(f'ОШИБКА применения: {e}')
+            self._merge_failed_add(mid_now)
+            self._merge_next()
+            return
+        self.vlog(f'{mid_now} — по файлам: {self._stats_phrase(stats, full=True)}.')
+        if isinstance(stats, dict) and stats.get('skipped'):
+            # часть файлов не записана (их нет на сервере раздачи): мод НЕ обновлён — пусть
+            # «⬆» остаётся и версия в профиле прежняя, иначе пометка снимется до
+            # следующей проверки, а файлы так и останутся старыми
+            self.log(f'⚠ {mid_now}: обновлён не полностью — {self._stats_phrase(stats)}. '
+                     f'Отметка «⬆ обновление» остаётся: повторите обновление позже.')
+            self._merge_failed_add(mid_now)
+            self._emit('tree_dirty')
+            self._merge_next()
+            return
+        self.log(f'✔ {mid_now}: {self._stats_phrase(stats)}')
+        # мод обновлён → снять пометку «⬆ обновление» (строка станет «✅ установлен»)
+        upd_mid = target[1] if target[0] == 'disk' else (desc.get('id') if desc else None)
+        if upd_mid:
+            camp = (self._updates.get(upd_mid) or {}).get('camp')
+            if getattr(self, '_merge_applied', None) is None:
+                self._merge_applied = {}
+            self._merge_applied.setdefault(camp, []).append(upd_mid)
+            self._updates.pop(upd_mid, None)
+        if target[0] == 'profile':
+            m = self.profile['mods'][target[1]]
+            m['installed_version'] = plan.get('version_new')
+            m['update_available'] = False
+            self._save_profile()
+        if silent:
+            if getattr(self, '_silent_updates', None) is None:
+                self._silent_updates = []
+            self._silent_updates.append({'id': plan.get('id'), 'summary': plan['summary'],
+                                         'version_new': plan.get('version_new')})
+        self._emit('tree_dirty')
         self._merge_next()
 
     # ───────── индексация дисковых модов ─────────
