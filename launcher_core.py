@@ -440,12 +440,15 @@ def _parallel_fetch_extract(need, mods_dir, tmp, resolver, log,
 # 3) мусор инсталлятора (readme, .iss, .exe-установщик, Inno-плейсхолдеры `{userdocs}`).
 # А ещё бывают staging-обёртки `<X>_unpacked/...` (вложенный инсталлятор) — их срезаем.
 # Имена корня игры — небольшой фиксированный набор; всё прочее в папке мода — это мод.
-ROOT_DIRS = {'cfg', 'data', 'matrix', 'soundtrack', 'help', 'man', 'build', 'dist'}
+# xenonative / xenonative.ini — загрузчик нативных плагинов XenoNative (Xenomorphchyma):
+# лежит рядом с Rangers.exe вместе с dsound.dll и XenoCore.dll (их ведёт ROOT_EXTS).
+ROOT_DIRS = {'cfg', 'data', 'matrix', 'soundtrack', 'help', 'man', 'build', 'dist',
+             'xenonative'}
 ROOT_FILES = {
     'rangers.exe', 'cassandra.exe', 'manualrus.exe', 'matrixgame.dll',
     'build version.txt', 'cachedata.txt', 'cfg.txt', 'cfg.dat', 'lang.txt',
     'main.txt', 'changelog_rus.txt', 'generatemergedcfg.bat',
-    'install.txt', 'install_russian.txt', 'readme_ru_ru.txt',
+    'install.txt', 'install_russian.txt', 'readme_ru_ru.txt', 'xenonative.ini',
 }
 ROOT_EXTS = {'.dll'}        # libogg-0.dll, zlib.dll, steam_api.dll … — в корень игры
 
@@ -1593,6 +1596,8 @@ def camp_packs(packs):
             'shared': p['camp'] == 'shared',
             # пак патчит файлы игры вне Mods (Rangers.exe/CFG/matrix) — пометка в UI
             'game_root': bool(p.get('touches_game_root')),
+            # пак по выбору: в установку сборки не входит (см. Api._camp_part_packs)
+            'addon': bool(p.get('addon')),
         }
         (shared if entry['shared'] else out.setdefault(p['camp'], [])).append(entry)
     for camp in out:

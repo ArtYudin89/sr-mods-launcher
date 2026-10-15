@@ -2419,6 +2419,141 @@ finally:
     g.cleanup()
 
 # ═══════════════════════════════════════════════
+#  ГРУППА 26: пак по выбору со своими файлами игры (Solar)
+# ═══════════════════════════════════════════════
+print('\n=== ГРУППА 26: пак по выбору — его файлы игры поверх сборки ===')
+
+# Solar везёт свой Rangers.exe (под него собраны DLL) и загрузчик XenoNative. Сборка Redux
+# кладёт Rangers.exe из исправлений к движку. Правило: файлы игры пака по выбору лежат
+# поверх сборки — при установке «всё», после переустановки одного движка, при моде пака,
+# поставленном по одному из каталога.
+_EXE_B, _EXE_F, _EXE_S = b'exe-base', b'exe-redux-fixes', b'exe-solar-06-10'
+_DSOUND, _XCORE, _XINI, _XSTAB, _README = b'dsound', b'xenocore', b'[Core]', b'[Stable]', b'rd'
+_MI_SU, _MI_SZ, _MI_BX = b'MI-SolUtilities', b'MI-SolMapZoom', b'MI-BaseX'
+_B26 = {_sha(b): b for b in (_EXE_B, _EXE_F, _EXE_S, _DSOUND, _XCORE, _XINI, _XSTAB,
+                             _README, _MI_SU, _MI_SZ, _MI_BX)}
+_man26 = lambda files: {'files': {r: {'sha256': _sha(b), 'size': len(b)}
+                                  for r, b in files.items()}}
+_M26 = {
+    'mods/redux/redux_base_installer/code.manifest.json':
+        _man26({'Mods/Base/X/ModuleInfo.txt': _MI_BX}),
+    'mods/redux/redux_base_installer/assets.manifest.json': _man26({'Rangers.exe': _EXE_B}),
+    'mods/redux/redux_fixes/assets.manifest.json': _man26({'Rangers.exe': _EXE_F}),
+    'mods/shared/solar/code.manifest.json': _man26({
+        'README_Solar.txt': _README, 'XenoNative.ini': _XINI,
+        'XenoNative/Plugins/XenoStable/XenoStable.ini': _XSTAB,
+        'Mods/Solar/SolUtilities/ModuleInfo.txt': _MI_SU,
+        'Mods/Solar/SolMapZoom/ModuleInfo.txt': _MI_SZ}),
+    'mods/shared/solar/assets.manifest.json': _man26({
+        'Rangers.exe': _EXE_S, 'dsound.dll': _DSOUND, 'XenoCore.dll': _XCORE}),
+}
+_IDX26 = {'blobs': {s: {'chunk': 'c26'} for s in _B26},
+          'chunks': {'c26': {'url': 'http://fake/c26', 'store': 'hf'}}}
+_P26 = {
+    'redux/redux_base_installer': {'camp': 'redux', 'name': 'redux_base_installer',
+                                   'tier': 'base', 'load_order': 10},
+    'redux/redux_fixes': {'camp': 'redux', 'name': 'redux_fixes', 'tier': 'fix',
+                          'load_order': 20, 'fix_parent': 'redux_base_installer'},
+    'shared/solar': {'camp': 'shared', 'name': 'solar', 'tier': 'mod', 'load_order': 20,
+                     'addon': True, 'touches_game_root': True,
+                     'display_name': 'Solar (FC_Fan)'},
+}
+_CAT26 = {'Solar/SolMapZoom': {'name': 'SolMapZoom', 'default_source': 'shared/solar',
+                               'variants': [{'source': 'shared/solar', 'path': 'z.json',
+                                             'depends': ['SolUtilities'], 'conflicts': []}]}}
+
+
+def _rfb26(repo, path, token, should_cancel=None, branch=None):
+    if path == 'state/asset_index.json':
+        return json.dumps(_IDX26).encode()
+    if path in _M26:
+        return json.dumps(_M26[path]).encode()
+    if path.endswith('.manifest.json'):
+        return json.dumps(_EMPTY_MAN).encode()
+    import requests
+    raise requests.HTTPError(f'404 {path}')
+
+
+def _dl26(url, token, dest, progress_cb=None, should_cancel=None, byte_cb=None):
+    with _zip.ZipFile(dest, 'w') as z:
+        for s, b in _B26.items():
+            z.writestr(s, b)
+
+
+_g26 = TempGame()
+_tmp26 = Path(tempfile.mkdtemp(prefix='g26_tmp_'))
+_net26 = [patch.object(core, 'repo_file_bytes', side_effect=_rfb26),
+          patch.object(core, 'download_url', side_effect=_dl26),
+          patch.object(app, 'ROOT', _tmp26)]
+for _p in _net26:
+    _p.start()
+try:
+    a = _g26.fresh_api(base='redux', packs=dict(_P26), catalog=dict(_CAT26))
+    _logs26 = []
+    a.log = _logs26.append
+    _root = _g26.game
+    _camp_base = {'type': 'camp', 'camp': 'redux', 'part': 'base', 'repo': 'test/repo',
+                  'name': 'Redux — движок'}
+    _solar_all = {'type': 'unit', 'camp': 'shared', 'unit': 'solar', 'mod': '',
+                  'repo': 'test/repo', 'name': 'Solar (FC_Fan)'}
+
+    print('\n--- T100: «установить все» — движок Redux + Solar целиком одним проходом ---')
+    a._install_bulk_merged([_camp_base, _solar_all], _g26.mods, '', 'test/repo')
+    check('T100: Rangers.exe — пака Solar, а не исправлений Redux', _EXE_S,
+          (_root / 'Rangers.exe').read_bytes())
+    check('T100: dsound.dll и XenoCore.dll — рядом с Rangers.exe', (_DSOUND, _XCORE),
+          ((_root / 'dsound.dll').read_bytes(), (_root / 'XenoCore.dll').read_bytes()))
+    check('T100: XenoNative.ini — в корне игры', _XINI, (_root / 'XenoNative.ini').read_bytes())
+    check('T100: папка XenoNative — в корне игры', _XSTAB,
+          (_root / 'XenoNative' / 'Plugins' / 'XenoStable' / 'XenoStable.ini').read_bytes())
+    check_false('T100: в Mods папки XenoNative нет', (_g26.mods / 'XenoNative').exists())
+    check_false('T100: readme пака не ставится', (_root / 'README_Solar.txt').exists())
+    check('T100: моды пака — в Mods', _MI_SZ,
+          (_g26.mods / 'Solar' / 'SolMapZoom' / 'ModuleInfo.txt').read_bytes())
+    a._addons_after_install(_g26.mods, '', [_solar_all])
+    check('T100: Solar запомнен как установленный', ['shared/solar'],
+          sorted(a.profile.get('addon_files') or {}))
+
+    print('\n--- T101: переустановка одного движка Redux — exe Solar возвращается ---')
+    a.profile['mods'] = [dict(_camp_base)]
+    _logs26.clear()
+    a._install_worker([0])
+    check('T101: Rangers.exe снова пака Solar', _EXE_S, (_root / 'Rangers.exe').read_bytes())
+    check_true('T101: в журнале сказано, чьи файлы игры легли поверх',
+               any('Файлы игры пака «Solar (FC_Fan)»' in l for l in _logs26))
+    check('T101: очередь после установки пуста', [], a.profile['mods'])
+
+    print('\n--- T102: мод из каталога (не пак целиком) — файлы игры пака приезжают ---')
+    for f in ('Rangers.exe', 'dsound.dll', 'XenoCore.dll', 'XenoNative.ini'):
+        (_root / f).unlink()
+    shutil.rmtree(_root / 'XenoNative')
+    (_root / 'Rangers.exe').write_bytes(_EXE_F)
+    a.profile.pop('addon_files', None)
+    a._addons_after_install(_g26.mods, '', [{'type': 'desc', 'id': 'Solar/SolMapZoom'}],
+                            plan={'mods': {'Solar/SolMapZoom': {'source': 'shared/solar'}}})
+    check('T102: Rangers.exe пака', _EXE_S, (_root / 'Rangers.exe').read_bytes())
+    check_true('T102: загрузчик на месте', (_root / 'dsound.dll').is_file()
+               and (_root / 'XenoNative' / 'Plugins' / 'XenoStable' / 'XenoStable.ini').is_file())
+    check('T102: запомнен', ['shared/solar'], sorted(a.profile.get('addon_files') or {}))
+
+    print('\n--- T103: мод по одному из каталога корень игры не пишет — exe не трогаем ---')
+    _calls = []
+    with patch.object(core, 'reconstruct_unit', side_effect=lambda *x, **k: _calls.append(k)):
+        a._addons_after_install(_g26.mods, '', [{'type': 'desc', 'id': 'Other/Mod'}])
+    check('T103: без лишней сверки файлов игры', 0, len(_calls))
+
+    print('\n--- T104: игрок убрал моды пака — движок ставится как есть, пак забыт ---')
+    shutil.rmtree(_g26.mods / 'Solar')
+    a.profile['mods'] = [dict(_camp_base)]
+    a._install_worker([0])
+    check('T104: Rangers.exe — исправлений Redux', _EXE_F, (_root / 'Rangers.exe').read_bytes())
+    check('T104: пак больше не помнится', None, a.profile.get('addon_files'))
+finally:
+    for _p in _net26:
+        _p.stop()
+    _g26.cleanup()
+    shutil.rmtree(_tmp26, ignore_errors=True)
+
 #  Итог
 # ═══════════════════════════════════════════════
 print(f'\n{"="*50}')

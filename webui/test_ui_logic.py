@@ -728,6 +728,106 @@ check_true('уже стоящие моды сразу зачтены как го
 check_true('вторая сборка считается отдельно',
            any('Original: 0/1 модов установлено' in l for l in _log2))
 
+print('\n=== пак по выбору со своими файлами игры (Solar, addon) ===')
+def packs_addon():
+    pk = packs_full()
+    pk['shared/polaria_backgrounds'] = {'camp': 'shared', 'name': 'polaria_backgrounds',
+                                        'tier': 'assets', 'load_order': 10, 'bytes': 7}
+    pk['shared/solar'] = {'camp': 'shared', 'name': 'solar', 'tier': 'mod', 'load_order': 20,
+                          'bytes': 19, 'addon': True, 'touches_game_root': True,
+                          'display_name': 'Solar (FC_Fan)'}
+    # пак по выбору внутри настоящей сборки: в её установку тоже не входит
+    pk['redux/redux_addon'] = {'camp': 'redux', 'name': 'redux_addon', 'tier': 'mod',
+                               'load_order': 999, 'bytes': 1, 'addon': True}
+    return pk
+
+a = fresh_api('redux'); a._repo = lambda: 'x/y'; a._packs_cache = packs_addon()
+pk = a._packs_cache
+check('пак по выбору ложится поверх исправлений к движку (ранг 4)', 4,
+      a._unit_install_rank(pk['shared/solar'], pk))
+check('и выше фикса базы (3)', True,
+      a._unit_install_rank(pk['shared/solar'], pk) > a._unit_install_rank(pk['redux/redux_fixes'], pk))
+names = lambda part: sorted(p['name'] for p in a._camp_part_packs('redux', pk, part))
+check('«вся сборка» не берёт пак по выбору своей сборки',
+      ['redux_base_installer', 'redux_fixes', 'some_mods', 'some_mods_fix'], names(app.PART_ALL))
+check('«все моды сборки» — тоже', ['some_mods', 'some_mods_fix'], names(app.PART_MODS))
+check('размер «всей сборки» без пака по выбору', 145,
+      a._item_bytes({'type': 'camp', 'camp': 'redux', 'part': app.PART_ALL}))
+r = a.get_camp_choices()
+check('быстрый старт: ни shared, ни паков по выбору', ['universe', 'redux'],
+      [c['camp'] for c in r['camps']])
+cp = core.camp_packs(pk)
+check('пак по выбору виден в списке паков каждой сборки', True,
+      all(any(e['unit'] == 'solar' for e in cp[c]) for c in ('redux', 'universe')))
+check('в списке паков у него пометки «по выбору» и «патчит игру»', (True, True),
+      next((e['addon'], e['game_root']) for e in cp['redux'] if e['unit'] == 'solar'))
+
+# файлы игры пака по выбору — не «вторая база»: движок сборки в профиле остаётся
+a = fresh_api('redux'); a._repo = lambda: 'x/y'; a._packs_cache = packs_addon()
+a.add_mod({'mode': 'src', 'camp': 'redux', 'pack': None, 'part': 'base'})
+r1 = a.add_mod({'mode': 'src', 'camp': 'universe',
+                'pack': {'camp': 'shared', 'unit': 'solar', 'name': 'Solar (FC_Fan)'},
+                'mod': app.BASE_MOD})
+check('файлы игры Solar при движке redux — добавлены', True, bool(r1.get('ok')))
+check('движок профиля по-прежнему redux', 'redux', a._profile_base_camp())
+check('запись движка redux не выкинута', 2, len(a.profile['mods']))
+check('имя записи — файлы игры пака, не «Базовые файлы игры»',
+      'Solar (FC_Fan) — ' + app.ADDON_FILES_LABEL, a.profile['mods'][1]['name'])
+a.add_mod({'mode': 'src', 'camp': 'redux',
+           'pack': {'camp': 'shared', 'unit': 'solar', 'name': 'Solar (FC_Fan)'},
+           'mod': app.BASE_MOD})
+check('повтор файлов игры того же пака не плодит записи', 2, len(a.profile['mods']))
+r2 = a.add_mod({'mode': 'src', 'camp': 'redux',
+                'pack': {'camp': 'redux', 'unit': 'redux_base_installer',
+                         'name': 'База'}, 'mod': app.BASE_MOD})
+check('«Базовые файлы игры» движка добавлены', True, bool(r2.get('ok')))
+check('и не выкинули файлы игры пака по выбору', True,
+      any(m.get('unit') == 'solar' and m.get('mod') == app.BASE_MOD
+          for m in a.profile['mods']))
+# пак по выбору целиком при пустом профиле — подсказка сборки не «shared»
+a = fresh_api('redux'); a._repo = lambda: 'x/y'; a._packs_cache = packs_addon()
+a.add_mod({'mode': 'src', 'camp': 'redux', 'pack': None, 'part': 'mods'})
+a.add_mod({'mode': 'src', 'camp': 'redux',
+           'pack': {'camp': 'shared', 'unit': 'solar', 'name': 'Solar (FC_Fan)'}, 'mod': ''})
+check('подсказка сборки набора не сбита паком shared', 'redux', a._profile_camp_hint())
+
+# какие записи очереди тянут файлы игры пака и какие могут переписать корень игры
+a = fresh_api('redux'); a._repo = lambda: 'x/y'; a._packs_cache = packs_addon()
+a._catalog_cache = dict(a._catalog_cache)
+a._catalog_cache['Solar/SolMapZoom'] = {'name': 'SolMapZoom', 'default_source': 'shared/solar',
+                                        'variants': [{'source': 'shared/solar'}]}
+ak = lambda m: a._addon_key_of(m, pk)
+check('пак целиком → его ключ', 'shared/solar',
+      ak({'type': 'unit', 'camp': 'shared', 'unit': 'solar', 'mod': ''}))
+check('мод пака по одному → тоже', 'shared/solar',
+      ak({'type': 'unit', 'camp': 'shared', 'unit': 'solar', 'mod': 'Solar/SolMapZoom'}))
+check('мод из каталога (источник по умолчанию) → тоже', 'shared/solar',
+      ak({'type': 'desc', 'id': 'Solar/SolMapZoom'}))
+check('обычный пак → нет', None,
+      ak({'type': 'unit', 'camp': 'redux', 'unit': 'some_mods', 'mod': ''}))
+check('сборка → нет', None, ak({'type': 'camp', 'camp': 'redux', 'part': 'all'}))
+check('форк по ссылке → нет', None, ak({'type': 'desc', 'id': '', 'url': 'http://x/y.json'}))
+wr = app.Api._writes_game_root
+check('корень игры пишут: сборка, пак, файлы игры пака',
+      (True, True, True),
+      (wr({'type': 'camp'}), wr({'type': 'unit', 'mod': ''}),
+       wr({'type': 'unit', 'mod': app.BASE_MOD})))
+check('не пишут: мод из каталога и мод пака по одному', (False, False),
+      (wr({'type': 'desc', 'id': 'X/Y'}), wr({'type': 'unit', 'mod': 'X/Y'})))
+
+# в списке модов пака его файлы игры названы своими словами
+a = fresh_api('redux'); a._repo = lambda: 'x/y'; a._packs_cache = packs_addon()
+a._token = lambda: ''
+_orig_lum = core.list_unit_mods
+core.list_unit_mods = lambda repo, camp, unit, tok: [app.BASE_MOD, 'Solar/SolMapZoom']
+try:
+    um = a.get_unit_mods('shared', 'solar')['mods']
+    check('у пака по выбору «_base» — файлы игры пака', app.ADDON_FILES_TITLE, um[0]['name'])
+    um2 = a.get_unit_mods('redux', 'redux_base_installer')['mods']
+    check('у движка — как раньше', app.BASE_MOD_LABEL, um2[0]['name'])
+finally:
+    core.list_unit_mods = _orig_lum
+
 print(f'\n===== ИТОГ: PASS={len(PASS)}  FAIL={len(FAIL)} =====')
 if FAIL:
     print('ПРОВАЛЫ:', FAIL); sys.exit(1)

@@ -2131,7 +2131,8 @@ async function onAddPack() {
     $('addMod').appendChild(o);
   });
   $('addMod').disabled = false;
-  $('addStatus').textContent = `Модов в паке: ${(r.mods || []).length}`;
+  $('addStatus').textContent = `Модов в паке: ${(r.mods || []).length}`
+    + (p.addon ? ' · пак по выбору: в «Вся сборка» не входит, а его файлы игры (свой Rangers.exe и др.) лягут поверх движка сборки' : '');
 }
 async function onAddModSel() {
   const mid = $('addMod').value;

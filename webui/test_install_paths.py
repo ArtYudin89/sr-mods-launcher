@@ -54,6 +54,24 @@ check('цель мода на диске', MODS / 'Good' / 'f.txt',
 check('цель корневого файла — папка игры', MODS.parent / 'Rangers.exe',
       core.install_target('Rangers.exe', MODS))
 
+# ── Загрузчик XenoNative (пак Solar): рядом с Rangers.exe, а не в Mods ───────────
+check('XenoNative.ini — в корень игры', ('root', 'XenoNative.ini'),
+      core.install_route('XenoNative.ini'))
+check('папка XenoNative — в корень игры',
+      ('root', 'XenoNative/Plugins/XenoStable/XenoStable.ini'),
+      core.install_route('XenoNative/Plugins/XenoStable/XenoStable.ini'))
+check('dsound.dll — в корень игры', ('root', 'dsound.dll'), core.install_route('dsound.dll'))
+check('XenoCore.dll — в корень игры', ('root', 'XenoCore.dll'),
+      core.install_route('XenoCore.dll'))
+check('readme пака не ставится', (None, None), core.install_route('README_Solar.txt'))
+check('нативная часть мода остаётся в папке мода',
+      ('mods', 'Solar/SolUtilities/Native/SolHook.XenoPlugin.ini'),
+      core.install_route('Mods/Solar/SolUtilities/Native/SolHook.XenoPlugin.ini'))
+check('загрузчик — файлы игры пака, не мод', '_base',
+      core.mod_key('XenoNative/Plugins/XenoStable/XenoStable.Runtime.dll'))
+check('цель загрузчика — папка игры', MODS.parent / 'XenoNative' / 'Plugins' / 'x.ini',
+      core.install_target('XenoNative/Plugins/x.ini', MODS))
+
 # ── Русские имена не задеты ───────────────────────────────────────────────────
 check('кириллица в пути мода', ('mods', 'Мод/Файл.txt'),
       core.install_route('Mods/Мод/Файл.txt'))

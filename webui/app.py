@@ -205,6 +205,12 @@ PART_TITLES = {PART_BASE: 'Базовые файлы игры (движок + ф
 BASE_MOD = core.BASE_MOD
 BASE_MOD_SHORT = 'Базовые файлы игры'             # короткий ярлык (строка дерева)
 BASE_MOD_LABEL = 'Базовые файлы игры (Rangers.exe, DATA, CFG)'
+# файлы игры пака по выбору (Solar: свой Rangers.exe и загрузчик) — поверх движка сборки
+ADDON_FILES_LABEL = 'файлы игры пака (свой Rangers.exe и др.)'
+ADDON_FILES_TITLE = 'Файлы игры пака (свой Rangers.exe и др.)'
+ADDON_FILES_DESC = ('Файлы, которые пак кладёт в папку игры рядом с Rangers.exe (у Solar — '
+                    'свой Rangers.exe, под который собраны его DLL, и загрузчик XenoNative). '
+                    'Ложатся поверх движка сборки; без них моды пака не работают.')
 BASE_MOD_DESC = ('Движок и общие файлы этой сборки — всё, что лежит вне папки Mods. '
                  'Нужны, если моды ставятся по отдельности, без полной сборки.')
 
@@ -2638,6 +2644,14 @@ class Api:
         if bf_camp and not queued_base:      # в очереди уже есть своя строка — не двоим
             rows.append((bf_camp, None, 'файлы игры', PART_TITLES[PART_BASE],
                          'ok', '✅ установлен', bf.get('date', ''), 'b:base', ''))
+        # То же для файлов игры паков по выбору (Solar): они в корне игры, поверх движка.
+        queued_units = {f"{m.get('camp')}/{m.get('unit')}" for m in self.profile.get('mods', [])
+                        if m.get('type') == 'unit' and m.get('mod') in ('', None, BASE_MOD)}
+        for key, info in sorted((self.profile.get('addon_files') or {}).items()):
+            if key not in queued_units:
+                rows.append((bf_camp or 'прочее', None, 'файлы игры',
+                             f'{info.get("name") or key} — {ADDON_FILES_LABEL}', 'ok',
+                             '✅ установлен', info.get('date', ''), f'b:addon:{key}', ''))
 
         camp_disk = inst_base['camp'] if inst_base else 'прочее'
         for mid, ts in sorted(disk.items()):
@@ -3385,6 +3399,11 @@ class Api:
 
     @staticmethod
     def _unit_install_rank(p, packs):
+        # Пак по выбору со своими файлами игры (Solar: свой Rangers.exe и загрузчик
+        # XenoNative) ложится поверх всей сборки, включая исправления к движку, — иначе
+        # exe из исправлений перебил бы exe пака, и моды пака не заработали бы.
+        if p.get('addon'):
+            return 4
         # ВАЖНО: агрегатор пишет tier='fix' (не 'fixes') — сравнение только с 'fixes'
         # делало ветку мёртвой, и фикс-паки ехали рангом обычного мода, то есть могли
         # быть перезаписаны модами, которые обязаны ложиться ПОД них.
@@ -3409,10 +3428,107 @@ class Api:
         return PART_MODS
 
     def _camp_part_packs(self, camp, packs, part):
-        """Паки сборки camp, входящие в часть part (PART_ALL — все)."""
+        """Паки сборки camp, входящие в часть part (PART_ALL — все). Пак по выбору
+        (addon) в сборку не входит никогда: его ставят только отдельной записью."""
         return [p for p in packs.values()
-                if p.get('camp') == camp
+                if p.get('camp') == camp and not p.get('addon')
                 and (part in (PART_ALL, None) or self._part_of_unit(p, packs) == part)]
+
+    # ───────── паки по выбору со своими файлами игры (Solar) ─────────
+    # Такой пак везёт, кроме модов, файлы в корень игры: свой Rangers.exe, под который
+    # собраны его DLL, и загрузчик XenoNative (dsound.dll, XenoCore.dll, XenoNative\).
+    # Без них моды пака не работают, а установка сборки (движок и исправления к нему)
+    # кладёт свой Rangers.exe. Правило одно для всех путей: файлы игры такого пака лежат
+    # поверх сборки. Очередь профиля после установки пустеет, поэтому установленные паки
+    # запоминаются в profile['addon_files'] и их файлы игры возвращаются после каждой
+    # установки — пока на диске есть хоть один мод пака.
+    def _addon_key_of(self, m, packs):
+        """'сборка/пак' пака по выбору, чьи файлы игры нужны записи очереди m, или None."""
+        t = m.get('type')
+        if t == 'unit':
+            key = f"{m.get('camp')}/{m.get('unit')}"
+        elif t == 'desc' and not m.get('url'):
+            key = m.get('source') or ((self._catalog_cache or {}).get(m.get('id') or '')
+                                      or {}).get('default_source') or ''
+        else:
+            return None
+        return key if (packs.get(key) or {}).get('addon') else None
+
+    def _addon_on_disk(self, key, mods_dir, tok):
+        """Стоит ли на диске хоть один мод пака (его ModuleInfo.txt по своему пути)."""
+        c, u = key.split('/', 1)
+        for rp in core._load_manifest(self._repo(), f'mods/{c}/{u}/code.manifest.json', tok):
+            where, rel = core.install_route(rp)
+            if where == 'mods' and rel.lower().endswith('/moduleinfo.txt') \
+                    and (Path(mods_dir) / rel).is_file():
+                return True
+        return False
+
+    def _reassert_addon_files(self, mods_dir, tok, keys):
+        """Положить файлы игры паков по выбору поверх того, что сейчас поставили. keys —
+        паки, которые были в этой установке; к ним — ранее установленные (addon_files).
+        Сверка по отпечаткам: совпавшее не качается. Сбой пака не роняет установку."""
+        packs = self._get_packs(tok)
+        rec = self.profile.setdefault('addon_files', {})
+        queued = set(keys)
+        for key in list(dict.fromkeys(list(keys) + list(rec))):
+            p = packs.get(key)
+            if not (p and p.get('addon')):
+                rec.pop(key, None)
+                continue
+            name = p.get('display_name') or p.get('name') or key
+            try:
+                if key in queued or self._addon_on_disk(key, mods_dir, tok):
+                    c, u = key.split('/', 1)
+                    self.log(f'Файлы игры пака «{name}» — поверх движка сборки: без них '
+                             f'моды пака не работают.')
+                    ff, fidx = self._fork_unit_overlay(c, u)
+                    self._pack_ctx = name
+                    core.reconstruct_unit(
+                        self._repo(), c, u, mods_dir, tok, self._progress, self.log,
+                        tmp_dir=ROOT, mod=BASE_MOD, should_cancel=self.should_cancel,
+                        part_cb=self._part_progress, byte_cb=self._byte_progress,
+                        chunk_cb=self._chunk_progress, vlog=self.vlog, skip_present=True,
+                        fork_files=ff, fork_index=fidx)
+                    rec[key] = {'name': name, 'date': datetime.now().isoformat()}
+                else:
+                    # модов пака на диске больше нет — игрок его убрал; файлы игры не держим
+                    self.vlog(f'Модов пака «{name}» в игре больше нет — его файлы игры '
+                              f'поверх сборки больше не кладу.')
+                    rec.pop(key, None)
+            except core.OperationCancelled:
+                raise
+            except Exception as e:
+                self.log(f'ОШИБКА: файлы игры пака «{name}» не легли ({e})')
+        if not rec:
+            self.profile.pop('addon_files', None)
+        self._save_profile()
+
+    @staticmethod
+    def _writes_game_root(m):
+        """Может ли запись очереди положить файлы в корень игры (сборка, пак целиком или
+        его файлы игры, архив). Мод из каталога и мод пака по одному — только в Mods."""
+        t = m.get('type')
+        if t == 'desc':
+            return False
+        return not (t == 'unit' and m.get('mod') and m.get('mod') != BASE_MOD)
+
+    def _addons_after_install(self, mods_dir, tok, done, plan=None):
+        """После установки: файлы игры паков по выбору — поверх сборки. Нужны паки этой
+        установки (пак целиком, его файлы игры, мод из него — и из каталога, и как
+        зависимость), а ранее поставленные — только если сейчас ставилось то, что могло
+        переписать корень игры."""
+        if not done:
+            return
+        packs = self._get_packs(tok)
+        keys = [k for k in (self._addon_key_of(m, packs) for m in done) if k]
+        for d in ((plan or {}).get('mods') or {}).values():
+            src = d.get('source') or ''
+            if (packs.get(src) or {}).get('addon'):
+                keys.append(src)
+        if keys or (self.profile.get('addon_files')
+                    and any(self._writes_game_root(m) for m in done)):
+            self._reassert_addon_files(mods_dir, tok, keys)
 
     def _install_worker(self, indices):
         tok = self._token()
@@ -3437,6 +3553,7 @@ class Api:
                     raise
                 except Exception as e:
                     self.log(f'ОШИБКА {m.get("name", "?")}: {e}')
+            self._addons_after_install(mods_dir, tok, done)
             self.log(f'Установка закончена. Обработано пунктов набора: {len(done)}.')
             self._finish_install(done, 'Готово')
         except core.OperationCancelled:
@@ -3737,6 +3854,7 @@ class Api:
                         done.append(m)
                 self.log(f'Моды набора установлены: {len(plan["order"])} '
                          f'{core.plural_mods(len(plan["order"]))} (вместе с нужными им).')
+            self._addons_after_install(mods_dir, tok, done, plan)
             self.log('Установка закончена.')
             self._finish_set('Готово', done)
         except core.OperationCancelled:
@@ -3777,7 +3895,11 @@ class Api:
             packs = self._get_packs(self._token())
         except Exception as e:
             return {'ok': False, 'error': str(e)}
-        camps = sorted({p.get('camp') for p in packs.values() if p.get('camp')},
+        # 'shared' — не сборка (его паки подмешаны в каждую), а пак по выбору целой
+        # сборкой не ставится — ни того, ни другого в быстром старте нет
+        camps = sorted({p.get('camp') for p in packs.values()
+                        if p.get('camp') and p.get('camp') != 'shared'
+                        and not p.get('addon')},
                        key=lambda c: (self.QUICK_CAMP_ORDER.index(c)
                                       if c in self.QUICK_CAMP_ORDER else len(self.QUICK_CAMP_ORDER), c))
         cat_ready = self._catalog_cache is not None
@@ -3804,10 +3926,12 @@ class Api:
         except Exception as e:
             return {'ok': False, 'error': str(e)}
         out = []
+        addon = bool((self._packs_cache or {}).get(f'{camp}/{unit}', {}).get('addon'))
         for key in keys:
             if key == BASE_MOD:
-                out.append({'key': key, 'name': BASE_MOD_LABEL, 'camps': [],
-                            'desc': BASE_MOD_DESC})
+                out.append({'key': key, 'camps': [],
+                            'name': ADDON_FILES_TITLE if addon else BASE_MOD_LABEL,
+                            'desc': ADDON_FILES_DESC if addon else BASE_MOD_DESC})
                 continue
             ent = self._camp_variant_entry(key, camp)
             if ent and ent[1]:
@@ -3829,6 +3953,8 @@ class Api:
             if t == 'camp' and (m.get('part') or PART_ALL) in (PART_BASE, PART_ALL):
                 return c
             if t == 'unit':
+                if packs.get(f"{c}/{m.get('unit')}", {}).get('addon'):
+                    continue                     # файлы игры пака по выбору — не движок
                 if m.get('mod') == BASE_MOD:
                     return c
                 if not m.get('mod') and packs.get(
@@ -3845,8 +3971,10 @@ class Api:
         base = self._profile_base_camp()
         if base:
             return base
+        # 'shared' — не сборка: его паки (фоны, паки по выбору) годятся для любой
         camps = {m.get('camp') for m in self.profile.get('mods', [])
-                 if m.get('type') in ('camp', 'unit') and m.get('camp')}
+                 if m.get('type') in ('camp', 'unit') and m.get('camp')
+                 and m.get('camp') != 'shared'}
         return camps.pop() if len(camps) == 1 else None
 
     def _base_conflict_error(self, camp):
@@ -3912,17 +4040,28 @@ class Api:
         mod = {'type': 'unit', 'repo': repo, 'camp': pack['camp'], 'unit': pack['unit'],
                'name': pack['name'], 'mod': ''}
         msel = (payload.get('mod') or '').strip()
+        pk = (self._packs_cache or {}).get(f"{pack['camp']}/{pack['unit']}", {})
+        # пак по выбору: его файлы игры ложатся поверх движка сборки, а не вместо него —
+        # запрет второй базы и замена «Базовых файлов игры» его не касаются
+        addon = bool(pk.get('addon'))
         # база другой сборки уже в профиле → и целый base-пак, и его '_base' запрещены
-        base_pack = (self._packs_cache or {}).get(
-            f"{pack['camp']}/{pack['unit']}", {}).get('tier') == 'base'
-        if msel == BASE_MOD or (base_pack and (not msel or msel == ALL_PACK)):
+        base_pack = pk.get('tier') == 'base'
+        if not addon and (msel == BASE_MOD or (base_pack and (not msel or msel == ALL_PACK))):
             err = self._base_conflict_error(pack['camp'])
             if err:
                 return {'ok': False, 'error': err}
         if msel and msel != ALL_PACK:
-            self._dedup_folder(msel)               # один вариант на папку (#2.2)
-            mod['mod'] = msel
-            mod['name'] = BASE_MOD_LABEL if msel == BASE_MOD else msel
+            if addon and msel == BASE_MOD:
+                self.profile['mods'] = [
+                    m for m in self.profile.get('mods', [])
+                    if not (m.get('type') == 'unit' and m.get('camp') == pack['camp']
+                            and m.get('unit') == pack['unit'] and m.get('mod') == BASE_MOD)]
+                mod['mod'] = msel
+                mod['name'] = f"{pack['name']} — {ADDON_FILES_LABEL}"
+            else:
+                self._dedup_folder(msel)           # один вариант на папку (#2.2)
+                mod['mod'] = msel
+                mod['name'] = BASE_MOD_LABEL if msel == BASE_MOD else msel
         self.profile.setdefault('mods', []).append(mod)
         self._save_profile()
         return {'ok': True}
@@ -3934,10 +4073,15 @@ class Api:
         base = (mid or '').split('@', 1)[0]
         if not base:
             return
+        packs = self._packs_cache or {}
         kept, dropped = [], 0
         for m in self.profile.get('mods', []):
             emid = m.get('mod') or m.get('id') or ''
             if emid and emid.split('@', 1)[0] == base and m.get('type') in ('unit', 'desc'):
+                if base == BASE_MOD and packs.get(
+                        f"{m.get('camp')}/{m.get('unit')}", {}).get('addon'):
+                    kept.append(m)             # файлы игры пака по выбору — поверх базы
+                    continue
                 dropped += 1
                 continue
             kept.append(m)
