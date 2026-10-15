@@ -2547,21 +2547,40 @@ def plan_update_merge(desc, mods_dir, index, token=None, log=print, snapshot=Non
     theirs = desc_files_flat(desc)                      # relpath -> {sha256,kind}
     tmp = Path(tmp_dir or mods_dir.parent)
 
-    relpaths = set(base) | set(theirs)
+    # План — по МЕСТУ НА ДИСКЕ, а не по ключу описи. Ключ — путь в раздаче вместе с
+    # именем архива-обёртки, и ночной прогон его меняет, когда автор переименует архив
+    # (DrKlesMod 14.10.2026: все 235 ключей, «DrKlesMod_unpacked/…» → «Miscellaneous_
+    # unpacked/…»). По ключам старый файл выходил «больше не нужен» и удалялся, а новый
+    # по тому же месту — «без изменений»: «Обновить» стирало мод целиком. Проверка
+    # обновлений сравнивает по месту на диске (install_relpath) — и план так же.
+    def place(rp):
+        return install_relpath(rp).replace('\\', '/').lower()
+    tmeta = {**desc.get('files', {}).get('code', {}), **desc.get('files', {}).get('assets', {})}
+    theirs_at, base_at = {}, {}
+    for rp in sorted(theirs):                   # две копии одного места — как best_copies
+        cur = theirs_at.get(place(rp))
+        if cur is None or (copy_rank(rp, (tmeta.get(rp) or {}).get('mtime'))
+                           > copy_rank(cur, (tmeta.get(cur) or {}).get('mtime'))):
+            theirs_at[place(rp)] = rp
+    for rp in sorted(base):
+        base_at.setdefault(place(rp), rp)
+
     disk = {}
-    for rp in relpaths:
+    for pl in set(theirs_at) | set(base_at):
         _check_cancel(should_cancel)
-        fp = mods_dir / install_relpath(rp)
+        fp = mods_dir / install_relpath(theirs_at.get(pl) or base_at[pl])
         if fp.exists() and fp.is_file():
-            disk[rp] = file_sha256(fp)
+            disk[pl] = file_sha256(fp)
 
     actions = []
     both_text = []   # relpaths, требующие diff3 (нужно скачать base+theirs)
-    for rp in sorted(relpaths):
-        bsha = base.get(rp)
-        tinfo = theirs.get(rp)
+    for pl in sorted(set(theirs_at) | set(base_at)):
+        trp, brp = theirs_at.get(pl), base_at.get(pl)
+        rp = trp or brp                         # ключ новой версии, если файл в ней есть
+        bsha = base.get(brp) if brp else None
+        tinfo = theirs.get(trp) if trp else None
         tsha = tinfo['sha256'] if tinfo else None
-        msha = disk.get(rp)
+        msha = disk.get(pl)
         text = is_text_path(rp)
         rec = {'relpath': rp, 'kind': (tinfo or {}).get('kind', 'code'),
                'text': text, 'base': bsha, 'theirs': tsha, 'mine': msha}

@@ -2663,6 +2663,81 @@ try:
 finally:
     shutil.rmtree(_w27, ignore_errors=True)
 
+# ═══════════════════════════════════════════════
+#  ГРУППА 28: «Обновить» сверяет по месту на диске, а не по ключу описи
+# ═══════════════════════════════════════════════
+print('\n=== ГРУППА 28: смена ключей в описи при том же месте на диске ===')
+
+# Аудит 15.10.2026, находка A3: ночной прогон 14.10 сменил у DrKlesMod все ключи описи
+# («DrKlesMod_unpacked/Клесс мод/…» → «Miscellaneous_unpacked/…»), а места на диске те же.
+# План по ключам считал старые «больше не нужными» и удалял их, новые — «без изменений»:
+# «Обновить» стирало мод целиком. План по месту на диске видит: файл тот же или обновлён.
+_MI1, _MI2, _A1, _B1, _GONE = b'Name=DrKlesMod v1', b'Name=DrKlesMod v2', b'aaa', b'bbb', b'gone'
+_B28 = {_sha(b): b for b in (_MI1, _MI2, _A1, _B1, _GONE)}
+_OLD = 'DrKlesMod_unpacked/Клесс мод/Mods/OtherMods/DrKlesMod/'
+_NEW = 'Miscellaneous_unpacked/Mods/OtherMods/DrKlesMod/'
+_IDX28 = {'blobs': {s: {'chunk': 'c28'} for s in _B28},
+          'chunks': {'c28': {'url': 'http://fake/c28', 'store': 'hf'}}}
+
+
+def _dl28(url, token, dest, progress_cb=None, should_cancel=None, byte_cb=None):
+    with _zip.ZipFile(dest, 'w') as z:
+        for s, b in _B28.items():
+            z.writestr(s, b)
+
+
+_w28 = Path(tempfile.mkdtemp(prefix='g28_'))
+try:
+    _m28 = _w28 / 'Game' / 'Mods'
+    _d28 = _m28 / 'OtherMods' / 'DrKlesMod'
+    (_d28 / 'DATA').mkdir(parents=True)
+    for rel, b in (('ModuleInfo.txt', _MI1), ('DATA/a.txt', _A1), ('DATA/b.dat', _B1),
+                   ('DATA/gone.txt', _GONE)):
+        (_d28 / rel).write_bytes(b)
+    _snap28 = {'id': 'OtherMods/DrKlesMod', 'version': 'v1', 'files': {
+        _OLD + 'ModuleInfo.txt': _sha(_MI1), _OLD + 'DATA/a.txt': _sha(_A1),
+        _OLD + 'DATA/b.dat': _sha(_B1), _OLD + 'DATA/gone.txt': _sha(_GONE)}}
+    _desc28 = {'id': 'OtherMods/DrKlesMod', 'version': 'v2', 'source': 'universe/universe_prochee',
+               'files': {'code': {_NEW + 'ModuleInfo.txt': {'sha256': _sha(_MI2)},
+                                  _NEW + 'DATA/a.txt': {'sha256': _sha(_A1)}},
+                         'assets': {_NEW + 'DATA/b.dat': {'sha256': _sha(_B1)}}}}
+    with patch.object(core, 'download_url', side_effect=_dl28):
+        print('\n--- T110: план — по месту на диске ---')
+        _plan28 = core.plan_update_merge(_desc28, _m28, _IDX28, snapshot=_snap28,
+                                         tmp_dir=_w28 / 't', log=lambda *_: None)
+        _s28 = _plan28['summary']
+        check('T110: ModuleInfo.txt — обновить (а не «спорный»)', 1, _s28.get('update', 0))
+        check('T110: a.txt и b.dat — без изменений', 2, _s28.get('unchanged', 0))
+        check('T110: удалить — только файл, которого в новой версии нет совсем', 1,
+              _s28.get('deleted_clean', 0))
+        check('T110: спорных нет — окна не будет, и это честно', 0, _s28.get('conflicts', 0))
+        check('T110: ключ записей — из новой версии', True,
+              all(r['relpath'].startswith(_NEW) for r in _plan28['actions']
+                  if r['status'] != 'deleted_clean'))
+
+        print('\n--- T111: применение с решениями по умолчанию — мод цел ---')
+        core.apply_update_plan(_desc28, _plan28, {}, _m28, _IDX28, tmp_dir=_w28 / 't',
+                               log=lambda *_: None, snap_dir=_w28 / 'snap')
+        check('T111: ModuleInfo.txt новой версии', _MI2, (_d28 / 'ModuleInfo.txt').read_bytes())
+        check('T111: a.txt на месте', _A1, (_d28 / 'DATA' / 'a.txt').read_bytes())
+        check('T111: b.dat на месте', _B1, (_d28 / 'DATA' / 'b.dat').read_bytes())
+        check_false('T111: убранный в новой версии файл удалён', (_d28 / 'DATA' / 'gone.txt').exists())
+        _ns28 = core.load_install_snapshot(_m28, 'OtherMods/DrKlesMod', _w28 / 'snap')
+        check('T111: снимок — ключи новой версии', sorted(core.desc_files_flat(_desc28)),
+              sorted(_ns28['files']))
+
+        print('\n--- T112: правка игрока в файле со сменившимся ключом — сохраняется ---')
+        (_d28 / 'DATA' / 'a.txt').write_bytes(b'player edit')
+        _snap112 = dict(_snap28, files=dict(_snap28['files']))
+        _plan112 = core.plan_update_merge(_desc28, _m28, _IDX28, snapshot=_snap112,
+                                          tmp_dir=_w28 / 't', log=lambda *_: None)
+        _st112 = {r['relpath']: r['status'] for r in _plan112['actions']}
+        check('T112: файл мода не менялся, игрок правил → оставить как у игрока', 'player_only',
+              _st112.get(_NEW + 'DATA/a.txt'))
+finally:
+    shutil.rmtree(_w28, ignore_errors=True)
+
+# ═══════════════════════════════════════════════
 #  Итог
 # ═══════════════════════════════════════════════
 print(f'\n{"="*50}')
