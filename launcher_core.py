@@ -17,6 +17,7 @@ import re
 import shutil
 import threading
 import time
+from urllib.parse import urlsplit
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from difflib import SequenceMatcher
@@ -200,9 +201,30 @@ def _headers(token, accept='application/vnd.github+json'):
     return h
 
 
+# Хосты GitHub, которым можно показать токен игрока. Адреса приходят и из данных —
+# описание мода (chunk_index_url на Hugging Face), индекс частей форка, ссылка на мод или
+# архив от другого человека, — а токен даёт доступ к репозиториям игрока. До 0.28.0 он
+# уходил заголовком на любой такой адрес (аудит 15.10.2026).
+_TOKEN_HOSTS = {'api.github.com', 'github.com', 'raw.githubusercontent.com',
+                'codeload.github.com'}
+
+
+def _token_for(url, token):
+    """Токен — только для https-адресов GitHub; для всех остальных — None."""
+    if not token:
+        return None
+    try:
+        u = urlsplit(url)
+    except ValueError:
+        return None
+    return token if u.scheme == 'https' and (u.hostname or '').lower() in _TOKEN_HOSTS \
+        else None
+
+
 def gh_json(url, token, params=None, should_cancel=None):
     def do():
-        r = requests.get(url, headers=_headers(token), params=params, timeout=(10, 30))
+        r = requests.get(url, headers=_headers(_token_for(url, token)), params=params,
+                         timeout=(10, 30))
         r.raise_for_status()
         return r.json()
     return _with_retries(do, should_cancel=should_cancel)
@@ -284,13 +306,16 @@ def _stream_download(url, headers, dest, progress_cb=None, should_cancel=None, b
 
 def download_asset(asset, token, dest, progress_cb=None, should_cancel=None, byte_cb=None):
     """Скачать ассет релиза по api-url (Accept: octet-stream). Работает для приватных."""
-    return _stream_download(asset['url'], _headers(token, 'application/octet-stream'),
+    return _stream_download(asset['url'],
+                            _headers(_token_for(asset['url'], token), 'application/octet-stream'),
                             dest, progress_cb, should_cancel, byte_cb)
 
 
 def download_url(url, token, dest, progress_cb=None, should_cancel=None, byte_cb=None):
-    """Скачать произвольный URL (для generic zip — browser_download_url)."""
-    return _stream_download(url, _headers(token, '*/*'), dest, progress_cb, should_cancel, byte_cb)
+    """Скачать произвольный URL (для generic zip — browser_download_url). Токен уйдёт,
+    только если это адрес GitHub (_token_for)."""
+    return _stream_download(url, _headers(_token_for(url, token), '*/*'), dest, progress_cb,
+                            should_cancel, byte_cb)
 
 
 def spawn_self_replace(current_exe, new_exe, log=print):
@@ -1093,9 +1118,10 @@ def unit_remote_updated(repo, camp, token):
 # ---------------------------------------------------------------------------
 
 def _fetch_json(ref, repo=None, token=None):
-    """JSON из http(s)-URL / локального файла / пути в репозитории."""
+    """JSON из http(s)-URL / локального файла / пути в репозитории. По http(s) токен
+    уходит, только если это адрес GitHub (_token_for)."""
     if ref.startswith('http://') or ref.startswith('https://'):
-        r = requests.get(ref, headers=_headers(token, '*/*'), timeout=30)
+        r = requests.get(ref, headers=_headers(_token_for(ref, token), '*/*'), timeout=30)
         r.raise_for_status()
         return r.json()
     p = Path(ref)
