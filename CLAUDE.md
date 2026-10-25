@@ -19,7 +19,7 @@ Public `ArtYudin89/sr-mods-launcher`, ПРОД у игроков (авто-self-
 `cd webui && pyinstaller --noconfirm --clean SRModsLauncher.spec` при ЗАКРЫТОМ exe (иначе WinError 5). Свежий exe = `webui/dist/SRModsLauncher.exe` (корневой `dist/` — старый).
 
 ## Релиз (только по команде юзера)
-bump `LAUNCHER_VERSION` в `app.py` → тесты → сверка рабочей копии из sr-lab: `python ..\sr-lab	ools\launcher_parity.py fixpoint --camp all --launcher worktree --expect ..\sr-lab	ools\launcher_parity_expect.json` и `plan --camp all --shared --launcher worktree --expect …` — код 0, иначе каждое новое расхождение разобрать (исправить или принять с объяснением: `--write-expect` и заметка в файле) → exe → commit/push master (ff) → `gh release create vX.Y.Z webui/dist/SRModsLauncher.exe` → в агрегаторе `state/launcher_release.json` → vX.Y.Z (сначала `git reset --hard origin/master` поверх ночного бота, потом точечная правка, ff push) → README/ИНСТРУКЦИЯ.md/ИНСТРУКЦИЯ-ПРОСТАЯ.md.
+bump `LAUNCHER_VERSION` в `app.py` → тесты → сверка рабочей копии из sr-lab: `python ..\sr-lab\tools\launcher_parity.py fixpoint --camp all --launcher worktree --expect ..\sr-lab\tools\launcher_parity_expect.json` и `plan --camp all --shared --launcher worktree --expect …` — код 0, иначе каждое новое расхождение разобрать (исправить или принять с объяснением: `--write-expect` и заметка в файле) → exe → commit/push master (ff) → `gh release create vX.Y.Z webui/dist/SRModsLauncher.exe` → в агрегаторе `state/launcher_release.json` → vX.Y.Z (сначала `git reset --hard origin/master` поверх ночного бота, потом точечная правка, ff push) → README/ИНСТРУКЦИЯ.md/ИНСТРУКЦИЯ-ПРОСТАЯ.md.
 
 ## Уроки
 - json-данные агрегатора НЕ прогонять через json.dump (реформат) — точечный `str.replace`.
