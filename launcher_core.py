@@ -221,6 +221,31 @@ def _token_for(url, token):
         else None
 
 
+# Hugging Face — части модов и индекс частей. В exe (urllib3 2.6.1 + brotli 1.2.0) ответ
+# с Content-Encoding: br то распаковывается, то падает (can_accept_more_data() is False);
+# без br в Accept-Encoding HF отдаёт gzip — и всегда успех (проверка v0.28.0 15.10.2026).
+# Заголовок явный: сам requests просит br, как только в сборке есть brotli.
+_HF_HOSTS = ('huggingface.co', 'hf.co')
+HF_ACCEPT_ENCODING = 'gzip, deflate'
+
+
+def _is_hf(url):
+    try:
+        host = (urlsplit(url).hostname or '').lower()
+    except ValueError:
+        return False
+    return any(host == h or host.endswith('.' + h) for h in _HF_HOSTS)
+
+
+def _url_headers(url, token, accept='*/*'):
+    """Заголовки запроса на произвольный адрес: токен — только GitHub (_token_for), на
+    Hugging Face — Accept-Encoding без br."""
+    h = _headers(_token_for(url, token), accept)
+    if _is_hf(url):
+        h['Accept-Encoding'] = HF_ACCEPT_ENCODING
+    return h
+
+
 def gh_json(url, token, params=None, should_cancel=None):
     def do():
         r = requests.get(url, headers=_headers(_token_for(url, token)), params=params,
@@ -314,7 +339,7 @@ def download_asset(asset, token, dest, progress_cb=None, should_cancel=None, byt
 def download_url(url, token, dest, progress_cb=None, should_cancel=None, byte_cb=None):
     """Скачать произвольный URL (для generic zip — browser_download_url). Токен уйдёт,
     только если это адрес GitHub (_token_for)."""
-    return _stream_download(url, _headers(_token_for(url, token), '*/*'), dest, progress_cb,
+    return _stream_download(url, _url_headers(url, token), dest, progress_cb,
                             should_cancel, byte_cb)
 
 
@@ -1121,7 +1146,7 @@ def _fetch_json(ref, repo=None, token=None):
     """JSON из http(s)-URL / локального файла / пути в репозитории. По http(s) токен
     уходит, только если это адрес GitHub (_token_for)."""
     if ref.startswith('http://') or ref.startswith('https://'):
-        r = requests.get(ref, headers=_headers(_token_for(ref, token), '*/*'), timeout=30)
+        r = requests.get(ref, headers=_url_headers(ref, token), timeout=30)
         r.raise_for_status()
         return r.json()
     p = Path(ref)
