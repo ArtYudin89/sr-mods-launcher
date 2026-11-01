@@ -713,9 +713,7 @@ class Api:
         mtimes = getattr(self, '_pub_mtimes_all', None) or {}
 
         def order(s):
-            p = packs.get(s) or {}
-            rank = self._unit_install_rank(p, packs) if p else 1
-            return (rank, p.get('load_order', 999))
+            return self._install_order(s, packs)
 
         def is_fix(s):
             return core.is_fix_tier((packs.get(s) or {}).get('tier'))
@@ -787,8 +785,7 @@ class Api:
         keys = [k for k, p in packs.items()
                 if p.get('camp') == camp and core.is_fix_tier(p.get('tier'))
                 and (only is None or k in only)]
-        keys.sort(key=lambda k: (self._unit_install_rank(packs[k], packs),
-                                 packs[k].get('load_order', 999)))
+        keys.sort(key=lambda k: self._install_order(k, packs))
         low = mid.lower()
         layers = []
         for key in keys:
@@ -3415,6 +3412,13 @@ class Api:
             return 3 if (parent and parent.get('tier') == 'base') else 2
         return 1
 
+    def _install_order(self, source, packs):
+        """Место пака 'сборка/пак' при установке сборки: (ранг, load_order); меньше —
+        раньше, более поздний перекрывает. Одно правило для установки, проверки и
+        обновления мода."""
+        p = packs.get(source) or {}
+        return (self._unit_install_rank(p, packs) if p else 1, p.get('load_order', 999))
+
     @staticmethod
     def _part_of_unit(p, packs):
         """К какой части сборки относится пак: PART_BASE — сам base-пак и фиксы К НЕМУ
@@ -4355,6 +4359,14 @@ class Api:
         camp = src.split('/')[0]
         srcs = [v['source'] for v in ent.get('variants', [])
                 if (v.get('source') or '').split('/')[0] == camp] if camp else []
+        try:
+            packs = self._get_packs(tok)
+        except Exception:
+            packs = {}
+        # явно выбранная версия — только её пак, как у установки сборки и проверки обновлений
+        only = self._pinned_sources(packs).get(key.split('@', 1)[0])
+        if only and only & set(srcs):
+            srcs = [s for s in srcs if s in only]
         if len(srcs) <= 1:                       # один источник — сливать нечего
             one = src or (srcs[0] if srcs else None)
             d = core.descriptor_for({'id': key, 'source': one}, cat, repo, tok)
@@ -4362,25 +4374,47 @@ class Api:
             # + паки исправлений сборки по пути — как при установке сборки целиком
             d, self._last_variant_sources = self._with_camp_fixes(d, one, own)
             return d
-        try:
-            packs = self._get_packs(tok)
-        except Exception:
-            packs = {}
-        # порядок применения по load_order пака: выше = позже = приоритетнее (fixes бьёт base)
-        srcs.sort(key=lambda s: (packs.get(s) or {}).get('load_order', 999), reverse=True)
+        # Слияние — как у установки сборки (core.reconstruct_multi) и проверки обновлений
+        # (_merged_camp_files): одно место на диске — один файл; паки по (ранг, load_order),
+        # более поздний перекрывает, пак исправлений — не поверх более нового файла чужого
+        # пака (core.fix_overrides). Раньше описи сливались по ключу описи, и копии одного
+        # места из разных паков ({app}/Mods/… и Community Mods_unpacked/Mods/…) оставались
+        # обе, а план обновления брал более новую по дате — правило для копий ВНУТРИ пака.
+        # После установки сборки «Обновить» меняло файлы у 10 модов (сверка sr-lab 25.10.2026:
+        # DrKlesMod 95, ZelDomiks 9, ModuleInfo.txt и Lang.dat у остальных).
+        srcs.sort(key=lambda s: self._install_order(s, packs))   # низший → высший
         pairs = [(s, core.descriptor_for({'id': key, 'source': s}, cat, repo, tok)) for s in srcs]
         pairs = [(s, d) for s, d in pairs if d]
         if not pairs:
             self._last_variant_sources = {}
             return None
-        # атрибуция «файл → пак-источник»: pairs идут от приоритетного (fixes) к базовому,
-        # setdefault оставляет источник-победитель (тот, чей файл реально попал в набор)
-        fsrc = {}
+
+        def place(rp):
+            return core.install_relpath(rp).replace('\\', '/').lower()
+        won = {}                                  # место -> (источник, relpath, dev-дата)
         for s, d in pairs:
-            for rp in core.desc_files_flat(d):
-                fsrc.setdefault(rp, s)
+            p = packs.get(s) or {}
+            fix = core.is_fix_tier(p.get('tier'))
+            parent = f"{p.get('camp')}/{p['fix_parent']}" if fix and p.get('fix_parent') else None
+            mine = {}                             # две копии в одном паке — по copy_rank
+            for kind in ('code', 'assets'):
+                for rp, meta in (d.get('files', {}).get(kind) or {}).items():
+                    cur = mine.get(place(rp))
+                    if cur is None or (core.copy_rank(rp, meta.get('mtime'))
+                                       > core.copy_rank(cur[0], cur[1])):
+                        mine[place(rp)] = (rp, meta.get('mtime'))
+            for pl, (rp, mt) in mine.items():
+                old = won.get(pl)
+                if old and fix and not core.fix_overrides(parent, mt, old[0], old[2]):
+                    continue
+                won[pl] = (s, rp, mt)
+        fsrc = {rp: s for s, rp, _mt in won.values()}   # файл → пак, чей файл попал в набор
         self._last_variant_sources = fsrc
-        merged = core.merge_descriptors([d for _, d in pairs])   # fixes-первым → перекрывает base
+        kept = [(s, dict(d, files={kind: {rp: m for rp, m in (d.get('files', {}).get(kind)
+                                                            or {}).items() if fsrc.get(rp) == s}
+                                   for kind in ('code', 'assets')}))
+                for s, d in pairs]
+        merged = core.merge_descriptors([d for _, d in reversed(kept)])   # высший первым
         if merged is not None and src:
             merged = dict(merged); merged['source'] = src
         # + паки исправлений сборки на своём ранге: свёрнутое агрегатором исправление

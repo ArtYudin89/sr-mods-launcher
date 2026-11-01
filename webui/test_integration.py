@@ -2806,6 +2806,149 @@ finally:
     shutil.rmtree(_w28, ignore_errors=True)
 
 # ═══════════════════════════════════════════════
+#  ГРУППА 29: «Обновить» после установки сборки ставит те же копии файлов
+# ═══════════════════════════════════════════════
+print('\n=== ГРУППА 29: копии одного места из разных паков — как у установки сборки ===')
+
+# Сверка sr-lab 25.10.2026 (SR-9): после установки сборки детект молчит, а «Обновить» меняет
+# файлы у 10 модов. Описание мода для обновления сливало паки по ключу описи, копии одного
+# места ({app}/Mods/… и Community Mods_unpacked/Mods/…) оставались обе, и план брал более
+# новую по дате, а сборка кладёт копию пака, который ложится позже.
+_C29 = {n: f'{n} copy'.encode() for n in ('ri', 'cm', 'only', 'fix', 'sol', 'extra')}
+_S29 = {n: _sha(b) for n, b in _C29.items()}
+_IDX29 = {'blobs': {s: {'chunk': 'c29'} for s in _S29.values()},
+          'chunks': {'c29': {'url': 'http://fake/c29', 'store': 'hf'}}}
+_P29 = dict(_P_REDUX, **{
+    'redux/solyanka_main': {'camp': 'redux', 'name': 'solyanka_main', 'tier': 'mod',
+                            'load_order': 80}})
+_FRM = 'Reflection/RefFrenchMonths'
+_RI29 = '{app}/Mods/' + _FRM + '/'
+_CM29 = 'Community Mods_unpacked/Mods/' + _FRM + '/'
+
+
+def _f29(name, mtime):
+    return {'sha256': _S29[name], 'size': len(_C29[name]), 'mtime': mtime}
+
+
+def _desc29(mid, source, code):
+    return {'id': mid, 'source': source, 'version': source, 'files': {'code': code, 'assets': {}}}
+
+
+def _cat29(mid, sources):
+    return {mid: {'name': mid.split('/')[-1], 'default_source': sources[0],
+                  'variants': [{'source': s, 'path': f'{s}.json', 'depends': [], 'conflicts': []}
+                               for s in sources]}}
+
+
+def _full29(a, mid, descs, source):
+    """_full_variant_descriptor на подставных описаниях паков -> {место: sha}, источники."""
+    a._unit_raw_files = lambda key: {}          # паков исправлений по пути здесь нет
+    with patch.object(core, 'descriptor_for',
+                      side_effect=lambda sel, *args, **kw: descs.get(sel.get('source'))):
+        d = a._full_variant_descriptor(mid, a._catalog_cache, 'test/repo', '', source=source)
+    at = {}
+    for rp, meta in core.desc_files_flat(d).items():
+        at.setdefault(core.install_relpath(rp).replace('\\', '/'), []).append(meta['sha256'])
+    return d, at, dict(a._last_variant_sources)
+
+
+_D29 = {'redux/reflection_installer': _desc29(_FRM, 'redux/reflection_installer', {
+            _RI29 + 'ModuleInfo.txt': _f29('ri', _D2025),
+            _RI29 + 'CFG/Eng/Lang.dat': _f29('only', _D2025)}),
+        'redux/community_mods': _desc29(_FRM, 'redux/community_mods', {
+            _CM29 + 'ModuleInfo.txt': _f29('cm', _D2024)})}
+_w29 = Path(tempfile.mkdtemp(prefix='g29_'))
+try:
+    print('\n--- T113: копия пака, который ложится позже, бьёт более новую по дате ---')
+    g = TempGame()
+    try:
+        a = g.fresh_api(base='redux', packs=_P29,
+                        catalog=_cat29(_FRM, ['redux/community_mods', 'redux/reflection_installer']))
+        d113, at113, own113 = _full29(a, _FRM, _D29, 'redux/community_mods')
+        check('T113: ModuleInfo.txt — одна копия, из community_mods (load_order 150)',
+              [_S29['cm']], at113.get(_FRM + '/ModuleInfo.txt'))
+        check('T113: файл, который есть только в reflection_installer, — на месте',
+              [_S29['only']], at113.get(_FRM + '/CFG/Eng/Lang.dat'))
+        check('T113: источник ModuleInfo.txt — community_mods', 'redux/community_mods',
+              own113.get(_CM29 + 'ModuleInfo.txt'))
+        check('T113: опознание мода — его выбранная сборка', 'redux/community_mods',
+              d113.get('source'))
+    finally:
+        g.cleanup()
+
+    print('\n--- T114: после установки сборки план обновления ничего не меняет ---')
+    _mods29 = _w29 / 'Game' / 'Mods'; _mods29.mkdir(parents=True)
+    _mans29 = {'mods/redux/reflection_installer/code.manifest.json':
+                   {'files': _D29['redux/reflection_installer']['files']['code']},
+               'mods/redux/community_mods/code.manifest.json':
+                   {'files': _D29['redux/community_mods']['files']['code']}}
+
+    def _rfb29(repo, path, token, should_cancel=None, branch=None):
+        if path == 'state/asset_index.json':
+            return json.dumps(_IDX29).encode()
+        return json.dumps(_mans29.get(path, _EMPTY_MAN)).encode()
+
+    def _dl29(url, token, dest, progress_cb=None, should_cancel=None, byte_cb=None):
+        with _zip.ZipFile(dest, 'w') as z:
+            for n, b in _C29.items():
+                z.writestr(_S29[n], b)
+    with patch.object(core, 'repo_file_bytes', side_effect=_rfb29), \
+         patch.object(core, 'download_url', side_effect=_dl29):
+        core.reconstruct_multi('test/repo', [
+            {'camp': 'redux', 'unit': 'reflection_installer', 'tier': 'mod'},
+            {'camp': 'redux', 'unit': 'community_mods', 'tier': 'mod'}],
+            _mods29, '', log=lambda *_: None, tmp_dir=_w29 / 't')
+        check('T114: сборка положила ModuleInfo.txt из community_mods', _C29['cm'],
+              (_mods29 / 'Reflection' / 'RefFrenchMonths' / 'ModuleInfo.txt').read_bytes())
+        _plan114 = core.plan_update_merge(d113, _mods29, _IDX29, snapshot={'files': {}},
+                                          tmp_dir=_w29 / 't', log=lambda *_: None)
+        check('T114: оба файла — без изменений', ['unchanged', 'unchanged'],
+              sorted(r['status'] for r in _plan114['actions']))
+
+    print('\n--- T115: пак исправлений среди вариантов — по правилам сборки ---')
+    _RMN = 'Reflection/RefMightyNPCs'
+    g = TempGame()
+    try:
+        a = g.fresh_api(base='redux', packs=_P29, catalog=_cat29(_RMN, [
+            'redux/reflection_installer', 'redux/reflection_fixes', 'redux/community_mods']))
+        _, at115, _ = _full29(a, _RMN, {
+            'redux/reflection_installer': _desc29(_RMN, 'redux/reflection_installer', {
+                '{app}/Mods/' + _RMN + '/a.txt': _f29('ri', _D2025)}),
+            'redux/reflection_fixes': _desc29(_RMN, 'redux/reflection_fixes', {
+                'Fixes_unpacked/Mods/' + _RMN + '/a.txt': _f29('fix', _D2023),
+                'Fixes_unpacked/Mods/' + _RMN + '/b.txt': _f29('fix', _D2023)}),
+            'redux/community_mods': _desc29(_RMN, 'redux/community_mods', {
+                'Community Mods_unpacked/Mods/' + _RMN + '/b.txt': _f29('cm', _D2025)})},
+            'redux/reflection_installer')
+        check('T115: файл своего родителя исправление перекрывает, хоть и старше',
+              [_S29['fix']], at115.get(_RMN + '/a.txt'))
+        check('T115: более новый файл чужого пака — остаётся', [_S29['cm']],
+              at115.get(_RMN + '/b.txt'))
+    finally:
+        g.cleanup()
+
+    print('\n--- T116: выбранная версия — только её пак, как у сборки и проверки ---')
+    _HS = 'AnotherMods/AMod_HardSkills'
+    g = TempGame()
+    try:
+        a = g.fresh_api(base='redux', packs=_P29,
+                        catalog=_cat29(_HS, ['redux/solyanka_main', 'redux/community_mods']))
+        a.profile['variants'] = {_HS: _HS + '#redux/solyanka_main'}
+        _, at116, _ = _full29(a, _HS, {
+            'redux/solyanka_main': _desc29(_HS, 'redux/solyanka_main', {
+                'Solyanka_unpacked/Mods/' + _HS + '/ModuleInfo.txt': _f29('sol', _D2024)}),
+            'redux/community_mods': _desc29(_HS, 'redux/community_mods', {
+                'Community Mods_unpacked/Mods/' + _HS + '/ModuleInfo.txt': _f29('cm', _D2023),
+                'Community Mods_unpacked/Mods/' + _HS + '/extra.txt': _f29('extra', _D2023)})},
+            'redux/solyanka_main')
+        check('T116: файлы — только выбранного пака',
+              {_HS + '/ModuleInfo.txt': [_S29['sol']]}, at116)
+    finally:
+        g.cleanup()
+finally:
+    shutil.rmtree(_w29, ignore_errors=True)
+
+# ═══════════════════════════════════════════════
 #  Итог
 # ═══════════════════════════════════════════════
 print(f'\n{"="*50}')
