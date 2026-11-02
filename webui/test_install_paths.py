@@ -71,6 +71,12 @@ check('загрузчик — файлы игры пака, не мод', '_base
       core.mod_key('XenoNative/Plugins/XenoStable/XenoStable.Runtime.dll'))
 check('цель загрузчика — папка игры', MODS.parent / 'XenoNative' / 'Plugins' / 'x.ini',
       core.install_target('XenoNative/Plugins/x.ini', MODS))
+check('условия XenoNative — в папку загрузчика',
+      ('root', 'XenoNative/LICENSE-XenoNative.txt'),
+      core.install_route('XenoNative/LICENSE-XenoNative.txt'))
+check('файл условий действительно ставится рядом с загрузчиком',
+      MODS.parent / 'XenoNative' / 'LICENSE-XenoNative.txt',
+      core.install_target('Solar_unpacked/XenoNative/LICENSE-XenoNative.txt', MODS))
 
 # ── Мод — папка с ModuleInfo.txt: подпапки мода (не только DATA/CFG) — его же ─────
 _mk = core.mod_keyer(['Mods/Solar/SolUtilities/ModuleInfo.txt',
