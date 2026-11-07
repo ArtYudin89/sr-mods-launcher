@@ -431,6 +431,8 @@ def _parallel_fetch_extract(need, mods_dir, tmp, resolver, log,
     if not total:
         return
     workers = max(1, min(workers or PARALLEL_DOWNLOADS, total))
+    if part_cb:
+        part_cb(0, total)
 
     def fetch(chunk):
         _check_cancel(should_cancel)
@@ -1668,6 +1670,58 @@ def load_packs(ref='state/packs.json', repo=None, token=None):
         return {}
 
 
+def unit_install_rank(pack, packs):
+    """Base, mods/assets, fixes to mods, fixes to base, then optional game patches."""
+    if pack.get('addon'):
+        return 4
+    tier = pack.get('tier')
+    if tier == 'base':
+        return 0
+    if tier in ('fix', 'fixes'):
+        parent = packs.get(f"{pack['camp']}/{pack.get('fix_parent', '')}")
+        return 3 if parent and parent.get('tier') == 'base' else 2
+    return 1
+
+
+def unit_part(pack, packs):
+    """The base includes its fixes; mods/assets include their fixes."""
+    if pack.get('tier') == 'base':
+        return 'base'
+    if pack.get('tier') in ('fix', 'fixes'):
+        parent = packs.get(f"{pack.get('camp')}/{pack.get('fix_parent', '')}")
+        return 'base' if parent and parent.get('tier') == 'base' else 'mods'
+    return 'mods'
+
+
+def _camp_pack_items(camp, packs, part, include_shared=False):
+    for key, pack in packs.items():
+        if (pack.get('camp') == camp or include_shared and pack.get('camp') == 'shared') \
+                and not pack.get('addon') \
+                and (part in ('all', None) or unit_part(pack, packs) == part):
+            yield key, pack
+
+
+def camp_part_packs(camp, packs, part):
+    """Packs installed by a camp record, in catalog order; addons require a separate record."""
+    return [pack for _key, pack in _camp_pack_items(camp, packs, part)]
+
+
+def camp_install_order(packs):
+    """Camp -> pack keys, including shared packs but excluding optional addons.
+
+    Higher rank/load_order overwrites earlier files. At a tie, shared packs follow
+    the camp's own packs; catalog order breaks any remaining tie.
+    """
+    camps = dict.fromkeys(pack['camp'] for pack in packs.values() if pack['camp'] != 'shared')
+    position = {key: number for number, key in enumerate(packs)}
+    return {camp: [key for key, _pack in sorted(
+                _camp_pack_items(camp, packs, 'all', include_shared=True),
+                key=lambda item: (unit_install_rank(item[1], packs),
+                                  item[1].get('load_order', 999),
+                                  item[1].get('camp') == 'shared', position[item[0]]))]
+            for camp in camps}
+
+
 def camp_packs(packs):
     """{лагерь: [{'key':'camp/unit','unit':..,'name':..,'tier':..}]} для выпадающих списков.
     Сортировка по load_order.
@@ -2460,6 +2514,9 @@ def fetch_blobs(index, shas, token, tmp, log=print, progress_cb=None, should_can
             log(f'⚠ пропущено {len(need[c])} файлов: их пока нет на сервере раздачи')
     if not chunks:
         return out
+
+    if part_cb:
+        part_cb(0, len(chunks))
 
     def fetch(chunk):
         _check_cancel(should_cancel)

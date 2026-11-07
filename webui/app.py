@@ -16,6 +16,7 @@ import subprocess
 import sys
 import threading
 import time
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -99,7 +100,7 @@ IS_RWT = bool(EMBEDDED_TOKEN)
 # из репозитория ({version, url?, notes?}). url можно оставить пустым — тогда показ без
 # ссылки на скачивание (просто «доступна новая версия»).
 # ВНИМАНИЕ: при релизе выставить реальный следующий номер (текущий публичный > 0.13.1).
-LAUNCHER_VERSION = '0.28.0'
+LAUNCHER_VERSION = '0.29.0'
 RELEASE_REF = 'state/launcher_release.json'
 # Ссылка на полную справку в репозитории (ИНСТРУКЦИЯ-ПРОСТАЯ.md, имя в percent-encoding —
 # кириллица в пути; так браузер откроет её без ручного кодирования).
@@ -299,6 +300,7 @@ class Api:
         self._dl_bytes = 0
         self._dl_lock = threading.Lock()
         self._parts_done = self._parts_total = 0
+        self._parts_anonymous_done = 0
         self._pack_ctx = ''
         try:
             self._disk_index = core.load_disk_index(self._mods_dir())
@@ -308,6 +310,11 @@ class Api:
     # ───────── инфраструктура ─────────
     def _emit(self, event, payload=None):
         """Отправить событие во фронт (window.__emit(event, data))."""
+        if event == 'op_end':
+            try:
+                self._cleanup_downloads()
+            except OSError:
+                pass  # The temporary directory finalizer retries at process exit.
         if not _WINDOW:
             return
         try:
@@ -1291,9 +1298,26 @@ class Api:
         """Сброс рантайм-состояния прогресса перед стартом любой операции."""
         self._paused.clear()
         self._parts_done = self._parts_total = 0
+        self._parts_anonymous_done = 0
         self._last_parts_emit = 0
         with self._chunk_lock:
             self._chunk_prog.clear()
+            self._chunk_sizes = {}
+
+    def _download_dir(self):
+        """Each launcher owns its temporary downloads outside the exe/game folder."""
+        if getattr(self, '_download_tmp', None) is None:
+            base = Path(os.environ.get('LOCALAPPDATA') or (Path.home() / 'AppData' / 'Local'))
+            base = base / 'SRModsLauncher' / 'Temp'
+            base.mkdir(parents=True, exist_ok=True)
+            self._download_tmp = tempfile.TemporaryDirectory(prefix='download-', dir=str(base))
+        return Path(self._download_tmp.name)
+
+    def _cleanup_downloads(self):
+        temporary = getattr(self, '_download_tmp', None)
+        if temporary is not None:
+            temporary.cleanup()
+            self._download_tmp = None
 
     # ───────── состояние для фронта ─────────
     def get_state(self):
@@ -1302,6 +1326,8 @@ class Api:
             self.profile['game_path'] = self._autofind_game()
         return {
             'theme': self.config.get('theme', 'dark'),
+            'language': self.config.get('language', 'ru'),
+            'add_selection': self.config.get('add_selection', {}),
             'tree_mode': self.config.get('tree_mode', 'folder'),
             'name_mode': self.config.get('name_mode', 'folder'),
             'log_verbose': self.config.get('log_verbose', False),
@@ -2169,6 +2195,7 @@ class Api:
         cat = self._catalog_cache
         if cat is None:
             return {'ok': False, 'error': 'Каталог ещё загружается — повторите через секунду.'}
+        added = self._profile_mod_ids()
         out = []
         for k, e in cat.items():
             camps = sorted({v['source'].split('/')[0] for v in e.get('variants', [])
@@ -2176,9 +2203,63 @@ class Api:
             out.append({'id': k, 'base': k.split('@', 1)[0],
                         'name': e.get('name') or k.split('/')[-1],
                         'camps': camps, 'desc': e.get('description', ''),
-                        'source': e.get('default_source', '')})
+                        'source': e.get('default_source', ''),
+                        'in_profile': k.split('@', 1)[0] in added})
         out.sort(key=lambda m: m['name'].lower())
         return {'ok': True, 'mods': out, 'count': len(out)}
+
+    def _profile_mod_ids(self):
+        """Queued, installed and disabled profile members, without optional/removed mods."""
+        records = self.profile.get('mods', [])
+        added = {mid.split('@', 1)[0] for mid in self.profile.get('enabled', [])}
+        units = set()
+        camps = []
+        packs = self._packs_cache or {}
+        if self._packs_cache is None and any(record.get('type') == 'camp' for record in records):
+            packs = self._get_packs(self._token())
+        for record in records:
+            kind = record.get('type')
+            if kind == 'desc' and record.get('id'):
+                added.add(record['id'].split('@', 1)[0])
+            elif kind == 'unit':
+                if record.get('mod'):
+                    added.add(record['mod'].split('@', 1)[0])
+                else:
+                    units.add(f"{record.get('camp')}/{record.get('unit')}")
+            elif kind == 'camp' and record.get('part') != PART_BASE:
+                sources = {f"{p.get('camp')}/{p.get('name')}" for p in
+                           self._camp_part_packs(record.get('camp'), packs, record.get('part'))}
+                camps.append((sources, set(record.get('skip') or [])))
+        for key, entry in (self._catalog_cache or {}).items():
+            mid = key.split('@', 1)[0]
+            sources = {variant.get('source') for variant in entry.get('variants', [])}
+            if sources & units or any(mid not in skipped and sources & selected for selected, skipped in camps):
+                added.add(mid)
+        added.discard(BASE_MOD)
+        return added
+
+    def set_add_selection(self, selection):
+        if not isinstance(selection, dict) or selection.get('mode') not in ('quick', 'search', 'src', 'fork'):
+            return {'ok': False, 'error': 'Неверный способ добавления.'}
+        clean = {key: str(selection.get(key) or '')[:512] for key in ('mode', 'camp', 'pack', 'mod')}
+        self.config['add_selection'] = clean
+        self._save_config()
+        return {'ok': True}
+
+    def set_language(self, language):
+        if language not in ('ru', 'en'):
+            return {'ok': False, 'error': 'Неверный язык.'}
+        self.config['language'] = language
+        self._save_config()
+        return {'ok': True, 'language': language}
+
+    def _file_types(self, *labels):
+        if self.config.get('language') != 'en':
+            return labels
+        english = {'Профиль (*.json)': 'Profile (*.json)',
+                   'Все файлы (*.*)': 'All files (*.*)',
+                   'Текстовый файл (*.txt)': 'Text file (*.txt)'}
+        return tuple(english.get(label, label) for label in labels)
 
     def _desc_of(self, mid):
         """Краткое описание мода: с диска (ModuleInfo, кэш), фолбэк на каталог
@@ -3139,7 +3220,7 @@ class Api:
         try:
             res = _WINDOW.create_file_dialog(
                 webview.OPEN_DIALOG,
-                file_types=('Профиль (*.json)', 'Все файлы (*.*)'))
+                file_types=self._file_types('Профиль (*.json)', 'Все файлы (*.*)'))
         except Exception as e:
             return {'ok': False, 'error': str(e)}
         if not res:
@@ -3210,7 +3291,7 @@ class Api:
         try:
             res = _WINDOW.create_file_dialog(
                 webview.SAVE_DIALOG, save_filename='sr-launcher-log.txt',
-                file_types=('Текстовый файл (*.txt)', 'Все файлы (*.*)'))
+                file_types=self._file_types('Текстовый файл (*.txt)', 'Все файлы (*.*)'))
         except Exception as e:
             return {'ok': False, 'error': str(e)}
         if not res:
@@ -3346,21 +3427,30 @@ class Api:
             self._emit('progress', {'pct': round(done / total * 100), 'mode': 'pct'})
 
     def _part_progress(self, done, total):
-        self._parts_done, self._parts_total = done, total
         with self._chunk_lock:
-            self._chunk_prog.clear()          # часть готова — недокачанных долей нет
+            if done == 0 or total != getattr(self, '_parts_total', 0):
+                self._chunk_prog.clear()
+                self._chunk_sizes = {}
+                self._parts_anonymous_done = 0
+                self._parts_done = 0
+            self._parts_done = max(self._parts_done, done)
+            self._parts_total = total
         self._emit_parts(force=True)
 
     def _chunk_progress(self, chunk, done, total):
         """Прогресс ВНУТРИ скачиваемой части (полоса не стоит на месте между частями:
         раньше она дёргалась раз в часть — на 300-мегабайтном чанке это выглядело как
         зависание). Части качаются параллельно, поэтому копим доли по имени части."""
-        frac = (done / total) if total else 0
+        frac = max(0, min(done / total, 1)) if total else 0
         with self._chunk_lock:
-            if frac >= 1:
-                self._chunk_prog.pop(chunk, None)   # докачана — уйдёт в счётчик частей
-            else:
-                self._chunk_prog[chunk] = frac
+            # Keep completed fractions until the next pack begins. Extraction is
+            # counted separately and must not erase another active download.
+            self._chunk_prog[chunk] = max(self._chunk_prog.get(chunk, 0), frac)
+            sizes = getattr(self, '_chunk_sizes', None)
+            if sizes is None:
+                sizes = self._chunk_sizes = {}
+            if total > 1:
+                sizes[chunk] = (done, total)
         self._emit_parts()
 
     def _emit_parts(self, force=False):
@@ -3370,13 +3460,25 @@ class Api:
         if not force and now - getattr(self, '_last_parts_emit', 0) < 0.2:
             return
         self._last_parts_emit = now
-        done, total = self._parts_done, self._parts_total
         with self._chunk_lock:
-            extra = sum(self._chunk_prog.values())
-        pct = round(min(done + extra, total) / total * 100) if total else 0
+            done, total = self._parts_done, self._parts_total
+            downloaded = sum(self._chunk_prog.values())
+            named_done = sum(fraction == 1 for fraction in self._chunk_prog.values())
+            # Cached parts can finish without a byte callback. Keep their
+            # contribution when later downloads reach 100% before extraction.
+            self._parts_anonymous_done = max(getattr(self, '_parts_anonymous_done', 0), done - named_done)
+            downloaded += self._parts_anonymous_done
+            active = [name for name, fraction in self._chunk_prog.items() if fraction < 1]
+            current = active[-1] if active else ''
+            file_done, file_total = getattr(self, '_chunk_sizes', {}).get(current, (0, 0))
+        pct = round(min(downloaded, total) / total * 100) if total else 0
         self._emit('progress', {'pct': pct,
                                 'parts': f'{done}/{total}', 'mode': 'parts',
                                 'ctx': self._pack_ctx,
+                                'file': current,
+                                'active_count': len(active),
+                                'file_done_mb': f'{file_done / (1 << 20):.1f}',
+                                'file_total_mb': f'{file_total / (1 << 20):.1f}',
                                 'gb': f'{self._dl_bytes / (1 << 30):.2f}',
                                 'mb': f'{self._dl_bytes / (1 << 20):.0f}'})
 
@@ -3396,21 +3498,7 @@ class Api:
 
     @staticmethod
     def _unit_install_rank(p, packs):
-        # Пак по выбору со своими файлами игры (Solar: свой Rangers.exe и загрузчик
-        # XenoNative) ложится поверх всей сборки, включая исправления к движку, — иначе
-        # exe из исправлений перебил бы exe пака, и моды пака не заработали бы.
-        if p.get('addon'):
-            return 4
-        # ВАЖНО: агрегатор пишет tier='fix' (не 'fixes') — сравнение только с 'fixes'
-        # делало ветку мёртвой, и фикс-паки ехали рангом обычного мода, то есть могли
-        # быть перезаписаны модами, которые обязаны ложиться ПОД них.
-        tier = p.get('tier')
-        if tier == 'base':
-            return 0
-        if tier in ('fix', 'fixes'):
-            parent = packs.get(f"{p['camp']}/{p.get('fix_parent', '')}")
-            return 3 if (parent and parent.get('tier') == 'base') else 2
-        return 1
+        return core.unit_install_rank(p, packs)
 
     def _install_order(self, source, packs):
         """Место пака 'сборка/пак' при установке сборки: (ранг, load_order); меньше —
@@ -3423,20 +3511,12 @@ class Api:
     def _part_of_unit(p, packs):
         """К какой части сборки относится пак: PART_BASE — сам base-пак и фиксы К НЕМУ
         (движок игры), PART_MODS — моды/ассеты сборки и фиксы к ним."""
-        tier = p.get('tier')
-        if tier == 'base':
-            return PART_BASE
-        if tier in ('fix', 'fixes'):
-            parent = packs.get(f"{p.get('camp')}/{p.get('fix_parent', '')}")
-            return PART_BASE if (parent and parent.get('tier') == 'base') else PART_MODS
-        return PART_MODS
+        return core.unit_part(p, packs)
 
     def _camp_part_packs(self, camp, packs, part):
         """Паки сборки camp, входящие в часть part (PART_ALL — все). Пак по выбору
         (addon) в сборку не входит никогда: его ставят только отдельной записью."""
-        return [p for p in packs.values()
-                if p.get('camp') == camp and not p.get('addon')
-                and (part in (PART_ALL, None) or self._part_of_unit(p, packs) == part)]
+        return core.camp_part_packs(camp, packs, part)
 
     # ───────── паки по выбору со своими файлами игры (Solar) ─────────
     # Такой пак везёт, кроме модов, файлы в корень игры: свой Rangers.exe, под который
@@ -3490,7 +3570,7 @@ class Api:
                     self._pack_ctx = name
                     core.reconstruct_unit(
                         self._repo(), c, u, mods_dir, tok, self._progress, self.log,
-                        tmp_dir=ROOT, mod=BASE_MOD, should_cancel=self.should_cancel,
+                        tmp_dir=self._download_dir(), mod=BASE_MOD, should_cancel=self.should_cancel,
                         part_cb=self._part_progress, byte_cb=self._byte_progress,
                         chunk_cb=self._chunk_progress, vlog=self.vlog, skip_present=True,
                         fork_files=ff, fork_index=fidx)
@@ -3626,7 +3706,7 @@ class Api:
         units = [{k: v for k, v in d.items() if not k.startswith('_')} for d in order]
         self._pack_ctx = 'объединённые паки'
         core.reconstruct_multi(
-            repo, units, mods_dir, tok, log=self.log, vlog=self.vlog, tmp_dir=ROOT,
+            repo, units, mods_dir, tok, log=self.log, vlog=self.vlog, tmp_dir=self._download_dir(),
             should_cancel=self.should_cancel, part_cb=self._part_progress,
             byte_cb=self._byte_progress, prune_snap_id='__bulk_merge__',
             chunk_cb=self._chunk_progress, mod_sources=self._pinned_sources(packs),
@@ -3660,7 +3740,7 @@ class Api:
             self._pack_ctx = f'сборка {m["camp"]}'
             core.reconstruct_camp(
                 m['repo'], m['camp'], ulist, mods_dir, tok,
-                log=self.log, vlog=self.vlog, tmp_dir=ROOT, should_cancel=self.should_cancel,
+                log=self.log, vlog=self.vlog, tmp_dir=self._download_dir(), should_cancel=self.should_cancel,
                 part_cb=self._part_progress, byte_cb=self._byte_progress,
                 chunk_cb=self._chunk_progress,
                 mod_sources=self._pinned_sources(packs),
@@ -3670,7 +3750,7 @@ class Api:
             ff, fidx = self._fork_unit_overlay(m['camp'], m['unit'])
             core.reconstruct_unit(
                 m['repo'], m['camp'], m['unit'], mods_dir, tok,
-                self._progress, self.log, tmp_dir=ROOT, mod=m.get('mod') or None,
+                self._progress, self.log, tmp_dir=self._download_dir(), mod=m.get('mod') or None,
                 should_cancel=self.should_cancel,
                 part_cb=self._part_progress, byte_cb=self._byte_progress,
                 chunk_cb=self._chunk_progress, vlog=self.vlog,
@@ -3690,14 +3770,14 @@ class Api:
                     self.log('  (с дополнительными исправлениями от лаунчера)')
                 core.install_descriptor(
                     desc, mods_dir, idx, tok, self._progress, self.log,
-                    tmp_dir=ROOT, should_cancel=self.should_cancel,
+                    tmp_dir=self._download_dir(), should_cancel=self.should_cancel,
                     part_cb=self._part_progress, byte_cb=self._byte_progress,
                     chunk_cb=self._chunk_progress, vlog=self.vlog)
             else:
                 self.log('  этого мода нет в каталоге — ставить нечего')
         else:
             core.install_zip(m['url'], mods_dir, tok, self._progress, self.log,
-                             tmp_dir=ROOT, should_cancel=self.should_cancel)
+                             tmp_dir=self._download_dir(), should_cancel=self.should_cancel)
 
     # ───────── установить всю сборку С ЗАВИСИМОСТЯМИ ─────────
     def install_set_with_deps(self):
@@ -3846,7 +3926,7 @@ class Api:
                 self._pack_ctx = 'набор модов'
                 core.install_set(plan, mods_dir, index, token=tok, log=self.log,
                                  vlog=self.vlog,
-                                 tmp_dir=ROOT, should_cancel=self.should_cancel,
+                                 tmp_dir=self._download_dir(), should_cancel=self.should_cancel,
                                  part_cb=self._part_progress, byte_cb=self._byte_progress)
                 now = datetime.now().isoformat()
                 for m in self.profile.get('mods', []):
@@ -3883,7 +3963,16 @@ class Api:
         """{сборка: [{key,camp,unit,name,tier,load_order}]} для каскада добавления."""
         try:
             packs = self._get_packs(self._token())
-            return {'ok': True, 'camps': core.camp_packs(packs)}
+            camps = core.camp_packs(packs)
+            for entries in camps.values():
+                for entry in entries:
+                    entry['in_profile'] = any(
+                        (record.get('type') == 'unit' and record.get('camp') == entry.get('camp')
+                         and record.get('unit') == entry.get('unit') and not record.get('mod'))
+                        or (record.get('type') == 'camp' and record.get('camp') == entry.get('camp')
+                            and (record.get('part') or PART_ALL) == PART_ALL and not entry.get('addon'))
+                        for record in self.profile.get('mods', []))
+            return {'ok': True, 'camps': camps}
         except Exception as e:
             return {'ok': False, 'error': str(e)}
 
@@ -3929,6 +4018,7 @@ class Api:
             keys = core.list_unit_mods(self._repo(), camp, unit, self._token())
         except Exception as e:
             return {'ok': False, 'error': str(e)}
+        added = self._profile_mod_ids()
         out = []
         addon = bool((self._packs_cache or {}).get(f'{camp}/{unit}', {}).get('addon'))
         for key in keys:
@@ -3945,6 +4035,11 @@ class Api:
                             'desc': e.get('description', '')})
             else:
                 out.append({'key': key, 'name': key.split('/')[-1], 'camps': [], 'desc': ''})
+        for entry in out:
+            entry['in_profile'] = entry['key'].split('@', 1)[0] in added if entry['key'] != BASE_MOD else any(
+                record.get('type') == 'unit' and record.get('camp') == camp
+                and record.get('unit') == unit and record.get('mod') in (None, '', BASE_MOD)
+                for record in self.profile.get('mods', []))
         return {'ok': True, 'mods': out}
 
     def _profile_base_camp(self):
@@ -4260,7 +4355,7 @@ class Api:
                 parts.append('ваши правки сохранены')
             detail = ' · '.join(parts) or 'без изменений файлов'
             self._emit('merge_silent', {'text': f'{u["id"]} обновлён',
-                                        'sub': detail, 'count': 1})
+                                        'sub': detail, 'sub_parts': parts or [detail], 'count': 1})
         else:
             self._emit('merge_silent',
                        {'text': f'Обновлено модов: {len(ups)}',
@@ -4324,7 +4419,7 @@ class Api:
             return None
         desc, index = self._overlay_theirs(desc, desc.get('source'), allow=not m.get('url'))
         plan = core.plan_update_merge(desc, mods_dir, index, token=tok, log=self.log,
-                                      snapshot=snap, tmp_dir=ROOT,
+                                      snapshot=snap, tmp_dir=self._download_dir(),
                                       progress_cb=self._progress,
                                       should_cancel=self.should_cancel)
         return desc, plan, index
@@ -4524,7 +4619,7 @@ class Api:
             if desc.get('id') != mid:
                 desc = dict(desc); desc['id'] = mid
             plan = core.plan_update_merge(desc, mods_dir, index, token=tok, log=self.log,
-                                          snapshot=snap, tmp_dir=ROOT,
+                                          snapshot=snap, tmp_dir=self._download_dir(),
                                           progress_cb=self._progress,
                                           should_cancel=self.should_cancel)
         return desc, plan, index
@@ -4789,7 +4884,7 @@ class Api:
         try:
             stats = core.apply_update_plan(desc, plan, decisions, mods_dir, index,
                                            token=self._token(), log=self.log,
-                                           tmp_dir=ROOT, progress_cb=self._progress,
+                                           tmp_dir=self._download_dir(), progress_cb=self._progress,
                                            should_cancel=self.should_cancel,
                                            byte_cb=self._byte_progress,
                                            part_cb=self._part_progress,

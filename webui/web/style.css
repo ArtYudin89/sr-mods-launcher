@@ -78,6 +78,8 @@ input:focus-visible,select:focus-visible,textarea:focus-visible,
 .btn.primary:hover{filter:brightness(1.08);}
 .btn.play{background:linear-gradient(90deg,var(--accent),var(--accent-2));color:#fff;font-weight:700;border-color:transparent;}
 .btn.ghost{background:transparent;}
+.btn.ghost.primary{background:var(--accent);}
+.already-added{color:var(--ok);font-size:12px;margin-left:8px;white-space:nowrap;}
 .btn.danger:hover{border-color:var(--danger);color:var(--danger);}
 .btn.primary.danger{background:var(--danger);color:#fff;border-color:transparent;}
 .btn.primary.danger:hover{filter:brightness(1.08);border-color:transparent;}
@@ -580,10 +582,11 @@ body.busy .toggle.click{pointer-events:none;opacity:.5;}
   box-shadow:0 0 0 9999px rgba(0,0,0,.62),0 0 0 2px var(--accent),0 0 22px 4px rgba(52,192,214,.55);}
 /* подсказка-карточка со стэппером */
 .tour-tip{position:absolute;width:400px;max-width:92vw;background:var(--panel);
-  border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);padding:15px 17px;}
+  border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);padding:15px 17px;
+  display:flex;flex-direction:column;}
 .tour-tip-title{font-size:15px;font-weight:700;color:var(--fg);margin-bottom:6px;}
-.tour-tip-text{font-size:13px;line-height:1.55;color:var(--muted);}
-.tour-tip-foot{display:flex;align-items:center;gap:7px;margin-top:14px;flex-wrap:wrap;}
+.tour-tip-text{font-size:13px;line-height:1.55;color:var(--muted);overflow:auto;min-height:0;}
+.tour-tip-foot{display:flex;align-items:center;gap:7px;margin-top:14px;flex-wrap:wrap;flex:none;}
 .tour-tip-foot .spacer{flex:1;min-width:6px;}
 .tour-tip-foot .btn{flex:none;padding:6px 11px;font-size:12px;}
 .tour-step{font-size:12px;color:var(--muted);white-space:nowrap;flex:none;}

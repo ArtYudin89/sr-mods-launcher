@@ -18,7 +18,7 @@
       <button class="icon-btn" id="profileMenuBtn" title="Создать профиль и управлять списком">＋</button>
       <div class="game-path" id="gamePath" title="Папка, куда установлена игра. Нажмите, чтобы выбрать.">Папка игры не выбрана</div>
       <div class="spacer"></div>
-      <button class="icon-btn" id="tourBtn" title="Обучение — тур по интерфейсу лаунчера">🎓</button>
+      <button class="icon-btn busy-ok" id="tourBtn" title="Обучение — быстрый старт и подробный тур">🎓</button>
       <button class="icon-btn busy-ok" id="helpBtn" title="Справка">❔</button>
       <button class="icon-btn busy-ok" id="themeBtn" title="Светлая / тёмная тема">🌙</button>
       <button class="icon-btn busy-ok" id="settingsBtn" title="Настройки">⚙</button>
@@ -246,6 +246,13 @@
     <div class="modal settings-modal">
       <h2>Настройки</h2>
       <div class="m-body">
+        <div class="m-row">
+          <label for="setLanguage">Язык / Language</label>
+          <select id="setLanguage" data-i18n-skip>
+            <option value="ru">Русский</option>
+            <option value="en">English</option>
+          </select>
+        </div>
         <div class="m-row">
           <label>Папка игры <span class="help-q" role="button" tabindex="0" title="Туда, где лежит Rangers.exe. Моды ставятся в подпапку Mods.">?</span></label>
           <div style="display:flex;gap:8px">
@@ -621,6 +628,19 @@
     </div>
   </div>
 
+  <div class="overlay hidden" id="trainingOverlay">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="trainingTitle">
+      <div class="m-head"><h2 id="trainingTitle">Как начать играть</h2></div>
+      <div class="m-body">
+        <p>Короткий маршрут: выбрать игру и сборку, скачать моды и запустить игру.</p>
+        <button class="btn primary" id="trainingBasic">Быстрый старт — 5 шагов</button>
+        <p>Все возможности лаунчера: профили, отдельные моды, обновления и настройки.</p>
+        <button class="btn" id="trainingFull">Подробный тур — 17 шагов</button>
+      </div>
+      <div class="m-foot"><button class="btn" id="trainingClose">Закрыть</button></div>
+    </div>
+  </div>
+
   <!-- ОБУЧЕНИЕ: подсветка элемента + подсказка-стэппер -->
   <div class="tour hidden" id="tourOverlay">
     <div class="tour-hi" id="tourHi"></div>
@@ -639,6 +659,8 @@
 
   <div class="toast-wrap" id="toastWrap"></div>
 
+  <script src="en.js"></script>
+  <script src="i18n.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

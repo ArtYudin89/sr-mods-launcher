@@ -4,6 +4,8 @@ Public `ArtYudin89/sr-mods-launcher`, ПРОД у игроков (авто-self-
 
 ## Архитектура
 - Рабочий код: `webui/` — `app.py` (класс Api) + `launcher_core.py` (движок, headless-тестируемый) + `web/{app.js,index.html,style.css}`.
+- Ранг паков, части и состав сборки — в `launcher_core` (`unit_install_rank`, `unit_part`,
+  `camp_part_packs`, `camp_install_order`); `Api` и sr-lab используют эти общие правила.
 - Корневые `launcher.py` / `build.bat` — СТАРЫЙ tkinter-лаунчер: не трогать, не путать.
 - Данные у игрока: `%Documents%\SpaceRangersHD\Launcher`. Каталог/дескрипторы — raw.githubusercontent без токена; блобы — HF по `asset_index.json`.
 
@@ -11,7 +13,11 @@ Public `ArtYudin89/sr-mods-launcher`, ПРОД у игроков (авто-self-
 Детект обновлений (`_check_updates_worker` → `_merged_camp_files`) и апдейт (`_plan_merge_disk` → `_full_variant_descriptor`) ОБЯЗАНЫ целиться в один и тот же слитый набор (base+fixes+форк по load_order). Любая асимметрия (сырые поюнитные манифесты, куцый default_source, невыбранный вариант, фикс-оверлей без обратной карты `fix_parent`) = класс багов «вечное обновление». Каждую правку установки/детекта сверять с обеими сторонами; на новую топологию каталога — регресс-тест в `test_integration.py`.
 
 ## Тесты (в `webui\`)
-- `python -m pytest test_integration.py test_ui_logic.py test_vdiff_variants.py ...` с `PYTHONIOENCODING=utf-8`.
+- Старые наборы — исполняемые сценарии: `python -X utf8 test_integration.py`,
+  `python -X utf8 test_ui_logic.py`, `python -X utf8 test_vdiff_variants.py` и остальные
+  `test_*.py` по затронутому поведению. `pytest` на этом ПК не установлен.
+- Новые проверки фидбэка и локализации:
+  `python -X utf8 -m unittest test_download_feedback test_add_feedback test_feedback_ui test_i18n`.
 - Playwright: ~10 сценариев флейкуют исторически — не считать регрессией; клипающиеся/absolute элементы кликать `dispatch_event`.
 - Self-QA: новую UI-логику покрывать в `test_ui_logic` ДО ручной проверки (Api.__new__ без __init__, no-op save/emit).
 
@@ -19,7 +25,7 @@ Public `ArtYudin89/sr-mods-launcher`, ПРОД у игроков (авто-self-
 `cd webui && pyinstaller --noconfirm --clean SRModsLauncher.spec` при ЗАКРЫТОМ exe (иначе WinError 5). Свежий exe = `webui/dist/SRModsLauncher.exe` (корневой `dist/` — старый).
 
 ## Релиз (только по команде юзера)
-bump `LAUNCHER_VERSION` в `app.py` → тесты → сверка рабочей копии из sr-lab: `python ..\sr-lab\tools\launcher_parity.py fixpoint --camp all --launcher worktree --expect ..\sr-lab\tools\launcher_parity_expect.json` и `plan --camp all --shared --launcher worktree --expect …` — код 0, иначе каждое новое расхождение разобрать (исправить или принять с объяснением: `--write-expect` и заметка в файле) → exe → commit/push master (ff) → `gh release create vX.Y.Z webui/dist/SRModsLauncher.exe` → в агрегаторе `state/launcher_release.json` → vX.Y.Z (сначала `git reset --hard origin/master` поверх ночного бота, потом точечная правка, ff push) → README/ИНСТРУКЦИЯ.md/ИНСТРУКЦИЯ-ПРОСТАЯ.md.
+bump `LAUNCHER_VERSION` в `app.py` → тесты → сверка рабочей копии из sr-lab: `python ..\sr-lab\tools\launcher_parity.py fixpoint --camp all --launcher worktree --expect ..\sr-lab\tools\launcher_parity_expect.json` и `plan --camp all --shared --launcher worktree --expect …` — код 0, иначе каждое новое расхождение разобрать (исправить или принять с объяснением: `--write-expect` и заметка в файле) → exe → commit/push master (ff) → `gh release create vX.Y.Z webui/dist/SRModsLauncher.exe` → в агрегаторе `state/launcher_release.json` → vX.Y.Z (fetch и отдельный чистый worktree от свежего origin/master, точечная правка, ff push) → README/ИНСТРУКЦИЯ.md/ИНСТРУКЦИЯ-ПРОСТАЯ.md. После публикации скачать exe по точному URL, сравнить размер и SHA-256; затем проверить канал автообновления.
 
 ## Уроки
 - json-данные агрегатора НЕ прогонять через json.dump (реформат) — точечный `str.replace`.
