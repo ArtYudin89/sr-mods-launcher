@@ -626,21 +626,69 @@ def _extract_zip_to(zip_path, mods_dir):
     """Распаковать zip в mods_dir с CP866-фиксом имён и нормализацией по 'Mods/'."""
     mods_dir.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(zip_path) as z:
-        for info in z.infolist():
-            if info.is_dir():
-                continue
-            name = info.filename
-            if not (info.flag_bits & 0x800):
-                try:
-                    name = name.encode('cp437').decode('cp866')
-                except Exception:
-                    pass
-            target = install_target(name, mods_dir)
-            if target is None:
-                continue
+        for info, target in _zip_targets(z, mods_dir):
             target.parent.mkdir(parents=True, exist_ok=True)
             with z.open(info) as src, open(target, 'wb') as out:
                 shutil.copyfileobj(src, out)
+
+
+def _zip_targets(archive, mods_dir, docs_dir=None):
+    for info in archive.infolist():
+        if info.is_dir():
+            continue
+        name = info.filename
+        if not (info.flag_bits & 0x800):
+            try:
+                name = name.encode('cp437').decode('cp866')
+            except UnicodeError:
+                pass
+        target = install_target(name, mods_dir)
+        if target is None and docs_dir and name in ('LICENSE', 'README.md'):
+            target = mods_dir / docs_dir / name
+        if target is not None:
+            yield info, target
+
+
+def install_verified_zip(zip_path, mods_dir, expected_sha256, should_cancel, docs_dir=None):
+    """Install an author's pinned archive while retaining files already in the game."""
+    if file_sha256(zip_path) != expected_sha256:
+        raise ValueError('Контрольная сумма архива не совпала с релизом автора.')
+    mods_dir = Path(mods_dir)
+    root = mods_dir.parent.resolve()
+    with zipfile.ZipFile(zip_path) as archive:
+        pending, conflicts, seen = [], [], set()
+        for info, target in _zip_targets(archive, mods_dir, docs_dir):
+            _check_cancel(should_cancel)
+            resolved = target.resolve()
+            if not resolved.is_relative_to(root) or resolved in seen:
+                raise ValueError(f'Недопустимый путь в архиве: {info.filename}')
+            seen.add(resolved)
+            if not target.exists():
+                pending.append((info, target))
+                continue
+            if target.is_file() and target.stat().st_size == info.file_size:
+                with archive.open(info) as source:
+                    if _stream_sha256(source) == file_sha256(target):
+                        continue
+            conflicts.append(target.relative_to(mods_dir.parent).as_posix())
+        if conflicts:
+            raise ValueError('Уже установлены отличающиеся файлы: ' + ', '.join(conflicts))
+
+        # Set up the mods and runtime before the library that bootstraps the loader.
+        pending.sort(key=lambda entry: entry[1] == mods_dir.parent / 'dsound.dll')
+        created = []
+        try:
+            for info, target in pending:
+                _check_cancel(should_cancel)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(info) as source, target.open('xb') as output:
+                    created.append(target)
+                    shutil.copyfileobj(source, output)
+        except BaseException:
+            for target in reversed(created):
+                target.unlink(missing_ok=True)
+            raise
+        return len(created)
 
 
 # ---------------------------------------------------------------------------
@@ -2375,10 +2423,14 @@ def is_text_path(relpath):
 
 
 def file_sha256(path):
-    h = hashlib.sha256()
     with open(path, 'rb') as f:
-        for chunk in iter(lambda: f.read(1 << 20), b''):
-            h.update(chunk)
+        return _stream_sha256(f)
+
+
+def _stream_sha256(stream):
+    h = hashlib.sha256()
+    for chunk in iter(lambda: stream.read(1 << 20), b''):
+        h.update(chunk)
     return h.hexdigest()
 
 

@@ -21,6 +21,11 @@ const NODE = {};                     // iid -> узел (для быстрых �
 let busy = false;
 let paused = false;                 // ⏸ операция приостановлена игроком
 let reconcileTimer = null;
+let gameRunning = false;
+let launchingGame = false;
+let pollingGame = false;
+let gameStatusVersion = 0;
+let observedGamePath = '';
 // доступность: клавиатурная навигация по дереву (roving tabindex)
 let treeCursor = null;      // data-iid/data-key строки, на которой сейчас «курсор»
 let _treeRefocus = false;   // после перерисовки вернуть фокус на курсор (только при действии с клавиатуры)
@@ -64,6 +69,7 @@ let packsByUnit = {};
 let modsByKey = {};                  // key(папка) → {key,name,camps,desc} для диалога добавления
 let ALLMODS = [];                    // плоский список всех модов (для поиска по названию)
 let SELECTED_SEARCH = null;          // выбранный в поиске мод {id, source, name, camps}
+let addCatalogMessage = '';
 
 // ───────── события из Python ─────────
 window.__emit = (event, data) => {
@@ -112,6 +118,7 @@ async function init() {
   buildCampChips();
   buildLegend();
   wireUI();
+  setInterval(refreshGameStatus, 2000);
   refreshTree();
   checkSelfUpdate();                  // фоновая проверка новой версии лаунчера
   maybeAutoTour();                    // при первом запуске — показать обучающий тур
@@ -127,12 +134,12 @@ async function checkSelfUpdate() {
   $('verBadge').onclick = () => startSelfUpdate(r);   // клик по бейджу = сразу обновление
   appendLog(trUI`⬆ Доступна новая версия лаунчера: ${r.version} (у вас ${r.current}). `
     + (r.can_auto ? trUI('Нажмите на бейдж версии внизу, чтобы обновить.') : trUI('Скачать: ') + (r.url || '')), 'acc');
-  toast(trUI`Доступна новая версия лаунчера: ${r.version} — нажмите бейдж версии, чтобы обновить`, 'ok');
+  toast(trUI`Доступна новая версия лаунчера: ${r.version}. Проверьте её в настройках.`, 'ok');
 }
 
 function applyState() {
   document.documentElement.dataset.theme = STATE.theme || 'dark';
-  $('themeBtn').textContent = STATE.theme === 'light' ? '☀' : '🌙';
+  $('themeBtn').dataset.icon = STATE.theme === 'light' ? 'sun' : 'moon';
   const sel = $('profileSel');
   sel.innerHTML = '';
   (STATE.profiles || []).forEach((p) => {
@@ -142,28 +149,39 @@ function applyState() {
     sel.appendChild(o);
   });
   const gp = $('gamePath');
-  if (STATE.game_path) { gp.textContent = '📁 ' + STATE.game_path; gp.classList.remove('unset'); }
-  else { gp.textContent = trUI('Папка игры не выбрана'); gp.classList.add('unset'); }
+  gp.textContent = STATE.game_path || trUI('Папка игры не выбрана');
+  gp.title = STATE.game_path ? trUI('Папка игры: {0}. Нажмите, чтобы выбрать другую.', STATE.game_path)
+    : trUI('Папка, куда установлена игра. Нажмите, чтобы выбрать.');
+  gp.classList.toggle('unset', !STATE.game_path);
+  if (observedGamePath !== (STATE.game_path || '')) {
+    observedGamePath = STATE.game_path || '';
+    gameStatusVersion++;
+    gameRunning = false;
+    refreshGameStatus();
+  }
+  updateGameLaunchButton();
   $('setupHint').style.display = STATE.game_path ? 'none' : 'flex';
   const vm = $('viewSeg').querySelector(`input[value="${STATE.tree_mode || 'section'}"]`);
   if (vm) vm.checked = true;
   const nm = $('nameSeg').querySelector(`input[value="${STATE.name_mode || 'folder'}"]`);
   if (nm) nm.checked = true;
   // левый рельс: свёрнут/развёрнут (запоминается между запусками)
-  const collapsed = !!STATE.rail_collapsed;
-  $('filterRail').classList.toggle('collapsed', collapsed);
-  $('railToggle').classList.toggle('active', !collapsed);
+  applyRailVisibility(!!STATE.rail_collapsed);
+  applyLayout();
   updateColHeader();
   $('verBadge').textContent = (STATE.is_rwt ? 'SR Mods Launcher (RWT)' : 'SR Mods Launcher')
     + (STATE.version ? ' v' + STATE.version : '');
   $('repoDot').classList.toggle('on', !!STATE.repo);
   $('tokenDot').classList.toggle('on', !!STATE.has_token);
+  $('repoStatus').title = STATE.repo ? trUI('Репозиторий задан') : trUI('Репозиторий не задан');
+  $('tokenStatus').title = STATE.has_token ? trUI('Токен GitHub задан') : trUI('Токен GitHub не задан');
   $('verboseChk').checked = !!STATE.log_verbose;
+  $('logBox').dataset.empty = trUI('В журнале пока нет записей.');
   $('logBox').classList.toggle('show-verbose', !!STATE.log_verbose);
   if ($('railDescInList')) $('railDescInList').checked = !!STATE.desc_in_list;
   if ($('fShowHidden')) $('fShowHidden').checked = !!STATE.show_hidden;
+  applyInterfaceMode();
   applyView();
-  reflowToolbar();
 }
 
 // ───────── вид: масштаб (zoom) · размер текста (шрифты) · контраст (цвета) ─────────
@@ -178,10 +196,10 @@ function _lerpHex(a, b, t) {
   const c = (x, y) => Math.round(x + (y - x) * t).toString(16).padStart(2, '0');
   return `#${c(ar, br)}${c(ag, bg)}${c(ab, bb)}`;
 }
-// целевые цвета при МАКСИМАЛЬНОМ контрасте (t=1) для каждой темы: [обычный, макс].
-const CONTRAST_VARS = {
-  dark:  { '--fg': ['#e8edf7', '#ffffff'], '--muted': ['#9aa7c4', '#d6def2'], '--line': ['#2c3650', '#4a597f'] },
-  light: { '--fg': ['#1a2030', '#000000'], '--muted': ['#5b677e', '#333c4d'], '--line': ['#dde3ee', '#aeb9d0'] },
+// Максимальный контраст относительно цветов выбранного интерфейса.
+const CONTRAST_TARGETS = {
+  dark:  { '--fg': '#ffffff', '--muted': '#d6def2', '--line': '#637695' },
+  light: { '--fg': '#000000', '--muted': '#28364e', '--line': '#9baecb' },
 };
 
 // размер текста: множим ВСЕ font-size из таблиц стилей (CSSOM), не трогая раскладку zoom'ом.
@@ -192,16 +210,34 @@ function collectFontRules() {
   for (const sheet of document.styleSheets) {
     let rules;
     try { rules = sheet.cssRules; } catch (e) { continue; }   // кросс-доменные — пропускаем
-    for (const r of rules) {
-      if (r.style && r.style.fontSize && r.style.fontSize.endsWith('px')) {
-        FONT_RULES.push({ style: r.style, base: parseFloat(r.style.fontSize) });
-      }
+    for (const r of rules) collectRule(r);
+  }
+  function collectRule(rule) {
+    if (rule.style?.fontSize?.endsWith('px')) {
+      FONT_RULES.push({ style: rule.style, base: parseFloat(rule.style.fontSize) });
     }
+    if (rule.cssRules) for (const child of rule.cssRules) collectRule(child);
   }
 }
 function applyTextScale(mult) {
   if (FONT_RULES === null) collectFontRules();
   for (const fr of FONT_RULES) fr.style.fontSize = (fr.base * mult).toFixed(2) + 'px';
+}
+
+function refreshScaledLayout() {
+  const zoom = Number(document.documentElement.style.zoom) || 1;
+  const width = window.innerWidth / zoom;
+  document.documentElement.classList.toggle('flow-layout',
+    width <= 760 || window.innerHeight / zoom <= 540);
+  const upperProfile = STATE.interface_mode === 'classic' && width >= 1050;
+  const host = $(upperProfile ? 'appBar' : 'contextBar');
+  const profile = $('profileControl');
+  if (profile.parentElement !== host) {
+    const focused = document.activeElement;
+    host.insertBefore(profile, $(upperProfile ? 'gamePath' : 'basePick'));
+    if (profile.contains(focused)) focused.focus({preventScroll: true});
+  }
+  reflowToolbar();
 }
 
 function applyView() {
@@ -210,6 +246,7 @@ function applyView() {
   const contrast = clampView('contrast', +(STATE.contrast || 100));
   // 1) размер только текста — множитель шрифтов (раскладка/кнопки не раздуваются)
   applyTextScale(text / 100);
+  document.documentElement.classList.toggle('large-type', text >= 130);
   // 2) масштаб всего интерфейса — zoom с компенсацией: тело держим равным вьюпорту,
   //    иначе при <100% появляется пустая область, а при >100% часть UI уходит за край.
   const root = document.documentElement, z = scale / 100;
@@ -225,10 +262,13 @@ function applyView() {
   // 3) контраст — интерполяция ключевых переменных читаемости от «как в теме» к максимуму
   const theme = root.dataset.theme === 'light' ? 'light' : 'dark';
   const t = (contrast - 100) / 50;
-  const map = CONTRAST_VARS[theme];
-  for (const k in map) {
-    if (t <= 0) root.style.removeProperty(k);
-    else root.style.setProperty(k, _lerpHex(map[k][0], map[k][1], t));
+  const targets = CONTRAST_TARGETS[theme];
+  const colors = Object.keys(targets);
+  colors.forEach((name) => root.style.removeProperty(name));
+  if (t > 0) {
+    const natural = getComputedStyle(root);
+    const startingColors = colors.map((name) => natural.getPropertyValue(name).trim());
+    colors.forEach((name, i) => root.style.setProperty(name, _lerpHex(startingColors[i], targets[name], t)));
   }
   // подписи степперов + блокировка кнопок на краях диапазона
   const setStep = (valId, minId, plusId, key, val, label) => {
@@ -247,6 +287,7 @@ function applyView() {
   setStep('frScaleVal', 'frScaleMinus', 'frScalePlus', 'scale', scale, scale + '%');
   setStep('frContrastVal', 'frContrastMinus', 'frContrastPlus', 'contrast', contrast,
           contrast <= 100 ? trUI('обычный') : '+' + (contrast - 100) + '%');
+  refreshScaledLayout();
 }
 
 function updateColHeader() {
@@ -278,6 +319,15 @@ function wireUI() {
   $('tourBtn').onclick = () => show('trainingOverlay');
   $('helpCloseBtn').onclick = () => hide('helpOverlay');
   $('helpTourBtn').onclick = () => { hide('helpOverlay'); show('trainingOverlay'); };
+  document.querySelectorAll('#helpOverlay [data-help-target]').forEach((link) => {
+    link.onclick = () => {
+      const target = $(link.dataset.helpTarget);
+      if (target.disabled) return;
+      hide('helpOverlay');
+      if (link.hasAttribute('data-help-focus')) target.focus();
+      else target.click();
+    };
+  });
   $('trainingClose').onclick = () => hide('trainingOverlay');
   $('trainingBasic').onclick = () => { hide('trainingOverlay'); startTour('basic'); };
   $('trainingFull').onclick = () => { hide('trainingOverlay'); startTour('full'); };
@@ -299,7 +349,6 @@ function wireUI() {
     }
   });
   $('verBadge').onclick = openSettings;   // клик по версии/«доступна vX» → Настройки (проверка)
-  $('verBadge').style.cursor = 'pointer';
   $('profileSel').onchange = (e) => switchProfile(e.target.value);
   $('profileMenuBtn').onclick = openProfiles;
 
@@ -312,17 +361,20 @@ function wireUI() {
   $('collapseBtn').onclick = collapseAll;
   $('treeBody').addEventListener('keydown', onTreeKey);   // доступность: стрелки/Enter/Space по дереву
   $('clearModsBtn').onclick = doClearMods;
-  // левый рельс (скрыть/показать) + вкладки правой панели + меню «Ещё»
+  // Панели, упрощённый вид и меню «Ещё».
   $('railToggle').onclick = toggleRail;
+  $('interfaceBtn').onclick = changeInterfaceMode;
+  $('simpleViewBtn').onclick = () => changeLayout(true);
+  $('sideToggle').onclick = () => changeLayout(false);
   document.querySelectorAll('.side-tab').forEach((t) => t.onclick = () => setSideTab(t.dataset.tab));
-  $('moreBtn').onclick = (e) => { e.stopPropagation(); $('moreMenu').classList.toggle('hidden'); };
-  $('moreAdd').onclick = () => { hideMoreMenu(); openAdd(); };
-  $('moreInstall').onclick = () => { hideMoreMenu(); onInstallClick(); };
-  $('moreMerge').onclick = () => { hideMoreMenu(); startMerge(); };
+  $('moreBtn').onclick = (e) => {
+    e.stopPropagation();
+    setPopupOpen('moreMenu', 'moreBtn', $('moreMenu').classList.contains('hidden'));
+  };
   $('moreCompat').onclick = () => { hideMoreMenu(); checkCompat(); };
   $('campVariantsBtn').onclick = () => { hideMoreMenu(); openCampVariants(); };
   $('restoreSkipBtn').onclick = () => { hideMoreMenu(); restoreSkips(); };
-  window.addEventListener('resize', reflowToolbar);
+  window.addEventListener('resize', refreshScaledLayout);
   $('baseSel').onchange = async () => {
     const v = $('baseSel').value;
     await api().set_base(v);
@@ -333,10 +385,13 @@ function wireUI() {
     if (!r || !r.ok) toast((r && r.error) || trUI('Не удалось'), 'err');
     else toast(trUI('Определяю базу по файлам в Mods…'), 'ok');
   };
-  $('refreshBtn').onclick = startCheckUpdates;
+  $('refreshBtn').onclick = () => startCheckUpdates();
 
   // фильтр
-  $('filterBtn').onclick = (e) => { e.stopPropagation(); $('filterPop').classList.toggle('hidden'); };
+  $('filterBtn').onclick = (e) => {
+    e.stopPropagation();
+    setPopupOpen('filterPop', 'filterBtn', $('filterPop').classList.contains('hidden'));
+  };
   $('fAll').onclick = () => { STATES.forEach((s) => filter.states.add(s.k)); syncStateChecks(); applyFilter(); };
   $('fNone').onclick = () => { filter.states.clear(); syncStateChecks(); applyFilter(); };
   $('fImportant').onclick = () => {
@@ -567,8 +622,8 @@ function wireUI() {
     if (!$('tourOverlay').classList.contains('hidden')) { endTour(); return; }
     if (!$('ctxMenu').classList.contains('hidden')) { hideCtxMenu(); return; }
     if (!$('logCtxMenu').classList.contains('hidden')) { hideLogCtxMenu(); return; }
-    if (!$('moreMenu').classList.contains('hidden')) { hideMoreMenu(); return; }
-    if (!$('filterPop').classList.contains('hidden')) { $('filterPop').classList.add('hidden'); return; }
+    if (!$('moreMenu').classList.contains('hidden')) { hideMoreMenu(); $('moreBtn').focus(); return; }
+    if (!$('filterPop').classList.contains('hidden')) { hideFilter(); $('filterBtn').focus(); return; }
     // Esc закрывает верхнюю (последнюю по z-index) плавающую карточку мода
     if (modCards.size) {
       let top = null, tz = -1;
@@ -588,7 +643,7 @@ function wireUI() {
   document.addEventListener('click', (e) => {
     if (!$('filterPop').classList.contains('hidden') &&
         !$('filterPop').contains(e.target) && e.target !== $('filterBtn')) {
-      $('filterPop').classList.add('hidden');
+      hideFilter();
     }
   });
 }
@@ -614,6 +669,7 @@ function applyFilter() {
   renderTree();
 }
 function passFilter(node) {
+  if (STATE.simple_view) return !node.hidden;
   if (!filter.states.has(node.status_class)) return false;
   if (filter.inGame && !node.in_game) return false;
   if (filter.inProfile && !node.in_profile) return false;
@@ -683,7 +739,7 @@ function buildLegend() {
 function toggleTheme() {
   const next = (document.documentElement.dataset.theme === 'light') ? 'dark' : 'light';
   document.documentElement.dataset.theme = next;
-  $('themeBtn').textContent = next === 'light' ? '☀' : '🌙';
+  $('themeBtn').dataset.icon = next === 'light' ? 'sun' : 'moon';
   STATE.theme = next;
   applyView();               // переинтерполировать контраст под новую тему
   api().set_theme(next);
@@ -720,13 +776,14 @@ function renderTree() {
   for (const k in NODE) delete NODE[k];
   const body = $('treeBody');
   const camps = (TREE && TREE.camps) || [];
+  body.parentElement.classList.toggle('empty-tree', !camps.length);
   if (!camps.length) {
     // Пустой профиль сам предлагает сборку: пресеты «всё одной сборкой» жили в окне
     // «Профили модов», и новичок их не находил — шёл по каскаду «Добавить мод» в девять
     // шагов. Пустой список всё равно ничего не показывает — отдаём место выбору.
     body.innerHTML = trUI`<div class="tree-empty qstart">
       <h3>С чего начать</h3>
-      <div class="qs-sub">Выберите сборку — добавим её движок и все моды.<br>Дальше останется нажать «🧩 Установить все».</div>
+      <div class="qs-sub">Выберите сборку — добавим её движок и все моды.<br>Дальше останется нажать «Установить моды».</div>
       <div class="camp-picks" id="qsCamps"><div class="sub">Загрузка списка сборок…</div></div>
       <button class="qs-manual" id="qsManual">или собрать профиль вручную →</button></div>`;
     $('qsManual').onclick = openAdd;
@@ -875,7 +932,7 @@ function onTreeKey(e) {
 }
 
 function groupRow(kind, label, key, isCol, count, counts, tc, depth) {
-  const icon = kind === 'camp' ? '🗂' : (kind === 'stock' ? '🎮' : '■');
+  const icon = kind === 'stock' ? 'game' : 'folder';
   const tw = isCol ? '▸' : '▾';
   // паки/разделы — верхний уровень (сборка убрана); depth=2 — подгруппа внутри пака
   const lvl = depth === 2 ? 'lvl2' : 'lvl1';
@@ -886,8 +943,9 @@ function groupRow(kind, label, key, isCol, count, counts, tc, depth) {
   const gc = (n, title) => n ? trUI`<span class="gcnt" title="${title}: ${n} из ${count}">${n}</span>` : '';
   const inGame = tc ? gc(tc.g, trUI('Подключено в игре')) : '';
   const inProf = tc ? gc(tc.p, trUI('В профиле')) : '';
-  return trUI`<div class="row group ${kind} ${lvl}" data-key="${esc(key)}" role="treeitem" aria-level="${depth === 2 ? 2 : 1}" aria-expanded="${isCol ? 'false' : 'true'}" aria-label="${esc(label)}, группа, ${count}, в игре ${tc ? tc.g : 0}, в профиле ${tc ? tc.p : 0}">
-    <div class="name"><span class="tw">${tw}</span><span class="label">${icon} ${esc(label)}</span></div>
+  const labelText = trUI('{0}, группа, {1}, в игре {2}, в профиле {3}', label, count, tc?.g || 0, tc?.p || 0);
+  return `<div class="row group ${kind} ${lvl}" data-key="${esc(key)}" role="treeitem" aria-level="${depth === 2 ? 2 : 1}" aria-expanded="${isCol ? 'false' : 'true'}" aria-label="${esc(labelText)}">
+    <div class="name"><span class="tw" aria-hidden="true">${tw}</span><span class="group-icon" data-icon="${icon}" aria-hidden="true"></span><span class="label">${esc(label)}</span></div>
     <div class="cell"></div><div class="cell">${inGame}</div><div class="cell">${inProf}</div>
     <div class="cell">${cell}</div></div>`;
 }
@@ -925,16 +983,17 @@ function leafRow(n, lvl) {
   const sel = (isSel ? ' sel' : '') + (isAct ? ' active' : '');
   const hid = n.hidden ? ' hidden-mod' : '';
   const check = n.iid
-    ? trUI`<span class="row-check${isSel ? ' on' : ''}" data-iid="${esc(n.iid)}" title="Выбрать для массовых действий (Ctrl — по одной, Shift — диапазон)">${isSel ? '✓' : ''}</span>`
+    ? `<button type="button" class="row-check${isSel ? ' on' : ''}" data-iid="${esc(n.iid)}" tabindex="-1" aria-pressed="${isSel}"
+        title="${trUI('Выбрать для массовых действий (Ctrl — по одной, Shift — диапазон)')}"><span class="mod-check" aria-hidden="true"></span></button>`
     : '<span class="row-check ghost"></span>';
-  const inGame = `<span class="toggle ro${n.in_game ? ' on' : ''}" title="${n.in_game ? trUI('подключён в игре') : trUI('не подключён в игре')}">${n.in_game ? '✓' : ''}</span>`;
+  const inGame = `<span class="toggle ro${n.in_game ? ' on' : ''}" title="${n.in_game ? trUI('подключён в игре') : trUI('не подключён в игре')}"><span class="mod-check" aria-hidden="true"></span></span>`;
   const inProf = n.mid
-    ? trUI`<span class="toggle click${n.in_profile ? ' on' : ''}" data-mid="${esc(n.mid)}" data-on="${n.in_profile ? 1 : 0}" title="нажмите, чтобы включить/выключить в профиле">${n.in_profile ? '✓' : ''}</span>`
+    ? `<button type="button" class="toggle click${n.in_profile ? ' on' : ''}" data-mid="${esc(n.mid)}" data-on="${n.in_profile ? 1 : 0}"
+        tabindex="-1" aria-pressed="${!!n.in_profile}" title="${trUI('нажмите, чтобы включить/выключить в профиле')}"><span class="mod-check" aria-hidden="true"></span></button>`
     : '';
-  const info = n.has_info
-    ? trUI`<span class="info-btn" data-mid="${esc(n.mid)}" title="Подробнее о моде">ⓘ</span>` : '';
+  const info = n.has_info ? modInfoButton(n.mid) : '';
   const noteIc = n.note
-    ? trUI`<span class="note-ic" title="Заметка: ${esc(n.note)}">📝</span>` : '';
+    ? `<span class="note-ic" data-icon="note" title="${esc(trUI('Заметка: {0}', n.note))}"></span>` : '';
   // полное описание в списке (настройка) — иначе краткое; ничего, если пусто
   const descText = (STATE.desc_in_list && n.full_desc) ? n.full_desc : n.desc;
   const desc = descText ? `<div class="mdesc${STATE.desc_in_list && n.full_desc ? ' full' : ''}">${esc(descText)}</div>` : '';
@@ -947,18 +1006,30 @@ function leafRow(n, lvl) {
   // в каких каталогах мод числится, а не про то, откуда он взялся на диске.
   const stock = n.stock
     ? trUI('<span class="stock-note" title="Мод входит в поставку игры (Steam кладёт его в Mods сам) — скачивать и устанавливать не нужно">(поставляется с игрой)</span>') : '';
-  const hidMark = n.hidden ? trUI('<span class="hid-mark" title="Скрыт из списка (виден, т.к. включён показ скрытых)">🙈</span>') : '';
+  const hidMark = n.hidden
+    ? `<span class="hid-mark" data-icon="hidden" title="${trUI('Скрыт из списка (виден, т.к. включён показ скрытых)')}"></span>` : '';
   const frzMark = n.frozen
-    ? `<span class="frz-mark" title="${n.frozen_by_hidden
+    ? `<span class="frz-mark" data-icon="lock" title="${n.frozen_by_hidden
         ? trUI('Не обновляется: мод скрыт, а в настройках включено «скрытые моды не обновлять»')
-        : trUI('Не обновляется: вы пометили мод 🔒 (ПКМ по строке — снять пометку)')}">🔒</span>` : '';
-  return `<div class="row leaf lvl${lvl}${sel}${hid}${n.frozen ? ' frozen-mod' : ''}" data-iid="${esc(n.iid)}" data-mid="${esc(n.mid || '')}" role="treeitem" aria-level="${lvl}" aria-selected="${isSel ? 'true' : 'false'}" aria-label="${esc(disp)}, ${esc(uiMessage(n.status))}${n.in_profile ? trUI(', в профиле') : ''}${n.hidden ? trUI(', скрыт') : ''}">
-    <div class="name">${check}<span class="tw">·</span>
-      <span class="label-wrap"><span class="name-line">${hidMark}${frzMark}<span class="label">${esc(disp)}</span>${stock}${labelBadges(n.labels)}${userTags(n.tags, n.mid)}${alt}${date}</span>${variantSwitch(n)}${desc}</span>${noteIc}${info}</div>
-    <div class="cell">${esc(colValue(n) || '')}</div>
+        : trUI('Не обновляется: вы пометили мод 🔒 (ПКМ по строке — снять пометку)')}"></span>` : '';
+  const status = String(uiMessage(n.status) || '').replace(/^[✅⬆➕📥❌⚠🔒⏳]\uFE0F?\s*/u, '');
+  const dimension = esc(colValue(n) || '');
+  const gameFlag = n.in_game ? `<span class="row-ingame">${trUI('В игре')}</span>` : '';
+  return `<div class="row leaf lvl${lvl}${sel}${hid}${n.frozen ? ' frozen-mod' : ''}" data-iid="${esc(n.iid)}" data-mid="${esc(n.mid || '')}" role="treeitem" aria-level="${lvl}" aria-selected="${isSel ? 'true' : 'false'}" aria-label="${esc(disp)}, ${esc(status)}${n.in_game ? trUI(', в игре') : ''}${n.in_profile ? trUI(', в профиле') : ''}${n.hidden ? trUI(', скрыт') : ''}">
+    <div class="name">${check}
+      <div class="label-wrap">
+        <div class="name-line">${hidMark}${frzMark}<span class="label" title="${esc(disp)}">${esc(disp)}</span></div>
+        <div class="name-meta">${stock}${labelBadges(n.labels)}${userTags(n.tags, n.mid)}${alt}${date}${dimension ? `<span class="row-dim" title="${dimension}">${dimension}</span>` : ''}${gameFlag}</div>
+        ${variantSwitch(n)}${desc}
+      </div>${noteIc}${info}</div>
+    <div class="cell" title="${dimension}">${dimension}</div>
     <div class="cell">${inGame}</div>
     <div class="cell">${inProf}</div>
-    <div class="cell"><span class="badge b-${n.status_class}">${esc(uiMessage(n.status))}</span></div></div>`;
+    <div class="cell"><span class="badge state-badge b-${n.status_class}"><span class="state-label">${esc(status)}</span></span></div></div>`;
+}
+
+function modInfoButton(mid) {
+  return `<button type="button" class="info-btn" data-mid="${esc(mid)}" tabindex="-1" title="${trUI('Подробнее о моде')}"><span class="info-glyph" aria-hidden="true"></span></button>`;
 }
 
 // метка кнопки варианта: предпочитаем НАЗВАНИЕ БАЗОВОЙ СБОРКИ (а не имя пака). В узком
@@ -1200,9 +1271,9 @@ function relGroupRow(label, count, tip) {
 // мод-связь, которого нет в текущем списке (не установлен и не в профиле)
 function relMissingRow(x) {
   const nm = (x && (x.name || x.mid)) || '?';
-  const info = x && x.mid ? trUI`<span class="info-btn" data-mid="${esc(x.mid)}" title="Подробнее о моде">ⓘ</span>` : '';
+  const info = x && x.mid ? modInfoButton(x.mid) : '';
   return trUI`<div class="row leaf lvl2 rel-missing" data-mid="${esc((x && x.mid) || '')}">
-    <div class="name"><span class="row-check ghost"></span><span class="tw">·</span>
+    <div class="name"><span class="row-check ghost"></span>
       <span class="label-wrap"><span class="name-line"><span class="label">${esc(nm)}</span></span></span>${info}</div>
     <div class="cell"></div><div class="cell"></div><div class="cell"></div>
     <div class="cell"><span class="badge b-miss" title="Мода нет в вашем списке (не установлен и не в профиле)">нет в списке</span></div></div>`;
@@ -1232,6 +1303,7 @@ function selectRelMid(mid) {
 function toggleRelPanel() {
   const w = $('relWrap');
   const col = w.classList.toggle('collapsed');
+  $('relHead').setAttribute('aria-expanded', String(!col));
   $('relHead').querySelector('.rel-tw').textContent = col ? '▸' : '▾';
 }
 function updateActionButtons() {
@@ -1240,38 +1312,35 @@ function updateActionButtons() {
   const hasUpdates = allNodes().some((n) => n.mergeable && n.status_class === 'upd');
   const hasSet = !!(TREE && TREE.queue && TREE.queue.count);
   $('addBtn').disabled = busy;
+  $('helpOpenAdd').disabled = busy;
   $('removeBtn').disabled = busy || !pidx.length;
   // единая кнопка установки (как «Обновить»): есть выделение → «выбранное», иначе → «весь профиль»
   const ib = $('installBtn');
   if (pidx.length) {
-    ib.textContent = trUI('⬇ Установить выбранное');
+    ib.textContent = trUI('Установить выбранное');
     ib.disabled = busy;
   } else {
-    ib.textContent = trUI('🧩 Установить все');
+    ib.textContent = trUI('Установить моды');
     ib.disabled = busy || !hasSet;
   }
   const mb = $('mergeBtn');
-  if (mergeSel) {                                  // есть выделение → обновить выбранные
-    mb.textContent = trUI('🔀 Обновить выбранные');
-    mb.disabled = busy;
-  } else {                                         // нет выделения → обновить все с обновлением
-    mb.textContent = trUI('🔀 Обновить все');
-    mb.disabled = busy || !hasUpdates;
-  }
+  mb.textContent = mergeSel ? trUI('Обновить выбранные') : trUI('Обновить моды');
+  mb.title = mergeSel || hasUpdates
+    ? trUI('Скачать найденные обновления и применить их с сохранением ваших правок.')
+    : trUI('Новые версии ищет кнопка «Проверить обновления».');
+  mb.disabled = busy || checkingRequest || !(mergeSel || hasUpdates);
+  mb.classList.toggle('primary', !mb.disabled);
+  $('refreshBtn').disabled = busy || checkingRequest || !STATE.game_path;
   $('compatBtn').disabled = busy;
   // «Снять выбор (N)» — видна только когда есть выбранные галочкой строки (отзыв 12)
   const csb = $('clearSelBtn');
   if (csb) {
     const cnt = selected.size;
     csb.style.display = cnt ? '' : 'none';
-    csb.textContent = trUI`✖ Снять выбор (${cnt})`;
+    csb.textContent = trUI`Снять выбор (${cnt})`;
     csb.disabled = busy;
   }
-  // дубли в меню «Ещё» (для узкого окна) синхронизируем с оригиналами
-  const ma = $('moreAdd'); if (ma) { ma.disabled = $('addBtn').disabled; }
-  const mi = $('moreInstall'); if (mi) { mi.textContent = ib.textContent; mi.disabled = ib.disabled; }
-  const mm = $('moreMerge'); if (mm) { mm.textContent = mb.textContent; mm.disabled = mb.disabled; }
-  const mc = $('moreCompat'); if (mc) { mc.disabled = $('compatBtn').disabled; }
+  $('moreCompat').disabled = busy;
   reflowToolbar();                                 // текст кнопок мог измениться → пересчитать перенос
 }
 
@@ -1283,7 +1352,9 @@ function setToggleVisual(mid, on) {
     [...c.mods, ...c.packs.flatMap((p) => p.mods)].forEach((n) => { if (n.mid === mid) n.in_profile = on; });
   });
   document.querySelectorAll(`.toggle.click[data-mid="${cssEsc(mid)}"]`).forEach((t) => {
-    t.classList.toggle('on', on); t.textContent = on ? '✓' : ''; t.dataset.on = on ? '1' : '0';
+    t.classList.toggle('on', on);
+    t.setAttribute('aria-pressed', String(on));
+    t.dataset.on = on ? '1' : '0';
   });
 }
 function applyToggleNow(mid, on, add, disable) {
@@ -1638,36 +1709,147 @@ function hideLogCtxMenu() { $('logCtxMenu').classList.add('hidden'); }
 
 // ───────── рельс / вкладки / меню «Ещё» / переполнение тулбара ─────────
 function toggleRail() {
-  const collapsed = $('filterRail').classList.toggle('collapsed');
-  $('railToggle').classList.toggle('active', !collapsed);
+  const collapsed = !$('filterRail').classList.contains('collapsed');
+  applyRailVisibility(collapsed);
   try { api().set_rail_collapsed(collapsed); } catch (e) {}
-  if (collapsed) $('filterPop').classList.add('hidden');
+  if (collapsed) hideFilter();
   reflowToolbar();
 }
+function applyRailVisibility(collapsed) {
+  $('filterRail').classList.toggle('collapsed', collapsed);
+  $('railToggle').classList.toggle('active', !collapsed);
+  $('railToggle').setAttribute('aria-expanded', String(!collapsed));
+}
+function applyInterfaceMode() {
+  const classic = STATE.interface_mode === 'classic';
+  document.documentElement.dataset.interface = classic ? 'classic' : 'remaster';
+  const button = $('interfaceBtn');
+  button.textContent = classic ? trUI('Вернуть ремастер') : trUI('Классический интерфейс');
+}
+async function changeInterfaceMode() {
+  const button = $('interfaceBtn');
+  if (button.getAttribute('aria-disabled') === 'true') return;
+  const mode = STATE.interface_mode === 'classic' ? 'remaster' : 'classic';
+  button.setAttribute('aria-disabled', 'true');
+  try {
+    if (!(await api().set_interface_mode(mode))) throw new Error('Interface setting was not saved');
+    STATE.interface_mode = mode;
+    applyInterfaceMode();
+    applyView();
+  } catch (error) {
+    toast(trUI('Не удалось сохранить выбор интерфейса.'), 'err');
+  } finally {
+    button.removeAttribute('aria-disabled');
+  }
+}
+function sidePreference() { return STATE.simple_view ? 'simple_side_collapsed' : 'side_collapsed'; }
+function sideCollapsed() { return STATE[sidePreference()] ?? !!STATE.simple_view; }
+function applyLayout() {
+  const simple = !!STATE.simple_view;
+  const closed = sideCollapsed();
+  document.body.classList.toggle('simple-view', simple);
+  $('simpleViewBtn').setAttribute('aria-pressed', String(simple));
+  $('simpleViewLabel').textContent = simple ? trUI('Полный вид') : trUI('Упрощённый вид');
+  $('simpleViewBtn').title = $('simpleViewLabel').textContent;
+  $('gameSidePanel').hidden = closed;
+  const side = $('sideToggle');
+  side.classList.toggle('active', !closed);
+  side.setAttribute('aria-expanded', String(!closed));
+  side.title = closed ? trUI('Открыть панель «Игра / Журнал»') : trUI('Свернуть панель «Игра / Журнал»');
+  side.setAttribute('aria-label', side.title);
+}
+async function changeLayout(changeView) {
+  const simple = !!STATE.simple_view;
+  const preference = changeView ? 'simple_view' : sidePreference();
+  const value = changeView ? !simple : !sideCollapsed();
+  const toggle = $('simpleViewBtn');
+  const side = $('sideToggle');
+  toggle.disabled = side.disabled = true;
+  try {
+    const saved = changeView ? await api().set_simple_view(value) : await api().set_side_collapsed(value, simple);
+    if (!saved) throw new Error('Layout preference was not saved');
+    STATE[preference] = value;
+    applyLayout();
+    if (changeView) {
+      hideFilter();
+      hideMoreMenu();
+      if (TREE) renderTree();
+    }
+    reflowToolbar();
+  } catch (e) {
+    toast(changeView ? trUI('Не удалось сохранить вид интерфейса.') : trUI('Не удалось сохранить положение панели.'), 'err');
+  } finally { toggle.disabled = side.disabled = false; }
+}
 function setSideTab(name) {
-  document.querySelectorAll('.side-tab').forEach((t) => t.classList.toggle('on', t.dataset.tab === name));
+  document.querySelectorAll('.side-tab').forEach((tab) => {
+    const active = tab.dataset.tab === name;
+    tab.classList.toggle('on', active);
+    tab.setAttribute('aria-pressed', String(active));
+  });
   $('paneGame').classList.toggle('hidden', name !== 'game');
   $('paneLog').classList.toggle('hidden', name !== 'log');
   if (name === 'log') $('logBox').scrollTop = $('logBox').scrollHeight;
 }
-function hideMoreMenu() { const m = $('moreMenu'); if (m) m.classList.add('hidden'); }
-// Переполнение тулбара: панель ВСЕГДА одна строка (flex-wrap:nowrap). При нехватке
-// ширины кнопки прогрессивно уезжают в меню «Ещё»: narrow (Обновить+Совместимость) →
-// narrow2 (+Установить) → narrow3 (+Добавить). Замеряем реальное переполнение по
-// scrollWidth: пока не влезает — добавляем следующий уровень свёртки.
+function setPopupOpen(menu, control, open) {
+  $(menu).classList.toggle('hidden', !open);
+  $(control).setAttribute('aria-expanded', String(open));
+}
+function hideMoreMenu() { setPopupOpen('moreMenu', 'moreBtn', false); }
+function hideFilter() { setPopupOpen('filterPop', 'filterBtn', false); }
+// В узком окне «Совместимость» доступна из «Ещё», а основные кнопки могут переноситься.
 function reflowToolbar() {
   const tb = $('actionsToolbar');
-  if (!tb) return;
-  const tiers = ['narrow', 'narrow2', 'narrow3'];
-  tiers.forEach((t) => tb.classList.remove(t));
-  for (const t of tiers) {
-    if (tb.scrollWidth <= tb.clientWidth + 1) break;   // влезает → дальше не сворачиваем
-    tb.classList.add(t);                               // ещё переполнено → следующий уровень
-  }
+  tb.classList.remove('narrow');
+  tb.classList.toggle('narrow', tb.scrollWidth > tb.clientWidth + 1);
 }
 
 // ───────── запуск/папка ─────────
-async function launchGame() { const r = await api().launch_game(); r.ok ? toast(trUI('Запускаю игру…'), 'ok') : toast(r.error, 'err'); }
+function updateGameLaunchButton() {
+  const button = $('launchBtn');
+  const status = $('gameCardStatus');
+  const label = launchingGame ? trUI('Запускается…') : gameRunning ? trUI('Запущено') : trUI('Играть');
+  if (button.textContent !== label) button.textContent = label;
+  button.title = gameRunning ? trUI('Игра запущена') : trUI('Запустить Space Rangers HD');
+  button.disabled = busy || launchingGame || gameRunning || !observedGamePath;
+  button.classList.toggle('running', gameRunning);
+  button.dataset.icon = gameRunning ? 'check' : 'play';
+  const statusLabel = gameRunning || launchingGame ? label
+    : observedGamePath ? trUI('Папка игры выбрана') : trUI('Папка игры не выбрана');
+  if (status.textContent !== statusLabel) status.textContent = statusLabel;
+  status.classList.toggle('running', gameRunning);
+  status.classList.toggle('unset', !observedGamePath);
+}
+async function refreshGameStatus() {
+  if (pollingGame || launchingGame || !observedGamePath) return;
+  pollingGame = true;
+  const version = gameStatusVersion;
+  try {
+    const status = await api().get_game_status();
+    if (version === gameStatusVersion && typeof status?.running === 'boolean') {
+      gameRunning = status.running;
+      updateGameLaunchButton();
+    }
+  } catch (e) {
+    // Сохраняем последнее известное состояние и повторяем проверку по таймеру.
+  } finally { pollingGame = false; }
+}
+async function launchGame() {
+  if ($('launchBtn').disabled) return;
+  const version = ++gameStatusVersion;
+  launchingGame = true;
+  updateGameLaunchButton();
+  try {
+    const result = await api().launch_game();
+    if (!result?.ok) toast(result?.error || trUI('Не удалось запустить игру.'), 'err');
+    else if (version === gameStatusVersion) gameRunning = result.running === true;
+  } catch (e) {
+    toast(trUI('Не удалось запустить игру.'), 'err');
+  } finally {
+    launchingGame = false;
+    updateGameLaunchButton();
+    refreshGameStatus();
+  }
+}
 async function browseGame() {
   const p = await api().browse_game();
   if (p) { STATE.game_path = p; applyState(); refreshTree(); toast(trUI('Папка игры выбрана'), 'ok'); }
@@ -1760,47 +1942,77 @@ async function addPreset(camp, withBase) {
   if (!r.ok) { toast(r.error, 'err'); return false; }
   if (r.dup) { toast(trUI`«${campLabel(camp)}» уже в профиле`, 'ok'); return true; }
   refreshTree();
-  toast(trUI`Добавлено «всё ${campLabel(camp)}» — нажмите «🧩 Установить все»`, 'ok');
+  toast(trUI`Добавлено «всё ${campLabel(camp)}» — нажмите «Установить моды»`, 'ok');
   return true;
 }
 
 // ───────── проверка обновлений: порядок сборок ─────────
-let pendingAfterDetect = null;    // что запустить после автоопределения базы
+let pendingAfterDetect = false;
+let checkingRequest = false;
 let ORDER_EDIT = [];              // редактируемый порядок в диалоге (incl. база на [0])
 let ORDER_ALL = [];
 
-async function startCheckUpdates() {
-  const st = await api().get_update_order();      // {ok, base, order, all_camps}
-  if (!st || !st.ok) { toast(trUI('Не удалось получить состояние'), 'err'); return; }
-  if (!st.base) {                                 // п.1 — база не выбрана
-    confirmBox(trUI('Базовая сборка не выбрана'),
-      trUI('Для проверки обновлений нужно знать базовую сборку.<br>Определить её автоматически по файлам в папке Mods?'),
-      () => { pendingAfterDetect = 'check'; api().autodetect_base(); toast(trUI('Определяю базу…'), 'ok'); },
-      null, { okLabel: trUI('Определить автоматически'), cancelLabel: trUI('Отмена') });
-    return;
+async function startCheckUpdates(afterDetect = false) {
+  if (busy || checkingRequest) return;
+  checkingRequest = true;
+  updateActionButtons();
+  try {
+    const st = await api().get_update_order();
+    if (!st?.ok) { toast(st?.error || trUI('Не удалось получить состояние'), 'err'); return; }
+    if (!st.base) {
+      if (afterDetect) {
+        toast(trUI('Выберите базовую сборку в полном виде и повторите проверку.'), 'warn');
+        return;
+      }
+      confirmBox(trUI('Базовая сборка не выбрана'),
+        trUI('Для проверки обновлений нужно знать базовую сборку.<br>Определить её автоматически по файлам в папке Mods?'),
+        detectBaseForUpdate,
+        null, { okLabel: trUI('Определить автоматически'), cancelLabel: trUI('Отмена') });
+    } else if (st.needs_order) {
+      openOrderDialog(st, runUpdateCheck);
+    } else {
+      await runUpdateCheck();
+    }
+  } catch (e) {
+    toast(trUI('Не удалось начать проверку обновлений.'), 'err');
+  } finally {
+    checkingRequest = false;
+    updateActionButtons();
   }
-  if (!st.needs_order) { runUpdateCheck(); return; }       // все моды в базе → окно не нужно
-  openOrderDialog(st, (extra) => runUpdateCheck(extra));   // п.2 — окно порядка
 }
 
-async function runUpdateCheck(extra) {                     // п.3 — сама проверка
-  // extra===undefined → окно пропущено, сохранённый порядок НЕ трогаем; массив → сохранить
-  if (Array.isArray(extra)) await api().set_update_extra(extra);   // ДО refresh_remote (он сам
-  toast(trUI('Перечитываю каталог и проверяю обновления…'), 'ok');       // запускает сверку с порядком)
-  try { await api().refresh_remote(); } catch (e) {}
-  const s = await api().get_state(); STATE = s; applyState();
-  refreshTree();
+async function detectBaseForUpdate() {
+  pendingAfterDetect = true;
+  try {
+    const result = await api().autodetect_base();
+    if (result?.ok) return;
+    toast(result?.error || trUI('Не удалось начать проверку обновлений.'), 'err');
+  } catch (e) {
+    toast(trUI('Не удалось начать проверку обновлений.'), 'err');
+  }
+  pendingAfterDetect = false;
+}
+
+async function runUpdateCheck(extra) {
+  if (busy) return;
+  try {
+    const result = await api().refresh_remote(Array.isArray(extra) ? extra : null);
+    if (!result?.ok) toast(result?.error || trUI('Не удалось начать проверку обновлений.'), 'err');
+  } catch (e) {
+    toast(trUI('Не удалось начать проверку обновлений.'), 'err');
+  }
 }
 
 function openOrderDialog(st, onConfirm) {
   ORDER_EDIT = (st.order || []).slice();
   ORDER_ALL = (st.all_camps || []).slice();
   confirmBox(trUI('Порядок проверки обновлений'),
-    trUI`<div class="ord-help">Обновление каждого мода проверяется по <b>первой</b> сборке в списке, где этот мод есть. Мод проверяется один раз. Строка 1 — базовая сборка (не меняется).</div>
+    `<p class="ord-help">${trUI('Сначала проверьте версии. Найденные обновления можно будет применить кнопкой «Обновить моды».')}</p>
+     <p class="ord-help">${trUI('Для каждого мода лаунчер берёт первую сборку из списка, в которой этот мод есть. Добавьте сборку, если у вас есть моды из неё.')}</p>
      <div id="ordList" class="ord-list"></div>
-     <div class="ord-add"><select id="ordAdd"></select><button class="mini" id="ordAddBtn">➕ Добавить сборку</button></div>`,
+     <div class="ord-add"><select id="ordAdd" aria-label="${trUI('Дополнительная сборка')}"></select><button class="mini" id="ordAddBtn">${trUI('➕ Добавить сборку')}</button></div>`,
     () => onConfirm(ORDER_EDIT.slice(1)),
-    null, { okLabel: trUI('✓ Проверить'), cancelLabel: trUI('Отмена') });
+    null, { okLabel: trUI('Проверить версии'), cancelLabel: trUI('Отмена') });
   const addBtn = $('ordAddBtn');
   if (addBtn) addBtn.onclick = () => {
     const v = $('ordAdd').value;
@@ -2021,6 +2233,7 @@ async function openAdd(options = {}) {
   const remembered = STATE.add_selection || {};
   ALLMODS = [];                         // profile membership changes after each addition
   SELECTED_SEARCH = null;
+  addCatalogMessage = '';
   $('addSearchInp').value = '';
   $('addStatus').textContent = trUI('Загрузка списка паков…');
   $('addCamp').innerHTML = trUI('<option value="">— выберите сборку —</option>');
@@ -2052,12 +2265,17 @@ async function openAdd(options = {}) {
   }
 }
 function setAddMode(mode) {
-  document.querySelectorAll('#addModeSeg button').forEach((b) => b.classList.toggle('on', b.dataset.amode === mode));
+  document.querySelectorAll('#addModeSeg button').forEach((b) => {
+    const active = b.dataset.amode === mode;
+    b.classList.toggle('on', active);
+    b.setAttribute('aria-pressed', String(active));
+  });
   $('addQuick').style.display = mode === 'quick' ? 'block' : 'none';
   $('addSearch').style.display = mode === 'search' ? 'block' : 'none';
   $('addSrc').style.display = mode === 'src' ? 'block' : 'none';
   $('addFork').style.display = mode === 'fork' ? 'block' : 'none';
   $('addOverlay').dataset.mode = mode;
+  updateAddButton();
   if (mode === 'search') loadAllMods();
   if (mode === 'quick') fillQuickTab();
 }
@@ -2093,30 +2311,55 @@ async function fillQuickTab() {
 }
 async function loadAllMods() {
   if (ALLMODS.length) { renderSearchResults(); return; }
-  $('addSearchList').innerHTML = trUI('<div class="sub">Загрузка каталога…</div>');
+  addCatalogMessage = trUI('Загрузка каталога…');
+  renderSearchResults();
   let r; try { r = await api().get_all_mods(); } catch (e) { r = null; }
-  if (!r || !r.ok) { $('addSearchList').innerHTML = `<div class="sub">${esc((r && r.error) || trUI('Каталог недоступен'))}</div>`; return; }
-  ALLMODS = r.mods || [];
+  ALLMODS = r?.ok ? (r.mods || []) : [];
+  addCatalogMessage = r?.ok ? '' : (r?.error || trUI('Каталог недоступен'));
   renderSearchResults();
 }
 function renderSearchResults() {
   const q = ($('addSearchInp').value || '').trim().toLowerCase();
   let list = ALLMODS;
-  if (q) list = ALLMODS.filter((m) => m.name.toLowerCase().includes(q)
+  if (STATE.xenomods_version) {
+    list = [{id: 'author:xenomods', name: `XenoMods ${STATE.xenomods_version}`,
+             desc: trUI('Архив Xenomorphchyma с модами и загрузчиком XenoNative.'), authorPack: true}, ...list];
+  }
+  if (q) list = list.filter((m) => m.name.toLowerCase().includes(q)
     || (m.desc || '').toLowerCase().includes(q) || m.id.toLowerCase().includes(q));
   const total = list.length;
   list = list.slice(0, 200);
-  if (!list.length) { $('addSearchList').innerHTML = trUI('<div class="sub">Ничего не найдено.</div>'); return; }
+  SELECTED_SEARCH = list.find((m) => m.id === SELECTED_SEARCH?.id) || null;
+  updateAddButton();
   $('addSearchList').innerHTML = list.map((m) =>
-    `<div class="add-row${SELECTED_SEARCH && SELECTED_SEARCH.id === m.id ? ' sel' : ''}" data-id="${esc(m.id)}">
-       <div class="ar-main"><span class="ar-name">${esc(m.name)}</span>${labelBadges(m.camps)}${m.in_profile ? trUI('<span class="already-added">✓ в профиле</span>') : ''}</div>
-       ${m.desc ? `<div class="ar-desc">${esc(m.desc)}</div>` : ''}
-     </div>`).join('') + (total > 200 ? trUI`<div class="sub">…и ещё ${total - 200} — уточните запрос.</div>` : '');
+    `<button type="button" class="add-row${SELECTED_SEARCH?.id === m.id ? ' sel' : ''}" data-id="${esc(m.id)}" aria-pressed="${SELECTED_SEARCH?.id === m.id}">
+       <span class="ar-main"><span class="ar-name">${esc(m.name)}</span>${labelBadges(m.camps)}${m.in_profile ? trUI('<span class="already-added">✓ в профиле</span>') : ''}</span>
+       ${m.desc ? `<span class="ar-desc">${esc(m.desc)}</span>` : ''}
+     </button>`).join('') + (total > 200 ? trUI`<div class="sub">…и ещё ${total - 200} — уточните запрос.</div>` : '')
+     + (addCatalogMessage || !list.length ? `<div class="sub">${esc(addCatalogMessage || trUI('Ничего не найдено.'))}</div>` : '');
   $('addSearchList').querySelectorAll('.add-row').forEach((el) => el.onclick = () => {
-    $('addSearchList').querySelectorAll('.add-row').forEach((x) => x.classList.remove('sel'));
-    el.classList.add('sel');
-    SELECTED_SEARCH = ALLMODS.find((x) => x.id === el.dataset.id) || null;
+    $('addSearchList').querySelectorAll('.add-row').forEach((x) => {
+      x.classList.toggle('sel', x === el);
+      x.setAttribute('aria-pressed', String(x === el));
+    });
+    SELECTED_SEARCH = list.find((x) => x.id === el.dataset.id) || null;
+    updateAddButton();
   });
+}
+function updateAddButton() {
+  const external = $('addOverlay').dataset.mode === 'search' && SELECTED_SEARCH?.authorPack;
+  $('addOkBtn').textContent = external ? trUI('Установить…') : trUI('Добавить');
+}
+function confirmXenoModsInstall() {
+  confirmBox(trUI('Установить XenoMods?'),
+    trUI('Лаунчер скачает архив автора (382 МБ) и установит моды и загрузчик XenoNative в папку игры. При конфликте с установленными файлами установка остановится.'),
+    async () => {
+      try {
+        const result = await api().install_xenomods();
+        if (!result?.ok) { toast(result?.error || trUI('Не удалось начать установку XenoMods.'), 'err'); return; }
+        hide('addOverlay');
+      } catch (e) { toast(trUI('Не удалось начать установку XenoMods.'), 'err'); }
+    }, null, {okLabel: trUI('Скачать и установить'), cancelLabel: trUI('Отмена')});
 }
 function onAddCamp() {
   const camp = $('addCamp').value;
@@ -2201,11 +2444,12 @@ async function doAdd() {
     if (!r.ok) { toast(r.error, 'err'); return; }
     hide('addOverlay'); refreshTree();
     toast(r.dup ? trUI`«${campLabel(QUICK_SEL)}» уже в профиле`
-      : trUI`Добавлено «всё ${campLabel(QUICK_SEL)}» — нажмите «🧩 Установить все»`, 'ok');
+      : trUI`Добавлено «всё ${campLabel(QUICK_SEL)}» — нажмите «Установить моды»`, 'ok');
     return;
   }
   if (mode === 'search') {
     if (!SELECTED_SEARCH) { toast(trUI('Выберите мод из списка'), 'err'); return; }
+    if (SELECTED_SEARCH.authorPack) { confirmXenoModsInstall(); return; }
     payload = { mode: 'search', id: SELECTED_SEARCH.id,
       source: SELECTED_SEARCH.source || '', name: SELECTED_SEARCH.name };
   } else if (mode === 'fork') {
@@ -2246,7 +2490,7 @@ function startMerge() {
       return true;
     }).map((n) => n.iid);
     if (!iids.length) {
-      toast(trUI('Обновлений не найдено. Нажмите «⟳ Проверить обновления».'), 'err');
+      toast(trUI('Обновлений не найдено. Нажмите «Проверить обновления» над списком модов.'), 'err');
       return;
     }
   }
@@ -2608,13 +2852,14 @@ function renderPlanTable() {
 // остаётся живым: поиск, фильтр, сворачивание групп, карточка мода, настройки — иначе
 // на получасовой закачке лаунчер превращается в кирпич (отзыв 3).
 const BUSY_CTRLS = ['addBtn', 'installBtn', 'mergeBtn', 'compatBtn', 'removeBtn',
-  'launchBtn', 'clearModsBtn', 'refreshBtn',
-  'disableAllBtn', 'modcfgReadBtn', 'modcfgWriteBtn', 'moreAdd', 'moreInstall', 'moreMerge', 'moreCompat'];
+  'clearModsBtn', 'refreshBtn', 'helpOpenAdd',
+  'disableAllBtn', 'modcfgReadBtn', 'modcfgWriteBtn', 'moreCompat'];
 function setBusyControls(on) {
   document.body.classList.toggle('busy', on);
   BUSY_CTRLS.forEach((id) => { const e = $(id); if (e) e.disabled = on; });
+  updateGameLaunchButton();
   document.querySelectorAll('#viewSeg input, #nameSeg input').forEach((b) => b.disabled = on);
-  if (on) $('filterPop').classList.add('hidden');     // закрыть фильтр, чтобы не меняли
+  if (on) hideFilter();
 }
 function onOpBegin() {
   busy = true;
@@ -2624,6 +2869,7 @@ function onOpBegin() {
   setSideTab('log');                       // во время операции показываем журнал
   $('progressCard').classList.remove('hidden');
   $('progBar').classList.add('pulse');
+  $('progBar').removeAttribute('aria-valuenow');
   $('progText').textContent = trUI('Подготовка…');
   $('progRight').textContent = '';
 }
@@ -2632,7 +2878,8 @@ function onOpBegin() {
 function setPauseBtn(on) {
   const b = $('pauseBtn');
   if (!b) return;
-  b.textContent = on ? trUI('▶ Продолжить') : trUI('⏸ Пауза');
+  b.textContent = on ? trUI('Продолжить') : trUI('Пауза');
+  b.dataset.icon = on ? 'play' : 'pause';
   b.classList.toggle('primary', on);
   b.title = on ? trUI('Продолжить операцию с того же места')
     : trUI('Приостановить скачивание, чтобы спокойно посмотреть настройки или найти мод');
@@ -2641,7 +2888,7 @@ function onOpPaused(d) {
   paused = !!(d && d.paused);
   setPauseBtn(paused);
   $('progBar').classList.toggle('paused', paused);
-  if (paused) $('progText').textContent = trUI('⏸ Пауза — нажмите «Продолжить»');
+  if (paused) $('progText').textContent = trUI('Пауза. Нажмите «Продолжить».');
 }
 function onOpEnd(d) {
   busy = false;
@@ -2650,19 +2897,23 @@ function onOpEnd(d) {
   $('progBar').classList.remove('paused');
   setBusyControls(false);
   $('progBar').classList.remove('pulse');
+  $('progBar').setAttribute('aria-valuenow', '100');
   $('progBar').querySelector('i').style.width = '100%';
   $('progText').textContent = uiMessage((d && d.status) || trUI('Готово'));
   setTimeout(() => $('progressCard').classList.add('hidden'), 1600);
   updateActionButtons();
-  toast((d && d.status) || trUI('Готово'), (d && d.status === 'Ошибка') ? 'err' : 'ok');
-  if (pendingAfterDetect === 'check') {     // после автоопределения базы — продолжить флоу
-    pendingAfterDetect = null;
-    setTimeout(startCheckUpdates, 200);
+  toast((d && d.status) || trUI('Готово'), (d && (d.error || d.status === 'Ошибка')) ? 'err' : 'ok');
+  if (pendingAfterDetect) {
+    pendingAfterDetect = false;
+    setTimeout(() => startCheckUpdates(true), 200);
   }
 }
 function onProgress(d) {
   const bar = $('progBar');
   if (paused) return;                    // на паузе полосу и текст не трогаем
+  if (d.mode === 'parts' || d.mode === 'pct') {
+    bar.setAttribute('aria-valuenow', String(Math.min(100, Math.max(0, Number(d.pct) || 0))));
+  }
   if (d.mode === 'parts') {
     bar.classList.remove('pulse');
     bar.querySelector('i').style.width = (d.pct || 0) + '%';
@@ -2730,9 +2981,10 @@ function openCtxMenu(e, iid) {
     const nSel = (n && selected.has(n.iid)) ? selectedMids().length : 1;
     const suf = nSel > 1 ? ` (${nSel})` : '';
     const anyShown = nSel > 1 ? selectedMids().some((m) => { const x = nodeByMid(m); return x && !x.hidden; }) : !n.hidden;
-    $('ctxHide').textContent = (anyShown ? trUI('🙈 Скрыть из списка') : trUI('🙈 Показать в списке')) + suf;
+    $('ctxHide').textContent = (anyShown ? trUI('Скрыть из списка') : trUI('Показать в списке')) + suf;
     const anyLive = nSel > 1 ? selectedMids().some((m) => { const x = nodeByMid(m); return x && !x.frozen; }) : !n.frozen;
-    $('ctxFreeze').textContent = (anyLive ? trUI('🔒 Не обновлять') : trUI('🔓 Обновлять снова')) + suf;
+    $('ctxFreeze').textContent = (anyLive ? trUI('Не обновлять') : trUI('Обновлять снова')) + suf;
+    $('ctxFreeze').dataset.icon = anyLive ? 'lock' : 'refresh';
     $('ctxTags').textContent = trUI('🏷 Теги…') + suf;
     $('ctxNote').textContent = trUI('📝 Заметка…');   // заметка всегда для одной строки — без (N)
   }
@@ -2900,7 +3152,7 @@ function cardInfoRows(i, mid) {
       : trUI('<span class="sub">обновляется как обычно</span>')}
       <button class="mini card-freeze" data-mid="${esc(mid)}" title="${frz
         ? trUI('Вернуть мод в проверку обновлений')
-        : trUI('Исключить мод из проверки обновлений и из «Обновить все» — версия останется текущей')}">${
+        : trUI('Сохранять эту версию мода при проверке и установке обновлений.')}">${
         frz ? trUI('🔓 обновлять') : trUI('🔒 не обновлять')}</button>
       ${node.frozen_by_hidden ? trUI('<div class="sub">Причина: мод скрыт, а в настройках включено «скрытые моды не обновлять».</div>') : ''}</div></div>`);
   }
@@ -2956,9 +3208,9 @@ const TOUR_STEPS = [
   { sel: '#profileOverlay .modal', open: 'profile', get title() { return trUI('Окно профилей'); },
     get text() { return trUI('Здесь: список ваших профилей (клик — переключиться), «Пресеты» для быстрого старта — добавить в профиль СРАЗУ всю сборку (Redux / Universe / Original), создание нового профиля, а также 📥 загрузка присланного профиля и 📂 папка с файлами профилей. Профиль переносимый — можно отдать другому игроку.'); } },
   { sel: '.base-pick', get title() { return trUI('Базовая сборка'); },
-    get text() { return trUI('Второй ряд шапки: базовая сборка, относительно которой проверяются обновления. «Авто» определит её по файлам в Mods (кнопка 🎯). Рядом — «Проверить обновления». Важно: сейвы привязаны к базе, посреди партии базу менять нельзя.'); } },
+    get text() { return trUI('Второй ряд шапки: базовая сборка, относительно которой проверяются обновления. «Авто» определит её по файлам в Mods (кнопка 🎯). Кнопка «Проверить обновления» находится над списком модов. Важно: сейвы привязаны к базе, посреди партии базу менять нельзя.'); } },
   { sel: '#addOverlay .modal', open: 'add', get title() { return trUI('Добавление модов'); },
-    get text() { return trUI('Четыре способа. «⚡ Быстрый старт» — взять сборку целиком: движок и все её моды одной кнопкой; пока профиль пуст, эта вкладка открыта сразу. «🔎 По названию» — поиск по всему каталогу. «🗂 Сборка → Пак → Мод» — выбор по цепочке: вся сборка, только движок, только моды, отдельный пак или один мод. «🔗 По ссылке» — форк-мод по URL дескриптора. Выбранное попадает в очередь профиля, а ставится потом кнопкой «Установить все».'); } },
+    get text() { return trUI('Четыре способа. «⚡ Быстрый старт» — взять сборку целиком: движок и все её моды одной кнопкой; пока профиль пуст, эта вкладка открыта сразу. «🔎 По названию» — поиск по всему каталогу. «🗂 Сборка → Пак → Мод» — выбор по цепочке: вся сборка, только движок, только моды, отдельный пак или один мод. «🔗 По ссылке» — форк-мод по URL дескриптора. Выбранное попадает в очередь профиля, а ставится потом кнопкой «Установить моды».'); } },
   { sel: '#railToggle', get title() { return trUI('Фильтры и вид списка'); },
     get text() { return trUI('Левая панель: как группировать список (по папкам или по разделам ModuleInfo), поиск по имени/описанию, фильтры по состоянию, «только скрытые», «без тега» и чипы ваших тегов и меток сборок. Панель сворачивается кнопкой ▤.'); } },
   { sel: '#treeBody', get title() { return trUI('Список модов'); },
@@ -2969,12 +3221,12 @@ const TOUR_STEPS = [
     get text() { return trUI('Слева от строк — чекбоксы для массовых действий: отметьте несколько (Shift — диапазон, Ctrl — по одной), и правый клик применит действие ко всему выбору. «✖ Снять выбор» в тулбаре (или Esc) сбрасывает отметки. Выделение (подсветка) и выбор (галочки) — разные вещи: первое для просмотра, второе для пакетных операций.'); } },
   { sel: '#relWrap', get title() { return trUI('Связи мода'); },
     get text() { return trUI('Сворачиваемый список под основным. Выделите мод — здесь теми же строками появятся моды, которые он ТРЕБУЕТ, для которых он НУЖЕН и с которыми КОНФЛИКТУЕТ (в т.ч. односторонние конфликты — кто объявил конфликт с ним). Клик по связи — перейти к тому моду.'); } },
-  { sel: '#installBtn', get title() { return trUI('Установить и обновить'); },
-    get text() { return trUI('«Установить все» качает и ставит моды профиля. «Обновить все» (после «Проверить обновления») ставит новые версии, СОХРАНЯЯ ваши правки в файлах мода. Бесконфликтные обновления по умолчанию идут в тихом режиме, окно с решениями всплывает только когда нужен ваш выбор. Редкие действия — в «⋯ Ещё»; там же «🏷 Версии модов — одной сборкой»: перевести на выбранную сборку сразу все моды, которые раздаются в нескольких.'); } },
+  { sel: '#modActions', get title() { return trUI('Установить и обновить'); },
+    get text() { return trUI('«Установить моды» скачивает моды профиля. Для новых версий нажмите «Проверить обновления», затем «Обновить моды». Ваши правки сохранятся. При конфликте лаунчер предложит выбрать, какую версию файла оставить. Дополнительные действия находятся в меню «Ещё».'); } },
   { sel: '#compatBtn', get title() { return trUI('Проверка совместимости'); },
     get text() { return trUI('Покажет, всё ли в наборе согласовано: есть ли ровно одна база, на месте ли фиксы, нет ли конфликтов и незакрытых зависимостей, не сменилась ли база (предупреждение о сейвах). Ничего не меняет — только показывает, решение за вами.'); } },
   { sel: '.side-tabs', get title() { return trUI('Игра и Журнал'); },
-    get text() { return trUI('Правая панель. Вкладка «Игра» — синхронизация профиля с тем, что реально подключено в игре (стрелками туда/обратно). Вкладка «Журнал» — что делает лаунчер по шагам, там же «Подробный лог» для диагностики.'); } },
+    get text() { return trUI('Вкладка «Игра» переносит список подключённых модов из игры в профиль или из профиля в игру. Вкладка «Журнал» показывает ход работы лаунчера. Для диагностики включите «Подробный лог».'); } },
   { sel: '#settingsOverlay .modal', open: 'settings', get title() { return trUI('Настройки'); },
     get text() { return trUI('Здесь: папка игры и 🔄 проверка новой версии лаунчера; «тихий режим» обновлений; «полное описание в списке» и «показывать скрытые моды». В блоке «Дополнительно» — база профиля, порядок проверки обновлений по нескольким сборкам, репозиторий, GitHub-токен (нужен только для приватного) и дополнительные репозитории-форки. Обычно тут менять ничего не нужно.'); } },
   { sel: '#launchBtn', get title() { return trUI('Играть'); },
@@ -2990,7 +3242,7 @@ const BASIC_TOUR_STEPS = [
   { sel: '#addOverlay .modal', open: 'add', get title() { return trUI('2. Выберите сборку'); },
     get text() { return trUI('Нажмите «Добавить мод», откройте «Быстрый старт» и выберите сборку. Для полной установки оставьте галочку «добавить движок сборки», затем нажмите «Добавить».'); } },
   { sel: '#installBtn', get title() { return trUI('3. Скачайте моды'); },
-    get text() { return trUI('Нажмите «Установить все». Большая сборка скачивается долго: внизу видны текущий архив, объём и ход загрузки. Загрузку можно поставить на паузу и продолжить той же кнопкой.'); } },
+    get text() { return trUI('Нажмите «Установить моды». Большая сборка скачивается долго: внизу видны текущий архив, объём и ход загрузки. Загрузку можно поставить на паузу и продолжить той же кнопкой.'); } },
   { sel: '#launchBtn', get title() { return trUI('4. Запустите игру'); },
     get text() { return trUI('Когда установка закончится, нажмите «Играть». Подробный тур всегда доступен по кнопке 🎓 вверху.'); } },
 ];

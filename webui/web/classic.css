@@ -1,0 +1,87 @@
+/* Classic layout and palette. The same controls and data serve both interfaces. */
+:root[data-interface="classic"] {
+  --font: "Segoe UI", system-ui, sans-serif;
+  --radius: 9px;
+  --side-size: 332px;
+  --rail-size: 178px;
+}
+:root[data-interface="classic"][data-theme="dark"] {
+  --bg: #11151d;
+  --head: #161c2a;
+  --panel: #1a2030;
+  --panel-2: #222a3d;
+  --line: #2c3650;
+  --control-line: #586985;
+  --fg: #e8edf7;
+  --muted: #a7b4cd;
+  --accent: #52cfe0;
+  --accent-fg: #082631;
+  --accent-2: #a0c1fc;
+  --row-hover: #1e2538;
+  --row-sel: #263652;
+  --chip: #283149;
+  --toggle-off: #161c2a;
+  --ok: #77d8a5;
+  --warn: #f4c171;
+  --danger: #ffa5a0;
+}
+:root[data-interface="classic"][data-theme="light"] {
+  --bg: #eef1f6;
+  --head: #f5f7fc;
+  --panel: #ffffff;
+  --panel-2: #f3f5fa;
+  --line: #cdd8e8;
+  --control-line: #74849c;
+  --fg: #1a2030;
+  --muted: #455670;
+  --accent: #116985;
+  --accent-fg: #ffffff;
+  --accent-2: #2563bd;
+  --row-hover: #f0f4fb;
+  --row-sel: #dbe8fb;
+  --chip: #e7ecf5;
+  --toggle-off: #fff;
+}
+
+[data-interface="classic"] .app-bar { min-height: 54px; padding-block: 8px; gap: 12px; }
+[data-interface="classic"] .logo { font-size: 16px; white-space: nowrap; gap: 8px; }
+[data-interface="classic"] .logo .mark { width: 18px; height: 18px; border: 0; background: transparent; }
+[data-interface="classic"] .logo .mark::before { content: none; }
+[data-interface="classic"] .logo .mark::after { width: 9px; height: 9px; border-radius: 2px; transform: rotate(45deg); }
+[data-interface="classic"] .utilities .icon-btn { border-color: var(--line); background: var(--panel-2); }
+[data-interface="classic"] .btn.play:not(.running) {
+  background: linear-gradient(110deg, #13738b, #3157b7);
+  border-color: transparent;
+  color: #fff;
+}
+[data-interface="classic"] .btn.play:not(.running, :disabled):hover { filter: brightness(1.12); }
+[data-interface="classic"] .body { gap: 0; padding: 0; }
+[data-interface="classic"] .main { padding: 11px 14px; gap: 8px; }
+[data-interface="classic"] .filter-rail {
+  border-width: 0 1px 0 0;
+  border-radius: 0;
+  gap: 10px;
+}
+[data-interface="classic"] .side { border-width: 0 0 0 1px; border-radius: 0; }
+[data-interface="classic"] .workspace-heading h1 { font-size: 18px; letter-spacing: 0; }
+[data-interface="classic"] .tree-head { text-transform: uppercase; letter-spacing: .045em; font-size: 11px; }
+[data-interface="classic"] .row.group .label { color: var(--accent); }
+[data-interface="classic"] .mod-check,
+[data-interface="classic"] .toggle.ro .mod-check { border-radius: 3px; }
+[data-interface="classic"] .side-pane .game-banner {
+  min-height: 0;
+  padding: 3px 2px 7px;
+  gap: 3px;
+  color: var(--fg);
+  background: none;
+  border-radius: 0;
+}
+[data-interface="classic"] .side-pane .game-banner h2 { font-size: 16px; letter-spacing: 0; }
+[data-interface="classic"] .game-status { background: transparent; color: var(--muted); }
+[data-interface="classic"] .game-status.running { color: var(--ok); }
+[data-interface="classic"] .game-status.unset { color: var(--warn); }
+
+@container launcher (max-width: 760px) {
+  [data-interface="classic"] .body { gap: 0; }
+  [data-interface="classic"] :is(.filter-rail, .side) { border-width: 1px 0 0; }
+}

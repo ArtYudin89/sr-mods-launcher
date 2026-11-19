@@ -28,7 +28,7 @@ WEB_DIR = Path(__file__).parent / 'web'
 OUT_DIR = Path(__file__).parent.parent / 'docs' / 'img'
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-VERSION = '0.22.0'
+VERSION = '0.30.0'
 
 # ───────── Нейтральные mock-данные ─────────
 
@@ -360,6 +360,11 @@ def run():
         page.evaluate("document.documentElement.dataset.theme = 'light'")
         time.sleep(0.3)
         snap(page, '10-light.png')
+
+        classic = _state()
+        classic['interface_mode'] = 'classic'
+        init(page, classic)
+        snap(page, '11-classic.png')
 
         browser.close()
     srv.shutdown()

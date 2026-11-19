@@ -1,73 +1,60 @@
 <!DOCTYPE html>
-<html lang="ru" data-theme="dark">
+<html lang="ru" data-theme="dark" data-interface="remaster">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>SR Mods Launcher</title>
+<link rel="stylesheet" href="shell.css">
+<link rel="stylesheet" href="icons.css">
 <link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="classic.css">
 </head>
 <body>
 
-  <!-- ШАПКА (два ряда) -->
-  <div class="topbar two-row">
-    <div class="tr">
-      <div class="logo"><span class="mark">◆</span> SR Mods Launcher</div>
-      <div class="field">Профиль:
-        <select id="profileSel" title="Профиль — это сохранённый набор модов. Можно держать несколько и переключаться."></select>
-      </div>
-      <button class="icon-btn" id="profileMenuBtn" title="Создать профиль и управлять списком">＋</button>
-      <div class="game-path" id="gamePath" title="Папка, куда установлена игра. Нажмите, чтобы выбрать.">Папка игры не выбрана</div>
+  <header class="topbar">
+    <div class="tr app-bar" id="appBar">
+      <div class="logo"><span class="mark" aria-hidden="true"></span><span>SR Mods Launcher</span></div>
+      <button class="game-path" type="button" id="gamePath" data-icon="folder" title="Папка, куда установлена игра. Нажмите, чтобы выбрать.">Папка игры не выбрана</button>
       <div class="spacer"></div>
-      <button class="icon-btn busy-ok" id="tourBtn" title="Обучение — быстрый старт и подробный тур">🎓</button>
-      <button class="icon-btn busy-ok" id="helpBtn" title="Справка">❔</button>
-      <button class="icon-btn busy-ok" id="themeBtn" title="Светлая / тёмная тема">🌙</button>
-      <button class="icon-btn busy-ok" id="settingsBtn" title="Настройки">⚙</button>
-      <button class="btn play" id="launchBtn" title="Запустить Space Rangers HD">▶  Играть</button>
+      <div class="utilities">
+        <button class="icon-btn busy-ok" id="tourBtn" data-icon="guide" title="Обучение — быстрый старт и подробный тур"></button>
+        <button class="icon-btn busy-ok" id="helpBtn" data-icon="help" title="Справка"></button>
+        <button class="icon-btn busy-ok" id="themeBtn" data-icon="moon" title="Светлая / тёмная тема"></button>
+        <button class="icon-btn busy-ok" id="settingsBtn" data-icon="settings" title="Настройки"></button>
+        <button class="icon-btn busy-ok" id="sideToggle" data-icon="sidebar" aria-controls="gameSidePanel" aria-expanded="true" aria-label="Свернуть панель «Игра / Журнал»" title="Свернуть панель «Игра / Журнал»"></button>
+      </div>
+      <button class="btn play" id="launchBtn" data-icon="play" title="Запустить Space Rangers HD" aria-live="polite">Играть</button>
     </div>
-    <div class="tr tr2">
-      <span class="tr2-lbl">Обновления</span>
-      <div class="base-pick" title="Базовая сборка — с какой сборкой сверяться при поиске обновлений. Оставьте «авто», если не уверены — определится сама по файлам в Mods. Кнопка 🎯 — определить прямо сейчас.">
-        <span class="base-lbl">Сборка:</span>
+    <div class="tr tr2" id="contextBar">
+      <div class="profile-control" id="profileControl">
+        <label class="field" for="profileSel">Профиль</label>
+        <select id="profileSel" title="Профиль — это сохранённый набор модов. Можно держать несколько и переключаться."></select>
+        <button class="icon-btn" id="profileMenuBtn" data-icon="plus" title="Создать профиль и управлять списком"></button>
+      </div>
+      <div class="base-pick full-view-only" id="basePick" title="Базовая сборка — с какой сборкой сверяться при поиске обновлений. Оставьте «авто», если не уверены — определится сама по файлам в Mods. Кнопка 🎯 — определить прямо сейчас.">
+        <label class="field" for="baseSel">Сборка</label>
         <select id="baseSel">
           <option value="">— авто —</option>
           <option value="universe">Universe (Community)</option>
           <option value="redux">ПБ «Свободная Бухта»</option>
           <option value="original">Original</option>
         </select>
-        <button class="icon-btn" id="baseAutoBtn" title="Определить базу прямо сейчас по файлам в папке Mods">🎯</button>
+        <button class="icon-btn" id="baseAutoBtn" data-icon="target" title="Определить базу прямо сейчас по файлам в папке Mods"></button>
       </div>
-      <button class="btn ghost" id="refreshBtn" title="Перечитать каталог с сервера и проверить, для каких модов вышли новые версии (только проверка, ничего не скачивается)">⟳ Проверить обновления</button>
       <div class="spacer"></div>
-      <span class="queue-lbl" id="queueLbl"></span>
+      <button class="btn ghost busy-ok" id="interfaceBtn" data-icon="switch">Классический интерфейс</button>
+      <button class="btn ghost busy-ok" id="simpleViewBtn" data-icon="list" aria-pressed="false" title="Переключить вид списка и панели инструментов"><span id="simpleViewLabel">Упрощённый вид</span></button>
     </div>
-  </div>
+  </header>
 
   <div class="body">
 
     <!-- ЛЕВЫЙ РЕЛЬС: отображение + фильтры (скрываемый) -->
-    <div class="filter-rail" id="filterRail">
+    <aside class="filter-rail full-view-only" id="filterRail" aria-labelledby="filtersTitle">
+      <h2 class="rail-title" id="filtersTitle">Фильтры и вид</h2>
       <div class="fr-sec">
-        <span class="fr-lbl">Вид списка</span>
-        <div class="radio-group" id="viewSeg" title="Как группировать моды в списке">
-          <label><input type="radio" name="viewMode" value="folder"> По папкам</label>
-          <label><input type="radio" name="viewMode" value="section"> По разделам</label>
-        </div>
-      </div>
-      <div class="fr-sec">
-        <span class="fr-lbl">Имя мода</span>
-        <div class="radio-group" id="nameSeg" title="Что показывать как имя мода: имя папки на диске или поле Name из ModuleInfo (как в самой игре)">
-          <label><input type="radio" name="nameMode" value="folder"> папка на диске</label>
-          <label><input type="radio" name="nameMode" value="module"> как в игре</label>
-        </div>
-      </div>
-      <div class="fr-sec">
-        <span class="fr-lbl">Список</span>
-        <label class="rail-chk" title="Показывать описание мода прямо в строке списка (иначе — только по значку ⓘ)"><input type="checkbox" id="railDescInList"> Описание в строке</label>
-      </div>
-      <div class="fr-sec">
-        <span class="fr-lbl">Фильтр</span>
         <div class="pop-host">
-          <button class="btn ghost" id="filterBtn" title="Показать только нужные состояния и подключения">⚲ Фильтр <span class="fcount" id="filterCount"></span></button>
+          <button class="btn ghost" id="filterBtn" data-icon="filter" aria-controls="filterPop" aria-expanded="false" title="Показать только нужные состояния и подключения">Состояния <span class="fcount" id="filterCount"></span></button>
           <div class="popover hidden" id="filterPop">
             <div class="pop-sec">
               <div class="pop-head">Показывать состояния</div>
@@ -90,7 +77,7 @@
             </div>
           </div>
         </div>
-        <button class="btn ghost" id="legendBtn" title="Что означают значки состояний">ⓘ Обозначения</button>
+        <button class="btn ghost" id="legendBtn" data-icon="info" title="Что означают значки состояний">Обозначения</button>
       </div>
       <div class="fr-sec">
         <span class="fr-lbl">Метки сборок</span>
@@ -100,54 +87,76 @@
         <span class="fr-lbl">Мои теги</span>
         <div class="camp-chips" id="tagChips" title="Быстрый фильтр по вашему тегу"></div>
       </div>
-    </div>
+      <div class="fr-sec rail-view">
+        <span class="fr-lbl" id="groupByLabel">Группировка</span>
+        <div class="radio-group" id="viewSeg" role="group" aria-labelledby="groupByLabel">
+          <label><input type="radio" name="viewMode" value="folder"> По папкам</label>
+          <label><input type="radio" name="viewMode" value="section"> По разделам</label>
+        </div>
+      </div>
+      <div class="fr-sec">
+        <span class="fr-lbl" id="nameModeLabel">Имя мода</span>
+        <div class="radio-group" id="nameSeg" role="group" aria-labelledby="nameModeLabel" title="Что показывать как имя мода: имя папки на диске или поле Name из ModuleInfo (как в самой игре)">
+          <label><input type="radio" name="nameMode" value="folder"> папка на диске</label>
+          <label><input type="radio" name="nameMode" value="module"> как в игре</label>
+        </div>
+        <label class="rail-chk" title="Показывать описание мода прямо в строке списка (иначе — только по значку ⓘ)"><input type="checkbox" id="railDescInList"> Описание в строке</label>
+      </div>
+    </aside>
 
     <!-- ОСНОВНАЯ КОЛОНКА -->
-    <div class="main">
+    <main class="main">
+      <div class="workspace-heading">
+        <button class="icon-btn rail-toggle busy-ok full-view-only" id="railToggle" data-icon="filter" aria-controls="filterRail" aria-expanded="true" title="Показать/скрыть панель фильтров и отображения"></button>
+        <h1>Моды</h1>
+        <span class="queue-lbl" id="queueLbl"></span>
+        <div class="spacer"></div>
+        <div class="search-wrap" data-icon="search">
+          <input type="text" class="search" id="searchInp" aria-label="Поиск модов" placeholder="Поиск модов…">
+          <button class="search-clear hidden" id="searchClear" data-icon="close" title="Очистить поиск" tabindex="-1"></button>
+        </div>
+      </div>
 
       <!-- онбординг-подсказка (показывается, когда не выбрана папка игры) -->
       <div class="hint" id="setupHint" style="display:none">
-        <span style="font-size:22px">🚀</span>
+        <span class="hint-icon" data-icon="folder" aria-hidden="true"></span>
         <div class="txt"><b>Шаг 1 — укажите, где установлена игра.</b><br>
           Без этого лаунчер не знает, куда ставить моды. Нажмите кнопку справа и выберите папку Space Rangers HD.</div>
         <button class="btn primary" id="chooseGameBtn">Выбрать папку игры</button>
       </div>
 
-      <!-- панель над таблицей: рельс-переключатель · основные действия · «Ещё» · поиск · ⊕⊖ -->
+      <!-- действия над списком -->
       <div class="toolbar actions-toolbar" id="actionsToolbar">
-        <button class="icon-btn rail-toggle active busy-ok" id="railToggle" title="Показать/скрыть панель фильтров и отображения">▤</button>
-        <div class="tb-divider"></div>
-        <button class="btn primary" id="addBtn" title="Добавить мод, пак или целую сборку в этот профиль">➕ Добавить мод</button>
-        <button class="btn" id="installBtn" title="Скачать и установить. Ничего не выбрано галочками — весь профиль целиком; есть выбранные (отмеченные галочкой) — только они.">🧩 Установить все</button>
-        <button class="btn collapsible-action" id="mergeBtn" title="Скачать и применить новые версии (после «Проверить обновления»), сохранив ваши ручные правки файлов. Ничего не выбрано — все моды с обновлением; есть выбранные галочкой — только они.">🔀 Обновить все</button>
-        <button class="btn collapsible-action" id="compatBtn" title="Проверить, всё ли совместимо: есть ли база, фиксы, конфликты">🛡 Совместимость</button>
-        <button class="btn ghost" id="clearSelBtn" title="Снять все галочки выбора" style="display:none">✖ Снять выбор</button>
+        <button class="btn primary" id="addBtn" data-icon="plus" title="Добавить мод, пак или целую сборку в этот профиль">Добавить мод</button>
+        <button class="btn collapsible-action full-view-only" id="compatBtn" data-icon="shield" title="Проверить, всё ли совместимо: есть ли база, фиксы, конфликты">Совместимость</button>
+        <button class="btn ghost" id="clearSelBtn" data-icon="close" title="Снять все галочки выбора" style="display:none">Снять выбор</button>
         <div class="more-wrap">
-          <button class="btn ghost" id="moreBtn" title="Ещё действия">⋯ Ещё ▾</button>
+          <button class="btn ghost" id="moreBtn" data-icon="more" aria-controls="moreMenu" aria-expanded="false" title="Ещё действия">Ещё</button>
           <div class="more-menu hidden" id="moreMenu">
-            <button class="mm-only-narrow3" id="moreAdd">➕ Добавить мод</button>
-            <button class="mm-only-narrow2" id="moreInstall">🧩 Установить все</button>
-            <button class="mm-only-narrow" id="moreMerge">🔀 Обновить все</button>
-            <button class="mm-only-narrow" id="moreCompat">🛡 Совместимость</button>
-            <div class="mm-sep mm-collapsed-any"></div>
-            <button id="campVariantsBtn" title="У модов, которые есть в нескольких сборках, выбрать версию одной сборки — вместо того, чтобы переключать каждый мод вручную">🏷 Версии модов — одной сборкой</button>
-            <button id="restoreSkipBtn" style="display:none" title="Вернуть в набор моды, убранные из добавленной сборки">↩ Вернуть исключённые <span id="skipCnt"></span></button>
-            <div class="mm-sep"></div>
-            <button class="danger" id="removeBtn" title="Убрать выбранное из профиля (файлы на диске не трогает)">🗑 Убрать из профиля</button>
-            <button class="danger" id="clearModsBtn" title="Удалить ВСЕ файлы из папки Mods игры (с подтверждением)">🧹 Очистить Mods</button>
+            <button class="mm-only-narrow full-view-only" id="moreCompat" data-icon="shield">Совместимость</button>
+            <div class="mm-sep mm-only-narrow full-view-only"></div>
+            <button class="full-view-only" id="campVariantsBtn" data-icon="layers" title="У модов, которые есть в нескольких сборках, выбрать версию одной сборки — вместо того, чтобы переключать каждый мод вручную">Версии модов — одной сборкой</button>
+            <button class="full-view-only" id="restoreSkipBtn" data-icon="refresh" style="display:none" title="Вернуть в набор моды, убранные из добавленной сборки">Вернуть исключённые <span id="skipCnt"></span></button>
+            <div class="mm-sep full-view-only"></div>
+            <button class="danger" id="removeBtn" data-icon="trash" title="Убрать выбранное из профиля (файлы на диске не трогает)">Убрать из профиля</button>
+            <button class="danger full-view-only" id="clearModsBtn" data-icon="trash" title="Удалить ВСЕ файлы из папки Mods игры (с подтверждением)">Очистить Mods</button>
           </div>
         </div>
         <div class="spacer"></div>
-        <span class="search-wrap">
-          <input class="search" id="searchInp" placeholder="🔎 поиск мода…">
-          <button class="search-clear hidden" id="searchClear" title="Очистить поиск" tabindex="-1">✕</button>
-        </span>
-        <button class="icon-btn busy-ok" id="expandBtn" title="Развернуть все группы">⊕</button>
-        <button class="icon-btn busy-ok" id="collapseBtn" title="Свернуть все группы">⊖</button>
+        <div class="tree-actions">
+          <button class="icon-btn busy-ok" id="expandBtn" data-icon="expand" title="Развернуть все группы"></button>
+          <button class="icon-btn busy-ok" id="collapseBtn" data-icon="collapse" title="Свернуть все группы"></button>
+        </div>
+      </div>
+
+      <div class="mod-actions" id="modActions" role="group" aria-label="Установка и обновление" tabindex="-1">
+        <button class="btn" id="installBtn" data-icon="download" title="Скачать и установить моды профиля. Если строки отмечены галочками, установить только отмеченные.">Установить моды</button>
+        <button class="btn" id="mergeBtn" data-icon="refresh" title="Скачать найденные обновления и применить их с сохранением ваших правок." disabled>Обновить моды</button>
+        <button class="btn ghost" id="refreshBtn" data-icon="search" title="Найти новые версии модов.">Проверить обновления</button>
       </div>
 
       <!-- легенда состояний (скрыта по умолчанию) -->
-      <div class="legend hidden" id="legendBar"></div>
+      <div class="legend hidden full-view-only" id="legendBar"></div>
 
       <!-- дерево -->
       <div class="tree-wrap">
@@ -164,12 +173,12 @@
       </div>
 
       <!-- второй список: связи ВЫДЕЛЕННОГО (активного) мода — те же колонки, что и у основного -->
-      <div class="rel-wrap collapsed" id="relWrap">
-        <div class="rel-head" id="relHead" title="Связи выделенного мода — свернуть/развернуть">
+      <div class="rel-wrap collapsed full-view-only" id="relWrap">
+        <button class="rel-head" id="relHead" aria-controls="relBody" aria-expanded="false" title="Связи выделенного мода — свернуть/развернуть">
           <span class="rel-tw">▸</span>
-          <span class="rel-title">🔗 Связи</span>
+          <span class="rel-title" data-icon="link">Связи</span>
           <span class="rel-sub sub" id="relSub">— выделите мод в списке</span>
-        </div>
+        </button>
         <div class="rel-list">
           <div class="tree-head">
             <div>Мод</div>
@@ -185,66 +194,63 @@
       <!-- прогресс -->
       <div class="progress-card hidden" id="progressCard">
         <div class="progress-top">
-          <span id="progText">Подготовка…</span>
+          <span id="progText" role="status">Подготовка…</span>
           <span id="progRight"></span>
         </div>
-        <div class="bar pulse" id="progBar"><i></i></div>
-        <div class="progress-top" style="justify-content:flex-end;gap:8px">
-          <button class="btn ghost" id="pauseBtn" title="Приостановить скачивание, чтобы спокойно посмотреть настройки или найти мод. Продолжить — той же кнопкой.">⏸ Пауза</button>
-          <button class="btn ghost danger" id="cancelBtn">✖ Отмена</button>
+        <div class="bar pulse" id="progBar" role="progressbar" aria-label="Ход операции"><i></i></div>
+        <div class="progress-actions">
+          <button class="btn ghost" id="pauseBtn" data-icon="pause" title="Приостановить скачивание, чтобы спокойно посмотреть настройки или найти мод. Продолжить — той же кнопкой.">Пауза</button>
+          <button class="btn ghost danger" id="cancelBtn" data-icon="close">Отмена</button>
         </div>
       </div>
 
-    </div>
+    </main>
 
     <!-- ПРАВАЯ ПАНЕЛЬ (вкладки Игра / Журнал) -->
-    <div class="side">
-      <div class="side-tabs">
-        <button class="side-tab on" id="tabGame" data-tab="game">🎮 Игра</button>
-        <button class="side-tab" id="tabLog" data-tab="log">📜 Журнал</button>
+    <aside class="side" id="gameSidePanel" aria-label="Игра / Журнал">
+      <div class="side-tabs" role="group" aria-label="Игра / Журнал">
+        <button class="side-tab on" id="tabGame" data-tab="game" data-icon="game" aria-pressed="true" aria-controls="paneGame">Игра</button>
+        <button class="side-tab" id="tabLog" data-tab="log" data-icon="log" aria-pressed="false" aria-controls="paneLog">Журнал</button>
       </div>
 
       <!-- вкладка «Игра»: синхронизация профиля с игрой -->
       <div class="side-pane" id="paneGame">
-        <div class="tab-note">Игра хранит список подключённых модов отдельно (ModCFG).
-          Здесь его можно синхронизировать с «В профиле».</div>
-        <div class="sync-card">
-          <div class="sync-arrows">
-            <div class="end">Игра<small>В игре · ModCFG</small></div>
-            <div class="arr">
-              <button id="modcfgReadBtn" title="Взять список подключённых модов из игры и записать в текущий профиль">считать ⟹</button>
-              <button id="modcfgWriteBtn" title="Подключить в игре ровно те моды, что отмечены в профиле">⟸ записать</button>
-            </div>
-            <div class="end">Профиль<small>«В профиле»</small></div>
-          </div>
-          <button class="btn ghost danger" id="disableAllBtn" style="width:100%;justify-content:center" title="Снять все галочки «в профиле» — отключить все моды в профиле. В самой игре подключение не изменится, пока не нажмёте «Записать профиль в игру».">⊘ Отключить все в профиле</button>
+        <div class="game-banner">
+          <h2>Space Rangers HD</h2>
+          <span class="game-status" id="gameCardStatus" role="status">Папка игры не выбрана</span>
         </div>
+        <section class="sync-card" aria-labelledby="syncTitle">
+          <h2 id="syncTitle">Моды в игре</h2>
+          <p>Список подключённых модов игра хранит в ModCFG. Его можно перенести в профиль или записать из профиля в игру.</p>
+          <button class="btn" id="modcfgReadBtn" data-icon="download" title="Взять список подключённых модов из игры и записать в текущий профиль">Из игры в профиль</button>
+          <button class="btn" id="modcfgWriteBtn" data-icon="upload" title="Подключить в игре ровно те моды, что отмечены в профиле">Из профиля в игру</button>
+          <button class="btn ghost danger" id="disableAllBtn" data-icon="close" title="Снять все галочки «в профиле» — отключить все моды в профиле. В самой игре подключение не изменится, пока не нажмёте «Записать профиль в игру».">Отключить все в профиле</button>
+        </section>
       </div>
 
       <!-- вкладка «Журнал» -->
       <div class="side-pane hidden" id="paneLog">
-        <div class="log-head"><h3>Журнал</h3>
+        <div class="log-head">
+          <label class="check log-verbose"><input type="checkbox" id="verboseChk"> Подробный лог</label>
           <span class="spacer"></span>
-          <button class="icon-btn busy-ok" id="saveLogBtn" title="Сохранить журнал в файл" style="width:28px;height:26px;font-size:13px">💾</button>
-          <button class="icon-btn busy-ok" id="clearLogBtn" title="Очистить журнал" style="width:28px;height:26px;font-size:13px">🗑</button>
+          <button class="icon-btn busy-ok" id="saveLogBtn" data-icon="download" title="Сохранить журнал в файл"></button>
+          <button class="icon-btn busy-ok" id="clearLogBtn" data-icon="trash" title="Очистить журнал"></button>
         </div>
-        <div class="log" id="logBox"></div>
-        <label class="check log-verbose"><input type="checkbox" id="verboseChk"> Подробный лог</label>
+        <div class="log" id="logBox" role="log" aria-label="Журнал" aria-live="off" tabindex="0"></div>
       </div>
-
-      <div class="side-foot">
-        <span id="verBadge">SR Mods Launcher</span>
-        <span class="spacer"></span>
-        <span class="dot" id="repoDot"></span><span>репозиторий</span>
-        <span class="dot" id="tokenDot"></span><span>токен</span>
-      </div>
-    </div>
+    </aside>
   </div>
+  <footer class="statusbar">
+    <button id="verBadge" type="button" title="Настройки">SR Mods Launcher</button>
+    <span class="spacer"></span>
+    <span class="statusbar-item" id="repoStatus"><span class="dot" id="repoDot"></span><span>Репозиторий</span></span>
+    <span class="statusbar-item" id="tokenStatus"><span class="dot" id="tokenDot"></span><span>Токен GitHub</span></span>
+  </footer>
 
   <!-- МОДАЛКА: настройки -->
   <div class="overlay hidden" id="settingsOverlay">
-    <div class="modal settings-modal">
-      <h2>Настройки</h2>
+    <div class="modal settings-modal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+      <h2 id="settingsTitle">Настройки</h2>
       <div class="m-body">
         <div class="m-row">
           <label for="setLanguage">Язык / Language</label>
@@ -254,7 +260,7 @@
           </select>
         </div>
         <div class="m-row">
-          <label>Папка игры <span class="help-q" role="button" tabindex="0" title="Туда, где лежит Rangers.exe. Моды ставятся в подпапку Mods.">?</span></label>
+          <label for="setGamePath">Папка игры <span class="help-q" role="button" tabindex="0" title="Туда, где лежит Rangers.exe. Моды ставятся в подпапку Mods.">?</span></label>
           <div style="display:flex;gap:8px">
             <input id="setGamePath" style="flex:1" placeholder="например, D:\Steam\...\Space Rangers HD A War Apart">
             <button class="btn" id="setBrowseBtn">Обзор…</button>
@@ -263,7 +269,7 @@
         <div class="m-row">
           <label>Версия лаунчера <span class="help-q" role="button" tabindex="0" title="Проверить, не вышла ли новая версия лаунчера (сравнивает с релизом в репозитории).">?</span></label>
           <div style="display:flex;gap:8px;align-items:center">
-            <button class="btn" id="setUpdateBtn" type="button">🔄 Проверить обновление</button>
+            <button class="btn" id="setUpdateBtn" data-icon="refresh" type="button">Проверить обновление</button>
             <span id="setUpdateStatus" class="sub" style="margin:0"></span>
           </div>
         </div>
@@ -272,7 +278,7 @@
           <label class="check"><input type="checkbox" id="setAlwaysPlan"> Всегда показывать план перед обновлением</label>
           <label class="check"><input type="checkbox" id="setFreezeHidden"> Скрытые моды не обновлять (как 🔒)</label>
         </div>
-        <div class="m-row">
+        <div class="m-row m-row-wide">
           <label>Внешний вид <span class="help-q" role="button" tabindex="0" title="Если мелко или бледно. Размер текста — только шрифты (раскладка компактная). Масштаб — весь интерфейс. Контраст — разница текста с фоном. Поверх тёмной/светлой темы (🌙/☀). Значок ↺ — сброс параметра.">?</span></label>
           <div class="step-grid">
             <div class="step-row">
@@ -299,7 +305,7 @@
           </div>
         </div>
         <details>
-          <summary style="cursor:pointer;color:var(--muted);font-size:12.5px;margin:6px 0">Дополнительно (база, репозиторий и токен) — обычно менять не нужно</summary>
+          <summary>Дополнительно (база, репозиторий и токен) — обычно менять не нужно</summary>
           <div class="adv-grid">
           <div class="m-row">
             <label>База профиля (необязательно)</label>
@@ -351,7 +357,7 @@
 
   <!-- МОДАЛКА: подтверждение -->
   <div class="overlay hidden" id="confirmOverlay">
-    <div class="modal">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
       <h2 id="confirmTitle">Подтверждение</h2>
       <div class="m-body" id="confirmBody"></div>
       <div class="m-foot">
@@ -363,7 +369,7 @@
 
   <!-- МОДАЛКА: ввод тегов / заметки -->
   <div class="overlay hidden" id="promptOverlay">
-    <div class="modal">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="promptTitle">
       <h2 id="promptTitle">Ввод</h2>
       <div class="m-body">
         <div class="sub" id="promptHint" style="margin-bottom:6px"></div>
@@ -380,8 +386,8 @@
 
   <!-- МОДАЛКА: новый профиль -->
   <div class="overlay hidden" id="profileOverlay">
-    <div class="modal">
-      <h2>Профили модов</h2>
+    <div class="modal profile-modal" role="dialog" aria-modal="true" aria-labelledby="profileTitle">
+      <h2 id="profileTitle">Профили модов</h2>
       <div class="m-body">
         <div class="m-row">
           <label>Ваши профили</label>
@@ -390,7 +396,7 @@
         </div>
         <div class="m-row">
           <label>Пресеты — быстрый старт</label>
-          <div class="sub">Добавить в текущий профиль все моды из одной сборки. Потом — «Установить все».</div>
+          <div class="sub">Добавить в текущий профиль все моды из одной сборки. Затем нажмите «Установить моды».</div>
           <div class="preset-row" id="presetRow"></div>
         </div>
         <div class="m-row">
@@ -403,8 +409,8 @@
         </div>
       </div>
       <div class="m-foot">
-        <button class="btn" id="importProfBtn" title="Загрузить профиль из файла .json (например, присланный другим игроком)">📥 Загрузить профиль</button>
-        <button class="btn" id="openProfilesBtn" title="Открыть в проводнике папку с файлами профилей — чтобы забрать готовый профиль или положить присланный">📂 Папка профилей</button>
+        <button class="btn" id="importProfBtn" data-icon="upload" title="Загрузить профиль из файла .json (например, присланный другим игроком)">Загрузить профиль</button>
+        <button class="btn" id="openProfilesBtn" data-icon="folder" title="Открыть в проводнике папку с файлами профилей — чтобы забрать готовый профиль или положить присланный">Папка профилей</button>
         <span class="spacer"></span>
         <button class="btn" id="profCloseBtn">Закрыть</button>
       </div>
@@ -413,20 +419,20 @@
 
   <!-- МОДАЛКА: добавить мод -->
   <div class="overlay hidden" id="addOverlay">
-    <div class="modal">
-      <h2>Добавить в профиль</h2>
+    <div class="modal add-modal" role="dialog" aria-modal="true" aria-labelledby="addTitle">
+      <h2 id="addTitle">Добавить в профиль</h2>
       <div class="m-body">
-        <div class="seg" id="addModeSeg" style="margin:4px 0 10px">
-          <button data-amode="quick" class="on">⚡ Быстрый старт</button>
-          <button data-amode="search">🔎 По названию</button>
-          <button data-amode="src">🗂 Сборка → Пак → Мод</button>
-          <button data-amode="fork">🔗 По ссылке</button>
+        <div class="seg" id="addModeSeg" role="group" aria-labelledby="addTitle">
+          <button data-amode="quick" data-icon="layers" aria-pressed="true" class="on">Быстрый старт</button>
+          <button data-amode="search" data-icon="search" aria-pressed="false">По названию</button>
+          <button data-amode="src" data-icon="folder" aria-pressed="false">Сборка → Пак → Мод</button>
+          <button data-amode="fork" data-icon="link" aria-pressed="false">По ссылке</button>
         </div>
 
         <div id="addQuick">
           <div class="m-row">
             <label>Сборка целиком</label>
-            <div class="sub">Движок игры и все моды этой сборки — то, что нужно почти всем. Потом «🧩 Установить все».</div>
+            <div class="sub">Добавьте движок и моды этой сборки в профиль. Затем нажмите «Установить моды».</div>
             <div class="camp-picks" id="quickCamps"><div class="sub">Загрузка списка сборок…</div></div>
           </div>
           <label class="q-base"><input type="checkbox" id="quickWithBase" checked>
@@ -435,7 +441,7 @@
 
         <div id="addSearch">
           <div class="m-row">
-            <label>Поиск мода по названию</label>
+            <label for="addSearchInp">Поиск мода по названию</label>
             <div class="sub">Любая сборка сразу. У каждого мода — метка сборки.</div>
             <input id="addSearchInp" placeholder="начните вводить название мода…">
           </div>
@@ -444,17 +450,17 @@
 
         <div id="addSrc" style="display:none">
           <div class="m-row">
-            <label>Сборка</label>
+            <label for="addCamp">Сборка</label>
             <div class="sub">Какую ветку модов берём. Движок можно поставить только от одной сборки, моды — из любых.</div>
             <select id="addCamp"><option value="">— выберите сборку —</option></select>
           </div>
           <div class="m-row">
-            <label>Пак</label>
+            <label for="addPack">Пак</label>
             <div class="sub">«Вся сборка» — движок и все её моды. Отдельно: «Базовые файлы игры» — только движок (Rangers.exe, DATA, CFG + фиксы к базе), «Все моды сборки» — только моды. Иначе выберите конкретный пак.</div>
             <select id="addPack" disabled></select>
           </div>
           <div class="m-row">
-            <label>Мод</label>
+            <label for="addMod">Мод</label>
             <div class="sub">«Весь пак» — добавить пак целиком. Иначе — один мод из пака.</div>
             <select id="addMod" disabled></select>
           </div>
@@ -462,12 +468,12 @@
 
         <div id="addFork" style="display:none">
           <div class="m-row">
-            <label>Ссылка на дескриптор</label>
+            <label for="addUrl">Ссылка на дескриптор</label>
             <div class="sub">Прямая ссылка на файл &lt;id&gt;.json форка мода (GitHub/HF).</div>
             <input id="addUrl" placeholder="https://.../MyMod.json">
           </div>
         </div>
-        <div class="sub" id="addStatus" style="min-height:16px"></div>
+        <div class="sub" id="addStatus" role="status"></div>
       </div>
       <div class="m-foot">
         <button class="btn ghost" id="addCancelBtn">Отмена</button>
@@ -478,7 +484,7 @@
 
   <!-- МОДАЛКА: обновление (превью + конфликты) -->
   <div class="overlay hidden" id="mergeOverlay">
-    <div class="modal" style="width:560px">
+    <div class="modal info-modal" role="dialog" aria-modal="true" aria-labelledby="mergeTitle">
       <h2 id="mergeTitle">Обновление мода</h2>
       <div class="m-body">
         <div id="mergeHead"></div>
@@ -490,7 +496,7 @@
                title="Применять выбранные решения по типам конфликтов ко всем оставшимся модам этого обновления, не спрашивая по каждому">
           <input type="checkbox" id="mergeRemember"> Запомнить решения для остальных модов
         </label>
-        <button class="btn ghost" id="mergeFreezeBtn" title="Пропустить и больше не предлагать обновлять этот мод (пометка 🔒 — снимается в контекстном меню строки)">🔒 Больше не предлагать</button>
+        <button class="btn ghost" id="mergeFreezeBtn" data-icon="lock" title="Пропустить и больше не предлагать обновлять этот мод (пометка 🔒 — снимается в контекстном меню строки)">Больше не предлагать</button>
         <button class="btn ghost" id="mergeSkipBtn" title="Не применять — перейти к следующему / закончить">Пропустить</button>
         <button class="btn primary" id="mergeApplyBtn">Применить</button>
       </div>
@@ -499,7 +505,7 @@
 
   <!-- МОДАЛКА: план обновления (только просмотр, из ПКМ) -->
   <div class="overlay hidden" id="planOverlay">
-    <div class="modal plan-modal">
+    <div class="modal plan-modal" role="dialog" aria-modal="true" aria-labelledby="planTitle">
       <h2 id="planTitle" title="Потяните за заголовок, чтобы переместить окно; за правый нижний угол — изменить размер">План обновления</h2>
       <div class="m-body">
         <div id="planHead"></div>
@@ -509,7 +515,7 @@
         <span class="sub" style="margin-right:auto" id="planLegend"></span>
         <label class="check" id="planBytesWrap" style="margin:0 6px 0 0;font-size:12px;color:var(--muted);white-space:nowrap"
                title="Показывать размеры точно в байтах вместо КБ/МБ"><input type="checkbox" id="planBytes"> в байтах</label>
-        <button class="btn ghost" id="planUpdateBtn" title="Скачать и применить это обновление, сохранив ваши правки">🔀 Обновить</button>
+        <button class="btn ghost" id="planUpdateBtn" data-icon="refresh" title="Скачать и применить это обновление, сохранив ваши правки">Обновить</button>
         <button class="btn primary" id="planCloseBtn">Закрыть</button>
       </div>
     </div>
@@ -517,8 +523,8 @@
 
   <!-- МОДАЛКА: проверка совместимости -->
   <div class="overlay hidden" id="compatOverlay">
-    <div class="modal info-modal">
-      <h2>Совместимость профиля</h2>
+    <div class="modal info-modal" role="dialog" aria-modal="true" aria-labelledby="compatTitle">
+      <h2 id="compatTitle">Совместимость профиля</h2>
       <div class="m-body" id="compatBody"></div>
       <div class="m-foot">
         <button class="btn primary" id="compatCloseBtn">Закрыть</button>
@@ -529,57 +535,62 @@
 
   <!-- контекстное меню (ПКМ по моду) -->
   <div class="ctx-menu hidden" id="ctxMenu">
-    <button id="ctxOpenMod">📂 Открыть папку мода</button>
-    <button id="ctxOpenMods">📁 Открыть папку Mods</button>
+    <button id="ctxOpenMod" data-icon="folder">Открыть папку мода</button>
+    <button id="ctxOpenMods" data-icon="folder">Открыть папку Mods</button>
     <div class="mm-sep"></div>
-    <button id="ctxHide">🙈 Скрыть из списка</button>
-    <button id="ctxFreeze" title="Мод не будет попадать в проверку обновлений и в «Обновить все» — версия останется той, что стоит сейчас">🔒 Не обновлять</button>
-    <button id="ctxTags">🏷 Теги…</button>
-    <button id="ctxNote">📝 Заметка…</button>
+    <button id="ctxHide" data-icon="hidden">Скрыть из списка</button>
+    <button id="ctxFreeze" data-icon="lock" title="Сохранять эту версию мода при проверке и установке обновлений.">Не обновлять</button>
+    <button id="ctxTags" data-icon="layers">Теги…</button>
+    <button id="ctxNote" data-icon="note">Заметка…</button>
     <div class="mm-sep" id="ctxPlanSep"></div>
-    <button id="ctxPlan">📋 Посмотреть план обновления</button>
+    <button id="ctxPlan" data-icon="log">Посмотреть план обновления</button>
     <div class="mm-sep"></div>
-    <button id="ctxRemoveOne">🗑 Убрать из профиля (эту строку)</button>
-    <button id="ctxCancelAdd">✖ Отменить добавление (всё)</button>
+    <button id="ctxRemoveOne" data-icon="trash">Убрать из профиля (эту строку)</button>
+    <button id="ctxCancelAdd" data-icon="close">Отменить добавление (всё)</button>
   </div>
 
   <!-- контекстное меню журнала (ПКМ по журналу) -->
   <div class="ctx-menu hidden" id="logCtxMenu">
-    <button id="logCtxSelectAll">🅰 Выделить всё</button>
-    <button id="logCtxCopy">📋 Скопировать</button>
-    <button id="logCtxSave">💾 Сохранить в файл…</button>
-    <button id="logCtxClear">🗑 Очистить журнал</button>
+    <button id="logCtxSelectAll" data-icon="list">Выделить всё</button>
+    <button id="logCtxCopy" data-icon="note">Скопировать</button>
+    <button id="logCtxSave" data-icon="download">Сохранить в файл…</button>
+    <button id="logCtxClear" data-icon="trash">Очистить журнал</button>
   </div>
 
   <!-- МОДАЛКА: справка -->
   <div class="overlay hidden" id="helpOverlay">
-    <div class="modal info-modal">
-      <h2>Справка</h2>
+    <div class="modal help-modal" role="dialog" aria-modal="true" aria-labelledby="helpTitle">
+      <h2 id="helpTitle">Справка</h2>
       <div class="m-body">
-        <div class="note" style="border-left-color:var(--accent)">
-          Коротко о том, как пользоваться лаунчером. Полная инструкция с картинками —
-          по кнопке «Полная справка на GitHub» ниже.
-        </div>
         <div class="help-list">
-          <div class="help-item"><b>1. Папка игры.</b> Укажите папку, где лежит Rangers.exe
-            (клик по адресу игры в шапке или в Настройках). Моды ставятся в подпапку Mods.</div>
-          <div class="help-item"><b>2. Профиль.</b> Это сохранённый набор модов. Держите несколько
-            и переключайтесь селектором «Профиль» в шапке; кнопка ＋ — создать/удалить.</div>
-          <div class="help-item"><b>3. Добавить мод.</b> Кнопка «➕ Добавить мод»: искать по названию,
-            выбрать по цепочке Сборка → Пак → Мод, или добавить по ссылке. Можно добавить целую сборку.</div>
-          <div class="help-item"><b>4. Установить.</b> «🧩 Установить все» скачивает и ставит моды профиля.
-            Галочка «В профиле» у строки включает/выключает мод.</div>
-          <div class="help-item"><b>5. Обновления.</b> «⟳ Проверить обновления» сверяет ваши моды
-            с сервером, «🔀 Обновить все» скачивает новые версии, сохраняя ваши ручные правки.</div>
-          <div class="help-item"><b>6. База.</b> Селектор «База» — с каким сборником сверяться при
-            обновлениях. Оставьте «авто», если не уверены; 🎯 — определить сейчас по файлам в Mods.</div>
-          <div class="help-item"><b>7. Играть.</b> Кнопка «▶ Играть» запускает Space Rangers HD.
-            Панель справа синхронизирует список подключённых в игре модов (ModCFG) с профилем.</div>
+          <section class="help-item">
+            <div><h3>Папка игры</h3><p>Нажмите на путь к игре в шапке и выберите папку с Rangers.exe.</p></div>
+            <button class="btn" data-help-target="gamePath">Выбрать папку игры</button>
+          </section>
+          <section class="help-item">
+            <div><h3>Профили модов</h3><p>Откройте управление профилями кнопкой с плюсом рядом со списком «Профиль».</p></div>
+            <button class="btn" data-help-target="profileMenuBtn">Открыть профили</button>
+          </section>
+          <section class="help-item">
+            <div><h3>Добавить в профиль</h3><p>Нажмите «Добавить мод» над списком. В открывшемся окне найдите мод или выберите целую сборку.</p></div>
+            <button class="btn" id="helpOpenAdd" data-help-target="addBtn">Открыть добавление</button>
+          </section>
+          <section class="help-item">
+            <div><h3>Установка и обновление</h3><p>«Установить моды» скачивает моды из профиля. Для обновления сначала нажмите «Проверить обновления», затем «Обновить моды».</p></div>
+            <button class="btn" data-help-target="modActions" data-help-focus>Показать кнопки</button>
+          </section>
+          <section class="help-item">
+            <div><h3>Базовая сборка</h3><p>Задайте сборку для проверки обновлений. «Авто» определяет её по файлам в папке Mods.</p></div>
+            <button class="btn" data-help-target="settingsBtn">Открыть настройки</button>
+          </section>
+          <section class="help-item">
+            <div><h3>Запуск игры</h3><p>Нажмите «Играть» в правом верхнем углу. Вкладка «Игра» позволяет перенести список подключённых модов между профилем и игрой.</p></div>
+          </section>
         </div>
       </div>
       <div class="m-foot">
-        <button class="btn" id="helpTourBtn" title="Показать обучающий тур по интерфейсу">🎓 Пройти обучение</button>
-        <button class="btn" id="helpGitBtn" title="Открыть полную инструкцию в браузере">🌐 Полная справка на GitHub</button>
+        <button class="btn" id="helpTourBtn" data-icon="guide" title="Показать обучающий тур по интерфейсу">Пройти обучение</button>
+        <button class="btn" id="helpGitBtn" data-icon="link" title="Открыть полную инструкцию в браузере">Полная справка на GitHub</button>
         <span class="spacer"></span>
         <button class="btn primary" id="helpCloseBtn">Закрыть</button>
       </div>
@@ -589,12 +600,11 @@
   <!-- ПЕРВЫЙ ЗАПУСК: настройка читаемости ДО обучающего тура (новичок с нечитаемым
        текстом не сможет прочитать сам тур из 17 шагов) -->
   <div class="overlay hidden" id="firstRunOverlay">
-    <div class="modal info-modal">
-      <h2>👋 Добро пожаловать</h2>
+    <div class="modal info-modal" role="dialog" aria-modal="true" aria-labelledby="firstRunTitle">
+      <div class="game-banner first-run-banner"><h2 id="firstRunTitle">Добро пожаловать</h2></div>
       <div class="m-body">
         <div class="note" style="border-left-color:var(--accent)">
-          Если текст мелкий или бледный — настройте читаемость сейчас, чтобы обучающий тур
-          было удобно читать. Эти же настройки всегда доступны в ⚙ Настройках.
+          Настройте размер текста, масштаб и контраст. Позже их можно изменить в настройках.
         </div>
         <div class="step-grid" style="margin-top:12px">
           <div class="step-row">

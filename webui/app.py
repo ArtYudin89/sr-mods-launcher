@@ -20,6 +20,8 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
+import psutil
+import requests
 import webview
 
 # Пути: в dev — относительно репозитория; в frozen (.exe) — ресурсы из бандла
@@ -100,8 +102,13 @@ IS_RWT = bool(EMBEDDED_TOKEN)
 # из репозитория ({version, url?, notes?}). url можно оставить пустым — тогда показ без
 # ссылки на скачивание (просто «доступна новая версия»).
 # ВНИМАНИЕ: при релизе выставить реальный следующий номер (текущий публичный > 0.13.1).
-LAUNCHER_VERSION = '0.29.0'
+LAUNCHER_VERSION = '0.30.0'
 RELEASE_REF = 'state/launcher_release.json'
+# Use the published archive and digest together. The archive includes native game files.
+XENOMODS_VERSION = '1.1.0'
+XENOMODS_RELEASE_URL = ('https://github.com/Xenomorphchyma/XenoMods/releases/download/'
+                       f'v{XENOMODS_VERSION}/XenoMods-{XENOMODS_VERSION}.zip')
+XENOMODS_SHA256 = '3785eb433c4776fe477ba79219b10b29081f0a186ea61636d274504834dfd0fb'
 # Ссылка на полную справку в репозитории (ИНСТРУКЦИЯ-ПРОСТАЯ.md, имя в percent-encoding —
 # кириллица в пути; так браузер откроет её без ручного кодирования).
 HELP_URL = ('https://github.com/ArtYudin89/sr-mods-launcher/blob/master/'
@@ -276,6 +283,7 @@ class Api:
         self.profile['mods'] = []          # очередь — сессионная (как в старом GUI)
         # рантайм-состояние
         self.busy = False
+        self._game_launch_lock = threading.Lock()
         self._cancel = threading.Event()
         self._paused = threading.Event()   # ⏸ пауза операции (гейт в should_cancel)
         self._chunk_prog = {}              # chunk -> доля скачанного (плавная полоса)
@@ -864,6 +872,7 @@ class Api:
         return {'ok': True}
 
     def _check_updates_worker(self):
+        error = False
         try:
             mods_dir = self._mods_dir()
             cat = self._catalog_for(self._repo(), self._token())
@@ -896,7 +905,8 @@ class Api:
             order = self._update_order()
             if not order:
                 self.log('Не удалось понять, из какой сборки моды, — сравнивать не с чем.')
-                self._finish_check(); return
+                self._finish_check('Не удалось определить базовую сборку.', error=True)
+                return
             self.vlog('Сборки смотрю в таком порядке: '
                       + ' → '.join(camp_title(c) for c in order)
                       + '. Мод сверяю с первой сборкой списка, где он есть.')
@@ -912,10 +922,13 @@ class Api:
             # доступные на сервере блобы: файлы, которых нет на HF, скачать нельзя →
             # не считаем их обновлением (иначе вечный ложный «⬆ обновление»)
             avail = set()
+            complete = bool(cat)
             try:
                 cidx = core.load_chunk_index(repo=self._repo(), token=self._token())
                 avail |= set(cidx.get('blobs', {}))
+                complete = complete and bool(avail)
             except Exception as e:
+                complete = False
                 self.vlog(f'⚠ не удалось получить список файлов, лежащих на сервере '
                           f'раздачи ({e}) — часть обновлений могу не увидеть')
             # блобы форк-хотфиксов: файл с таким целевым sha — намеренный фикс, а не
@@ -1016,6 +1029,7 @@ class Api:
                 if pm.get('type') == 'desc':
                     pm['update_available'] = bool(pm.get('id') in ups)
             if ups:
+                status = f'Доступны обновления: {len(ups)}'
                 self.log(f'Проверка закончена: обновить можно {len(ups)} '
                          f'{core.plural_mods(len(ups))}.')
                 # по сборкам: «сколько из установленных модов этой сборки ждут обновления»
@@ -1033,15 +1047,23 @@ class Api:
                              f'установленных модов ждут обновления')
                     self.vlog(f'{camp_title(c)} — обновить: ' + ', '.join(lst))
             else:
-                self.log('Проверка закончена: все моды свежие, обновлять нечего.')
+                status = 'Обновлений не найдено.'
+            if not complete:
+                status = 'Проверка завершена частично. Подробности в журнале.'
+                error = True
+            if not complete or not ups:
+                self.log(status)
             self._emit('tree_dirty')
         except core.OperationCancelled:
-            self.log('Проверка обновлений отменена.')
+            status = 'Проверка обновлений отменена.'
+            self.log(status)
         except Exception as e:
+            status = 'Не удалось проверить обновления.'
+            error = True
             self.log('Не удалось проверить обновления. Проверьте подключение к интернету '
                      'и попробуйте ещё раз.')
             self.vlog(f'Что именно сломалось (это строка для разработчика): {e}')
-        self._finish_check()
+        self._finish_check(status, error)
 
     def _camp_of_disk_mod(self, mid, cat, src_by_base, order):
         """Какой сборке принадлежит мод, лежащий в игре. ТОЛЬКО для сводки в журнале
@@ -1079,9 +1101,9 @@ class Api:
                      f'— их нет в каталоге сборок (поставлены вручную или сняты с раздачи).')
             self.vlog('Не опознаны: ' + ', '.join(sorted(other)))
 
-    def _finish_check(self):
+    def _finish_check(self, status, error=False):
         self.busy = False
-        self._emit('op_end', {'status': 'Готово'})
+        self._emit('op_end', {'status': status, 'error': error})
 
     def set_base(self, camp):
         """Задать базу сборки вручную (селектор в панели). '' = авто (sha-детект по диску).
@@ -1327,6 +1349,7 @@ class Api:
         return {
             'theme': self.config.get('theme', 'dark'),
             'language': self.config.get('language', 'ru'),
+            'interface_mode': 'classic' if self.config.get('interface_mode') == 'classic' else 'remaster',
             'add_selection': self.config.get('add_selection', {}),
             'tree_mode': self.config.get('tree_mode', 'folder'),
             'name_mode': self.config.get('name_mode', 'folder'),
@@ -1340,9 +1363,13 @@ class Api:
             'forks': self._forks_public(),
             'is_rwt': IS_RWT,
             'version': LAUNCHER_VERSION,
+            'xenomods_version': XENOMODS_VERSION,
             'busy': self.busy,
             'tutorial_done': self.config.get('tutorial_done', False),
             'rail_collapsed': self.config.get('rail_collapsed', False),
+            'simple_view': self.config.get('simple_view', False),
+            'side_collapsed': self.config.get('side_collapsed', False),
+            'simple_side_collapsed': self.config.get('simple_side_collapsed', True),
             'always_show_plan': self.config.get('always_show_plan', False),
             'show_hidden': self.config.get('show_hidden', False),
             'freeze_hidden': self.config.get('freeze_hidden', False),
@@ -2971,6 +2998,32 @@ class Api:
         self._save_config()
         return True
 
+    def set_simple_view(self, enabled):
+        self.config['simple_view'] = bool(enabled)
+        self._save_config()
+        return True
+
+    def set_interface_mode(self, mode):
+        if mode not in ('classic', 'remaster'):
+            return False
+        previous = self.config.get('interface_mode')
+        self.config['interface_mode'] = mode
+        try:
+            self._save_config()
+        except OSError:
+            if previous is None:
+                self.config.pop('interface_mode', None)
+            else:
+                self.config['interface_mode'] = previous
+            return False
+        return True
+
+    def set_side_collapsed(self, collapsed, simple_view):
+        key = 'simple_side_collapsed' if simple_view else 'side_collapsed'
+        self.config[key] = bool(collapsed)
+        self._save_config()
+        return True
+
     def set_always_show_plan(self, v):
         """«Всегда показывать план обновления» (выключает тихий режим). ВКЛ → окно-план
         всплывает даже для бесконфликтного апдейта (для тех, кто хочет видеть детали)."""
@@ -3181,6 +3234,24 @@ class Api:
         return {'ok': True}
 
     # ───────── действия ─────────
+    @staticmethod
+    def _game_is_running(exe):
+        target = os.path.normcase(os.path.realpath(exe))
+        for process in psutil.process_iter(['name']):
+            if (process.info['name'] or '').casefold() != exe.name.casefold():
+                continue
+            try:
+                path = psutil.Process(process.pid).exe()
+                if path and os.path.normcase(os.path.realpath(path)) == target:
+                    return True
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+        return False
+
+    def get_game_status(self):
+        root = self._game_root()
+        return {'running': root is not None and self._game_is_running(root / 'Rangers.exe')}
+
     def launch_game(self):
         root = self._game_root()
         if not root:
@@ -3189,8 +3260,13 @@ class Api:
         if not exe.exists():
             return {'ok': False, 'error': f'Не найден Rangers.exe в {root}.'}
         try:
-            subprocess.Popen([str(exe)], cwd=str(root))
-            return {'ok': True}
+            with self._game_launch_lock:
+                if self.busy:
+                    return {'ok': False, 'error': 'Уже идёт операция.'}
+                if self._game_is_running(exe):
+                    return {'ok': True, 'running': True, 'already_running': True}
+                game = subprocess.Popen([str(exe)], cwd=str(root))
+                return {'ok': True, 'running': game.poll() is None}
         except Exception as e:
             return {'ok': False, 'error': str(e)}
 
@@ -3596,6 +3672,55 @@ class Api:
         if t == 'desc':
             return False
         return not (t == 'unit' and m.get('mod') and m.get('mod') != BASE_MOD)
+
+    def install_xenomods(self):
+        with self._game_launch_lock:
+            if self.busy:
+                return {'ok': False, 'error': 'Уже идёт операция.'}
+            error = self._require_game()
+            if error:
+                return {'ok': False, 'error': error}
+            mods_dir = self._mods_dir()
+            exe = mods_dir.parent / 'Rangers.exe'
+            if not exe.is_file():
+                return {'ok': False, 'error': f'Не найден Rangers.exe в {exe.parent}.'}
+            if self._game_is_running(exe):
+                return {'ok': False, 'error': 'Закройте игру перед установкой XenoMods.'}
+            self.busy = True
+        self._cancel.clear()
+        self._begin_op()
+        self._emit('op_begin', {'name': 'Установка XenoMods'})
+        threading.Thread(target=self._install_xenomods_worker, args=(mods_dir,), daemon=True).start()
+        return {'ok': True}
+
+    def _install_xenomods_worker(self, mods_dir):
+        error = False
+        try:
+            with tempfile.TemporaryDirectory(dir=self._download_dir(), prefix='xenomods-') as scratch:
+                archive = Path(scratch) / 'XenoMods.zip'
+                self.log(f'Скачиваю XenoMods {XENOMODS_VERSION} со страницы релиза автора…')
+                try:
+                    core.download_url(XENOMODS_RELEASE_URL, None, archive, self._progress,
+                                      self.should_cancel)
+                except requests.RequestException:
+                    raise RuntimeError('Не удалось скачать архив со страницы релиза автора.') from None
+                if self._game_is_running(mods_dir.parent / 'Rangers.exe'):
+                    raise RuntimeError('Закройте игру перед установкой XenoMods.')
+                files = core.install_verified_zip(archive, mods_dir, XENOMODS_SHA256,
+                                                  self.should_cancel, docs_dir='XenoMods')
+                status = 'XenoMods установлены.' if files else 'XenoMods уже установлены.'
+                self.log(status)
+        except core.OperationCancelled:
+            status = 'Установка XenoMods отменена.'
+            self.log(status)
+        except Exception as exc:
+            status = 'Не удалось установить XenoMods. Подробности в журнале.'
+            error = True
+            self.log(f'XenoMods: {exc}')
+        finally:
+            self.busy = False
+        self._emit('op_end', {'status': status, 'error': error})
+        self._emit('tree_dirty')
 
     def _addons_after_install(self, mods_dir, tok, done, plan=None):
         """После установки: файлы игры паков по выбору — поверх сборки. Нужны паки этой
@@ -5191,16 +5316,17 @@ class Api:
                         conflicts.append(pair)
         return {'deps': deps_out, 'conflicts': conflicts}
 
-    def refresh_remote(self):
+    def refresh_remote(self, extra=None):
         """Кнопка ⟳: сбросить кэши, перетянуть каталог с GitHub И запустить пофайловую
         проверку обновлений (хеши диска ↔ опубликованные манифесты, фоном)."""
+        if self.busy or self._game_root() is None:
+            return self.check_updates()
         self._invalidate_remote_cache()    # каталог/packs/форки/опубликованные/обновления
         self._descs = {}
         self._sections = {}
         self._names = {}
         self._lazy_load_catalog()
-        self.check_updates()               # фоновая сверка → бейджи «⬆ обновление»
-        return {'ok': True, 'checking': True}
+        return self.check_updates(extra)  # сохранить порядок до фоновой сверки
 
 
 def main():

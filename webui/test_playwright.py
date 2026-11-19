@@ -41,6 +41,7 @@ def _mock_state():
         'forks': [],
         'is_rwt': False,
         'version': '0.15.4',
+        'xenomods_version': '1.1.0',
         'busy': False,
         'desc_in_list': True,
         'show_hidden': True,
@@ -90,10 +91,8 @@ def _mock_tree():
             'queued', '➕ добавлен', in_profile=True,
             section='Сюжет', labels=['redux', 'universe'],
             variants=[
-                {'id': 'Polaria/PolariaCampaign', 'source': 'redux/redux_base_installer',
-                 'camp': 'redux', 'label': 'Pol-Redux'},
-                {'id': 'Polaria/PolariaCampaign@Shu', 'source': 'universe/universe_community',
-                 'camp': 'universe', 'label': 'Pol-Universe'},
+                {'key': 'redux', 'name': 'Pol-Redux', 'camps': ['redux']},
+                {'key': 'universe', 'name': 'Pol-Universe', 'camps': ['universe']},
             ], chosen='redux'),
     ]
 
@@ -1212,7 +1211,7 @@ def scenario_help_pause_freeze(page, base_url):
     # (2) пауза: кнопка меняет надпись по событию op_paused, полоса гаснет
     page.evaluate("window.__emit('op_begin', {name: 'Установка'})")
     check('кнопка паузы видна во время операции',
-          page.eval_on_selector('#pauseBtn', 'e => e.textContent').strip().startswith('⏸'))
+          page.locator('#pauseBtn').is_visible() and page.text_content('#pauseBtn') == 'Пауза')
     check('поиск НЕ заблокирован во время операции',
           page.eval_on_selector('#searchInp', 'e => !e.disabled'))
     check('настройки доступны во время операции',
@@ -1221,12 +1220,12 @@ def scenario_help_pause_freeze(page, base_url):
           page.eval_on_selector('#installBtn', 'e => e.disabled'))
     page.evaluate("window.__emit('op_paused', {paused: true})")
     check('на паузе кнопка предлагает продолжить',
-          '▶' in page.eval_on_selector('#pauseBtn', 'e => e.textContent'))
+          page.text_content('#pauseBtn') == 'Продолжить')
     check('полоса помечена паузой',
           page.eval_on_selector('#progBar', "e => e.classList.contains('paused')"))
     page.evaluate("window.__emit('op_paused', {paused: false})")
-    check('снятие паузы возвращает «⏸ Пауза»',
-          '⏸' in page.eval_on_selector('#pauseBtn', 'e => e.textContent'))
+    check('снятие паузы возвращает «Пауза»',
+          page.text_content('#pauseBtn') == 'Пауза')
     page.evaluate("window.__emit('op_end', {status: 'Готово'})")
 
     # (3) пункт меню «не обновлять» на строке мода
@@ -1235,8 +1234,8 @@ def scenario_help_pause_freeze(page, base_url):
         leaves.first.click(button='right')
         page.wait_for_selector('#ctxMenu:not(.hidden)', timeout=2000)
         shot(page, '13_ctx_freeze')
-        check('в меню есть «🔒 Не обновлять»',
-              '🔒' in page.eval_on_selector('#ctxFreeze', 'e => e.textContent'))
+        check('в меню есть «Не обновлять»',
+              'Не обновлять' in page.text_content('#ctxFreeze'))
         check('пункт виден для мода',
               page.eval_on_selector('#ctxFreeze', "e => e.style.display !== 'none'"))
         page.keyboard.press('Escape')
@@ -1369,6 +1368,179 @@ def scenario_confirm_layer_and_quickstart(page, base_url):
           page.locator('#confirmOverlay').evaluate("e => e.classList.contains('hidden')"))
 
 
+def scenario_launcher_feedback(page, base_url):
+    print('\n=== Сц.15: вид, панель, запуск, обновления и XenoMods ===')
+    site_state = _mock_state()
+    game = {'running': False}
+    called = []
+    update_checked = False
+
+    def tree(_args):
+        result = _mock_tree()
+        if update_checked:
+            return result
+        for camp in result['camps']:
+            for mod in camp['mods'] + [m for pack in camp['packs'] for m in pack['mods']]:
+                if mod['status_class'] == 'upd':
+                    mod.update(status_class='ok', status='✅ установлен')
+        return result
+
+    previous = dict(MOCK_DISPATCH)
+    MOCK_DISPATCH.update({
+        'get_state': lambda args: site_state,
+        'get_tree': tree,
+        'set_simple_view': lambda args: site_state.update(simple_view=args[0]) or True,
+        'set_side_collapsed': lambda args: site_state.update({
+            ('simple_side_collapsed' if args[1] else 'side_collapsed'): args[0]}) or True,
+        'get_game_status': lambda args: game,
+        'launch_game': lambda args: game.update(running=True) or {'ok': True, 'running': True},
+        'refresh_remote': lambda args: called.append('check') or {'ok': True},
+        'start_merge': lambda args: called.append('merge') or {'ok': True},
+        'get_all_mods': lambda args: {'ok': False, 'error': 'Каталог недоступен'},
+        'install_xenomods': lambda args: called.append('xenomods') or {'ok': True},
+    })
+    try:
+        page.set_viewport_size({'width': 960, 'height': 640})
+        init_page(page, base_url)
+        panel = page.locator('#gameSidePanel')
+        panel.wait_for(state='visible')
+        page.locator('#sideToggle').click()
+        panel.wait_for(state='hidden')
+        check('сворачивание правой панели меняет aria-expanded',
+              page.locator('#sideToggle').get_attribute('aria-expanded') == 'false')
+        page.locator('#simpleViewBtn').click()
+        page.locator('body.simple-view').wait_for()
+        check('упрощение скрывает панель фильтров и служебные колонки',
+              page.locator('#filterRail').is_hidden() and
+              page.locator('.tree-wrap .tree-head > :nth-child(3)').is_hidden())
+        shot(page, '15a_simple_960')
+        page.locator('#sideToggle').click()
+        panel.wait_for(state='visible')
+        init_page(page, base_url)
+        check('упрощённый вид и правая панель сохранены после перезагрузки',
+              page.locator('body.simple-view').count() == 1 and panel.is_visible())
+        page.locator('#simpleViewBtn').click()
+        panel.wait_for(state='hidden')
+        check('настройка панели полного вида сохранилась', site_state['side_collapsed'])
+        group = page.locator('#modActions')
+        controls = [group.locator(f'#{name}') for name in ('installBtn', 'mergeBtn', 'refreshBtn')]
+        boxes = [control.bounding_box() for control in controls]
+        check('установка, обновление и проверка рядом в полном виде на ширине 960',
+              all(boxes) and all(abs(box['y'] - boxes[0]['y']) < 4 for box in boxes))
+
+        check('установка обновлений недоступна, пока они не найдены', page.locator('#mergeBtn').is_disabled())
+        page.locator('#refreshBtn').click()
+        page.wait_for_function("!document.getElementById('refreshBtn').disabled")
+        check('проверка сама не запускает установку', called == ['check'])
+        update_checked = True
+        page.evaluate("window.__emit('tree_dirty')")
+        page.wait_for_function("!document.getElementById('mergeBtn').disabled")
+        page.locator('#mergeBtn').click()
+        page.wait_for_load_state('networkidle')
+        check('отдельная кнопка запускает установку найденных обновлений', called == ['check', 'merge'])
+
+        row = page.locator('#treeBody .row.leaf').first
+        toggle = row.locator('.row-check')
+        box = toggle.bounding_box()
+        check('область галочки не меньше 30 на 26', box['width'] >= 30 and box['height'] >= 26)
+        page.mouse.click(box['x'] + 2, box['y'] + 3)
+        check('клик у края выбирает мод', row.get_attribute('aria-selected') == 'true')
+
+        page.locator('#launchBtn').click()
+        page.wait_for_function("document.getElementById('launchBtn').textContent === 'Запущено'")
+        check('запущенную игру нельзя запустить повторно', page.locator('#launchBtn').is_disabled())
+        game['running'] = False
+        page.wait_for_function("!document.getElementById('launchBtn').disabled", timeout=5000)
+        game['running'] = True
+        page.wait_for_function("document.getElementById('launchBtn').textContent === 'Запущено'", timeout=5000)
+        check('опрос видит запуск вне лаунчера', page.locator('#launchBtn').is_disabled())
+
+        page.locator('#addBtn').click()
+        page.locator('#addModeSeg [data-amode="search"]').click()
+        page.locator('#addSearchInp').fill('xenomods')
+        page.get_by_role('button', name='XenoMods 1.1.0', exact=False).click()
+        check('архив автора виден при недоступном каталоге', page.locator('#addOkBtn').inner_text() == 'Установить…')
+        page.locator('#addOkBtn').click()
+        page.locator('#confirmBody').wait_for(state='visible')
+        check('есть подтверждение перед загрузкой архива', 'xenomods' not in called)
+        shot(page, '15b_xenomods_confirm')
+        page.locator('#confirmOk').click()
+        page.locator('#addOverlay').wait_for(state='hidden')
+        check('подтверждение запустило установку архива автора', called.count('xenomods') == 1)
+    finally:
+        MOCK_DISPATCH.clear()
+        MOCK_DISPATCH.update(previous)
+
+
+def scenario_help_navigation(page, base_url):
+    """Reference actions open the real dialog or focus the real controls."""
+    init_page(page, base_url)
+    for target, dialog in (
+        ('profileMenuBtn', 'profileOverlay'),
+        ('addBtn', 'addOverlay'),
+        ('settingsBtn', 'settingsOverlay'),
+    ):
+        page.locator('#helpBtn').click()
+        page.locator(f'[data-help-target="{target}"]').click()
+        page.locator(f'#{dialog} .modal').wait_for()
+        check(f'справка открывает {dialog}', page.locator('#helpOverlay').is_hidden())
+        page.keyboard.press('Escape')
+        page.locator(f'#{dialog}').wait_for(state='hidden')
+    page.locator('#helpBtn').click()
+    page.locator('[data-help-target="modActions"]').click()
+    check('справка показывает группу установки и обновления',
+          page.evaluate("document.activeElement.id === 'modActions'"))
+
+
+def scenario_interface_switch(page, base_url):
+    """The release layout can be switched live and the preference is restored."""
+    state = _mock_state()
+    previous = dict(MOCK_DISPATCH)
+
+    def save_mode(args):
+        state['interface_mode'] = args[0]
+        return True
+
+    MOCK_DISPATCH.update({
+        'get_state': lambda args: dict(state),
+        'set_interface_mode': save_mode,
+    })
+    try:
+        init_page(page, base_url)
+        button = page.locator('#interfaceBtn')
+        root = page.locator('html')
+        check('старые настройки открывают ремастер', root.get_attribute('data-interface') == 'remaster')
+        check('установка и обновление в одной группе',
+              page.locator('#modActions #installBtn, #modActions #mergeBtn, #modActions #refreshBtn').count() == 3)
+        row = page.locator('#treeBody .row.leaf').first
+        search = row.get_attribute('data-mid').split('/')[-1]
+        page.locator('#searchInp').fill(search)
+        row.locator('.row-check').click()
+        page.locator('#tabLog').click()
+        page.evaluate("window.__emit('log', 'Запись для проверки переключения')")
+        button.focus()
+        page.keyboard.press('Enter')
+        page.locator('html[data-interface="classic"]').wait_for()
+        check('фокус остаётся на переключателе', button.evaluate('el => el === document.activeElement'))
+        check('профиль в шапке классического вида', page.locator('#appBar #profileControl').count() == 1)
+        check('поиск сохраняется при переключении', page.locator('#searchInp').input_value() == search)
+        check('выбор строки сохраняется', row.locator('.row-check').get_attribute('aria-pressed') == 'true')
+        check('открытый журнал сохраняется', page.locator('#paneLog').is_visible()
+              and 'Запись для проверки переключения' in page.locator('#logBox').inner_text())
+        page.set_viewport_size({'width': 960, 'height': 760})
+        page.locator('#contextBar #profileControl').wait_for()
+        check('переключатель виден в узком классическом окне', button.is_visible())
+        init_page(page, base_url)
+        check('выбор классического вида восстанавливается',
+              root.get_attribute('data-interface') == 'classic')
+        button.click()
+        page.locator('html[data-interface="remaster"]').wait_for()
+        check('возврат в ремастер сохранён', state.get('interface_mode') == 'remaster')
+    finally:
+        MOCK_DISPATCH.clear()
+        MOCK_DISPATCH.update(previous)
+
+
 def main():
     print('Запуск mock-сервера…')
     srv, base_url = start_server(17777)
@@ -1396,6 +1568,9 @@ def main():
             scenario_plan_filter_tree,
             scenario_help_pause_freeze,
             scenario_confirm_layer_and_quickstart,
+            scenario_launcher_feedback,
+            scenario_help_navigation,
+            scenario_interface_switch,
         ]
 
         for sc in scenarios:

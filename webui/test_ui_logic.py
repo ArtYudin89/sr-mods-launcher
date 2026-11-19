@@ -1,7 +1,10 @@
 """Уровень-1 ассерты: гоняем реальные методы Api как кнопки, сверяем ОЖИДАНИЕ vs ФАКТ.
 Песочница: профиль/конфиг НЕ пишем на диск (стабим _save_*), сеть не трогаем (стабим
 worker'ы и inject-им фейковый каталог/packs). Запуск: python test_ui_logic.py"""
-import sys, types, threading, time
+import json, sys, types, threading, time
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
+from zipfile import ZipFile
 sys.path.insert(0, r'C:\claude_sandbox\sr-mods-launcher\webui')
 import app
 
@@ -829,6 +832,82 @@ try:
     check('у движка — как раньше', app.BASE_MOD_LABEL, um2[0]['name'])
 finally:
     core.list_unit_mods = _orig_lum
+
+print('\n=== Вид интерфейса и состояние запуска ===')
+a = fresh_api()
+a.config = {}
+a.set_side_collapsed(True, False)
+a.set_simple_view(True)
+a.set_side_collapsed(False, True)
+check('положение панели хранится отдельно для двух видов',
+      {'side_collapsed': True, 'simple_view': True, 'simple_side_collapsed': False}, a.config)
+with TemporaryDirectory() as scratch:
+    config_file = Path(scratch) / 'config.json'
+    del a._save_config
+    with patch.object(app, 'CONFIG_FILE', config_file):
+        check('классический интерфейс сохраняется', True, a.set_interface_mode('classic'))
+        check('неизвестный интерфейс отклоняется', False, a.set_interface_mode('unknown'))
+        saved = json.loads(config_file.read_text(encoding='utf-8'))
+        check('интерфейс на диске сохраняется отдельно от упрощённого вида',
+              ('classic', True), (saved['interface_mode'], saved['simple_view']))
+        with patch.object(a, '_save_config', side_effect=OSError('read-only')):
+            check('ошибка сохранения сообщается в интерфейс', False, a.set_interface_mode('remaster'))
+        check('при ошибке сохраняется действующий интерфейс', 'classic', a.config['interface_mode'])
+    a._save_config = lambda: None
+with TemporaryDirectory() as scratch:
+    exe = Path(scratch) / 'Rangers.exe'
+    exe.touch()
+    a.profile['game_path'] = str(exe.parent)
+    a._game_launch_lock = threading.Lock()
+    other = str(exe.parent / 'other' / exe.name)
+    process = types.SimpleNamespace(info={'name': 'rangers.EXE'}, pid=17)
+    with patch.object(app.psutil, 'process_iter', return_value=[process]), \
+            patch.object(app.psutil, 'Process') as open_process, \
+            patch.object(app.subprocess, 'Popen') as launch:
+        open_process.return_value.exe.return_value = other
+        check('одноимённый процесс из другой папки не засчитывается', False, a.get_game_status()['running'])
+        launch.return_value.poll.return_value = None
+        check('запуск возвращает состояние процесса', True, a.launch_game()['running'])
+        open_process.return_value.exe.return_value = str(exe)
+        check('процесс из выбранной папки засчитывается', True, a.get_game_status()['running'])
+        check('повторный запуск запущенной игры не создаёт процесс', True, a.launch_game()['already_running'])
+        check('число запусков', 1, launch.call_count)
+
+print('\n=== Архив автора: проверка SHA-256, конфликт и повторная установка ===')
+with TemporaryDirectory() as scratch:
+    root = Path(scratch)
+    archive = root / 'release.zip'
+    with ZipFile(archive, 'w') as output:
+        output.writestr('Mods/XenoMods/Example/ModuleInfo.txt', 'mod')
+        output.writestr('dsound.dll', b'loader')
+        output.writestr('LICENSE', 'author notice')
+    digest = core.file_sha256(archive)
+    mods = root / 'game' / 'Mods'
+    mod = mods / 'XenoMods' / 'Example' / 'ModuleInfo.txt'
+    loader = mods.parent / 'dsound.dll'
+    loader.parent.mkdir()
+    for expected_sha, existing in [('0' * 64, b'loader'), (digest, b'Solar loader')]:
+        loader.write_bytes(existing)
+        try:
+            core.install_verified_zip(archive, mods, expected_sha, lambda: False, docs_dir='XenoMods')
+            rejected = False
+        except ValueError:
+            rejected = True
+        check('при ошибке архив отклонён до записи модов', (True, False, existing),
+              (rejected, mod.exists(), loader.read_bytes()))
+    loader.unlink()
+    try:
+        core.install_verified_zip(archive, mods, digest, mod.exists, docs_dir='XenoMods')
+        cancelled = False
+    except core.OperationCancelled:
+        cancelled = True
+    check('при отмене записанные этой попыткой файлы удалены', (True, False, False),
+          (cancelled, mod.exists(), loader.exists()))
+    check('чистая установка, включая уведомление автора', 3,
+          core.install_verified_zip(archive, mods, digest, lambda: False, docs_dir='XenoMods'))
+    check('повтор использует совпадающие файлы', 0,
+          core.install_verified_zip(archive, mods, digest, lambda: False, docs_dir='XenoMods'))
+    check('уведомление автора сохранено', 'author notice', (mods / 'XenoMods' / 'LICENSE').read_text())
 
 print(f'\n===== ИТОГ: PASS={len(PASS)}  FAIL={len(FAIL)} =====')
 if FAIL:
